@@ -1,0 +1,4 @@
+<resources>
+    <!-- Base theme; Compose supplies the actual Material3 colors at runtime. -->
+    <style name="Theme.OpenZeekr" parent="android:Theme.Material.NoActionBar" />
+</resources>
