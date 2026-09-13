@@ -1,15 +1,18 @@
 package com.openzeekr.app.config
 
+import com.openzeekr.app.BuildConfig
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
  * All runtime configuration for the app.
  *
- * IMPORTANT: none of the six extracted secrets are baked into source. They live
- * only here and are persisted by [ConfigStore] into EncryptedSharedPreferences,
- * or imported/exported as JSON. The JSON field names mirror the existing
- * `zeekr_secrets.json` so an existing dump imports verbatim.
+ * IMPORTANT: no secret is hardcoded in source. Values may be BAKED at build time
+ * from a gitignored `secrets.properties` (exposed via BuildConfig and seeded by
+ * [ConfigStore.seedFromBuildDefaults] on first run) so local builds are
+ * preconfigured while the repo stays clean; at runtime they live only in
+ * EncryptedSharedPreferences, or are imported/exported as JSON. The JSON field
+ * names mirror the existing `zeekr_secrets.json` so a dump imports verbatim.
  *
  * The "six secrets" (see reversing notes):
  *   static (from the key extractor, --region EU):
@@ -29,28 +32,46 @@ data class SecretsConfig(
     @SerialName("prod_secret") val prodSecret: String = "",
     @SerialName("vin_key") val vinKey: String = "",
     @SerialName("vin_iv") val vinIv: String = "",
+    /** HF/xchanger (ECARX) HMAC-SHA1 signing key = NativeSecretLib.getTSPSecretValue("EU","ONLINE"). */
+    @SerialName("xchanger_sign_secret") val xchangerSignSecret: String = "",
 
     // ---- account / vehicle ----
     val email: String = "",
     val password: String = "",
     val vin: String = "",
+    /** Numeric account id (IOVContext.getUserId), Frida-confirmed. */
+    val userId: String = "",
     /** A pre-captured bearer/access token, if you already have one (skips login). */
     val accessToken: String = "",
+    /** xchanger/ECARX DK-backend session (from login step 4b) — DK stack authenticates with these. */
+    val xchangerToken: String = "",
+    val xchangerClientId: String = "",
 
     // ---- endpoint / environment ----
     /** EU TSP gateway by default (see dk-real-eu-api notes). */
     val baseUrl: String = "https://eu-snc-tsp-api-gw.zeekrlife.com",
-    /** "sha1" (baselinelibrary SignInterceptor) or "sha256" (snc/TSP stack). */
-    val signAlgo: String = "sha1",
+    /** TSP remote-control signs with HMAC-SHA256 (key = prod_secret). */
+    val signAlgo: String = "sha256",
+    val regionCode: String = "EU",
+    val countryCode: String = "SE",
+    /** X-PROJECT-ID the DK/TSP gateway validates (EU→ZEEKR_EU). */
+    val projectId: String = "ZEEKR_EU",
 
     // ---- device headers (plain, server-logged, none attested) ----
     val appId: String = "ZEEKRCNCH001M0001",
     val clientId: String = "",
-    val deviceModel: String = "Pixel 9",
+    val deviceModel: String = "Pixel 8",
     val deviceBrand: String = "google",
     val deviceManufacture: String = "Google",
     /** Our own stable device id. Generated once by ConfigStore if blank. */
     val deviceIdentifier: String = "",
+    /** App-instance UUID for the X-DEVICE-ID header + app/hb online heartbeat (stock sends a
+     *  UUID here, NOT the DK deviceId). Generated once by ConfigStore if blank. */
+    val appInstanceId: String = "",
+    /** DIAGNOSTIC override for the DK deviceId. When set, openzeekr provisions/pairs AS this
+     *  deviceId instead of its own random one — e.g. paste the stock phone's getDeviceID to test
+     *  pairing with the exact device the car already knows. Blank = use our own. */
+    val dkDeviceId: String = "",
     val agentType: String = "APP",
     val agentVersion: String = "3.0.7",
     val envType: String = "prod",
@@ -82,4 +103,24 @@ data class SecretsConfig(
 
     /** The secret used for X-SIGNATURE. prodSecret per the reversing notes. */
     val signSecret: String get() = prodSecret
+
+    companion object {
+        /**
+         * Initial config seeded from the gitignored `secrets.properties` via
+         * BuildConfig. Every value is empty when that file is absent (fresh
+         * clone / CI), so the app just starts blank and is set up in Settings.
+         */
+        fun fromBuildDefaults(): SecretsConfig = SecretsConfig(
+            hmacAccessKey = BuildConfig.SEC_HMAC_ACCESS_KEY,
+            hmacSecretKey = BuildConfig.SEC_HMAC_SECRET_KEY,
+            passwordPublicKey = BuildConfig.SEC_PASSWORD_PUBLIC_KEY,
+            prodSecret = BuildConfig.SEC_PROD_SECRET,
+            vinKey = BuildConfig.SEC_VIN_KEY,
+            vinIv = BuildConfig.SEC_VIN_IV,
+            xchangerSignSecret = BuildConfig.SEC_XCHANGER_SIGN_SECRET,
+            // NOTE: email / password / vin / userId are intentionally NOT baked
+            // in (see build.gradle.kts). They start blank and are entered on the
+            // Settings screen, then persisted only in encrypted on-device prefs.
+        )
+    }
 }

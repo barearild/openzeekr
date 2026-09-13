@@ -80,5 +80,12 @@ class PlaceholderDkSession(private val transport: DkTransport) : DkSession {
 interface DkTransport {
     suspend fun write(cmd: Int, framed: ByteArray): Boolean
     fun onInbound(handler: (cmd: Int, payload: ByteArray) -> Unit)
+    /**
+     * The 8-byte broadcast-random parsed from the vehicle's BLE advertisement at
+     * connect time (manufacturer-specific data). Required to derive the pairing
+     * connectKey for the 0x0101 CONNECT_CONFIRM. Null if we connected by MAC
+     * without scanning, or the advert wasn't parsed.
+     */
+    fun broadcastRnd(): ByteArray?
     fun close()
 }

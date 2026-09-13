@@ -30,18 +30,20 @@ interface TspApi {
     suspend fun login(@Body body: LoginRequest): BaseResponse<LoginResponse>
 
     // ---- remote vehicle control (all serviceIds route through this one endpoint) ----
-    @PUT("/remote-control/vehicle/telematics/{vin}")
+    // Real EU gateway route (ref: zeekr_ev_api REMOTECONTROL_URL + smali path dump).
+    // VIN travels in the X-VIN header (added by HeaderInterceptor), not the URL.
+    @POST("ms-remote-control/v1.0/remoteControl/control")
     suspend fun sendControl(
-        @Path("vin") vin: String,
         @Body body: RemoteControlRequest,
     ): BaseResponse<RemoteControlResponse>
 
-    // ---- vehicle status ----
-    @GET("/remote-control/vehicle/status")
-    suspend fun vehicleStatus(@Query("vin") vin: String): BaseResponse<Map<String, String>>
+    // ---- vehicle status (VIN via X-VIN header) ----
+    @GET("ms-vehicle-status/api/v1.0/vehicle/status/latest")
+    suspend fun vehicleStatus(): BaseResponse<Map<String, String>>
 
-    @GET("/remote-control/vehicle/status/soc/{vin}")
-    suspend fun soc(@Path("vin") vin: String): BaseResponse<Map<String, String>>
+    // ---- remote-control live state (VIN via X-VIN header) ----
+    @GET("ms-app-bff/api/v1.0/remoteControl/getVehicleState")
+    suspend fun remoteControlState(): BaseResponse<Map<String, String>>
 
     // ---- sentry / sentinel-monitoring-service ----
     @GET("/sentinel-monitoring-service/api/v1/alarm/event/query")

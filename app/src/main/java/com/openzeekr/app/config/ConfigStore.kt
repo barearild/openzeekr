@@ -25,17 +25,47 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
     val config: StateFlow<SecretsConfig> = _config.asStateFlow()
 
     private fun load(): SecretsConfig {
-        val raw = prefs.getString(KEY_CONFIG, null) ?: return ensureDeviceId(SecretsConfig())
+        // First run (nothing persisted yet): seed from the baked build defaults.
+        val raw = prefs.getString(KEY_CONFIG, null) ?: return ensureDeviceId(SecretsConfig.fromBuildDefaults())
         return runCatching { json.decodeFromString<SecretsConfig>(raw) }
-            .getOrElse { SecretsConfig() }
+            .getOrElse { SecretsConfig.fromBuildDefaults() }
+            .let(::backfillBakedSecrets)
             .let(::ensureDeviceId)
     }
 
-    /** Guarantee a stable, app-generated device id (our own, not the OEM's). */
-    private fun ensureDeviceId(cfg: SecretsConfig): SecretsConfig =
-        if (cfg.deviceIdentifier.isBlank())
-            cfg.copy(deviceIdentifier = "OZ-" + UUID.randomUUID().toString().replace("-", "").take(24))
-        else cfg
+    /**
+     * Fill any app-global secret that is blank in the persisted config from the baked
+     * build defaults (secrets.properties). This lets a NEW baked secret (e.g. one added
+     * to secrets.properties after an install already exists) reach an upgraded build
+     * without wiping the user's stored account. Only blanks are filled — user-set values
+     * always win.
+     */
+    private fun backfillBakedSecrets(cfg: SecretsConfig): SecretsConfig {
+        val d = SecretsConfig.fromBuildDefaults()
+        return cfg.copy(
+            hmacAccessKey = cfg.hmacAccessKey.ifBlank { d.hmacAccessKey },
+            hmacSecretKey = cfg.hmacSecretKey.ifBlank { d.hmacSecretKey },
+            passwordPublicKey = cfg.passwordPublicKey.ifBlank { d.passwordPublicKey },
+            prodSecret = cfg.prodSecret.ifBlank { d.prodSecret },
+            vinKey = cfg.vinKey.ifBlank { d.vinKey },
+            vinIv = cfg.vinIv.ifBlank { d.vinIv },
+            xchangerSignSecret = cfg.xchangerSignSecret.ifBlank { d.xchangerSignSecret },
+        )
+    }
+
+    /** Re-apply the baked build defaults (secrets.properties), keeping device id. */
+    fun resetToBuildDefaults() =
+        persist(ensureDeviceId(SecretsConfig.fromBuildDefaults().copy(deviceIdentifier = _config.value.deviceIdentifier)))
+
+    /** Guarantee a stable, app-generated device id (our own, not the OEM's) + app-instance UUID. */
+    private fun ensureDeviceId(cfg: SecretsConfig): SecretsConfig {
+        var c = cfg
+        if (c.deviceIdentifier.isBlank())
+            c = c.copy(deviceIdentifier = "OZ-" + UUID.randomUUID().toString().replace("-", "").take(24))
+        if (c.appInstanceId.isBlank())
+            c = c.copy(appInstanceId = UUID.randomUUID().toString())   // stock X-DEVICE-ID format
+        return c
+    }
 
     fun current(): SecretsConfig = _config.value
 
@@ -64,6 +94,7 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
             prodSecret = incoming.prodSecret.ifBlank { cur.prodSecret },
             vinKey = incoming.vinKey.ifBlank { cur.vinKey },
             vinIv = incoming.vinIv.ifBlank { cur.vinIv },
+            xchangerSignSecret = incoming.xchangerSignSecret.ifBlank { cur.xchangerSignSecret },
             email = incoming.email.ifBlank { cur.email },
             password = incoming.password.ifBlank { cur.password },
             vin = incoming.vin.ifBlank { cur.vin },

@@ -27,27 +27,17 @@ private inline fun <T> guarded(block: () -> T): CallResult<T> =
 
 class AuthRepository(private val store: ConfigStore, private val client: ApiClient) {
 
-    /** RSA-encrypt the password with the configured public key, then log in.
-     *  On success the bearer token is written back into the config. */
+    /**
+     * Full Zeekr account login (see [com.openzeekr.app.net.AccountLogin]):
+     * checkUser → loginByEmailEncrypt → user/info → tspCode → bearer_login →
+     * vehicle-list. Writes accessToken + userId + vin into config.
+     */
     suspend fun login(): CallResult<String> = withContext(Dispatchers.IO) {
-        guarded {
-            val cfg = store.current()
-            require(cfg.email.isNotBlank() && cfg.password.isNotBlank()) { "email/password not configured" }
-            val encPw = encryptPassword(cfg.password, cfg.passwordPublicKey)
-            val resp = client.api.login(LoginRequest(account = cfg.email, password = encPw))
-            val bearer = resp.data?.bearer ?: error(resp.message ?: "login failed (code=${resp.code})")
-            store.update { it.copy(accessToken = bearer) }
-            bearer
-        }
-    }
-
-    private fun encryptPassword(password: String, pubKeyB64: String): String {
-        if (pubKeyB64.isBlank()) return password // no key configured -> send as-is (dev)
-        val keyBytes = Base64.decode(pubKeyB64, Base64.DEFAULT)
-        val key = KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(keyBytes))
-        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        return Base64.encodeToString(cipher.doFinal(password.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+        val r = com.openzeekr.app.net.AccountLogin(store).login()
+        r.fold(
+            onSuccess = { CallResult.Ok(store.current().accessToken) },
+            onFailure = { CallResult.Err(it.message ?: it.javaClass.simpleName) },
+        )
     }
 }
 
@@ -59,8 +49,11 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
             guarded {
                 val cfg = store.current()
                 require(cfg.vin.isNotBlank()) { "VIN not configured" }
-                val body = cmd.toRequest(vinUserId = cfg.deviceIdentifier, extraParams = extraParams)
-                val resp = client.api.sendControl(cfg.vin, body)
+                // RemoteControlRequest.userId = the account id (IOVContext.getUserId),
+                // not our deviceId.
+                val body = cmd.toRequest(vinUserId = cfg.userId.ifBlank { cfg.deviceIdentifier }, extraParams = extraParams)
+                // VIN is carried in the X-VIN header by HeaderInterceptor.
+                val resp = client.api.sendControl(body)
                 resp.data ?: error(resp.message ?: "command failed (code=${resp.code})")
             }
         }
@@ -69,7 +62,8 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
         guarded {
             val cfg = store.current()
             require(cfg.vin.isNotBlank()) { "VIN not configured" }
-            client.api.vehicleStatus(cfg.vin).data ?: emptyMap()
+            // VIN is carried in the X-VIN header by HeaderInterceptor.
+            client.api.vehicleStatus().data ?: emptyMap()
         }
     }
 }

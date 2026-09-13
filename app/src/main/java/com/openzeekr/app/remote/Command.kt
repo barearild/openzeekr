@@ -27,11 +27,13 @@ enum class Command(
     val durationSec: Int? = null,
 ) {
     // ---- doors / locks ----
-    UNLOCK("Unlock", Category.DOORS, "RDU_2", "start"),
-    LOCK("Lock", Category.DOORS, "RDL_2", "start"),
-    TRUNK_OPEN("Open Trunk", Category.DOORS, "RDU_2", "start", listOf(ServiceParameter("DOOR", "LOCK_TRUNK"))),
-    TRUNK_UNLOCK("Unlock Trunk", Category.DOORS, "RDU_2", "start", listOf(ServiceParameter("DOOR", "LOCK_TRUNK"))),
-    TRUNK_LOCK("Lock Trunk", Category.DOORS, "RDL_2", "start", listOf(ServiceParameter("DOOR", "LOCK_TRUNK"))),
+    // Verified from smali (Cmd$Companion): LOCK_DOOR = RDL/"start", UNLOCK_DOOR =
+    // RDU/"stop" (the command verbs are inverted vs intuition), each with a
+    // serviceParameter door=all. Trunk uses the same serviceIds with door=trunk.
+    UNLOCK("Unlock", Category.DOORS, "RDU", "stop", listOf(ServiceParameter("door", "all"))),
+    LOCK("Lock", Category.DOORS, "RDL", "start", listOf(ServiceParameter("door", "all"))),
+    TRUNK_UNLOCK("Unlock Trunk", Category.DOORS, "RDU", "stop", listOf(ServiceParameter("door", "trunk"))),
+    TRUNK_LOCK("Lock Trunk", Category.DOORS, "RDL", "start", listOf(ServiceParameter("door", "trunk"))),
     FRONT_TRUNK("Front Trunk (frunk)", Category.DOORS, "UFR", "start"),
     CHARGE_LID_OPEN("Open Charge Lid", Category.DOORS, "RDO", "start"),
     CHARGE_LID_CLOSE("Close Charge Lid", Category.DOORS, "RDC", "stop"),

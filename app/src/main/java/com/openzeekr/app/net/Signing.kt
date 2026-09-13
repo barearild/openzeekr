@@ -1,74 +1,155 @@
 package com.openzeekr.app.net
 
 import android.util.Base64
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import java.net.URI
-import java.net.URLEncoder
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Faithful port of the app's `com.baselinelibrary.sign.SignUtil.sign()`, matching
- * the working Python `sign.py` byte-for-byte.
- *
- * Base string (5 lines):
- *   getHeaders(headers) + "\n" +   // "x-api*" headers, lowercased "name:value", sorted
- *   getParam(query)     + "\n" +   // query sorted by key, k=v joined by '&'
- *   getMD5(body)        + "\n" +   // "" if empty else hex MD5 of UTF-8 body
- *   METHOD              + "\n" +
- *   path                            // path only, no scheme/host/query
- *
- * X-TIMESTAMP is sent as a plain header and is NOT part of the hashed string.
+ * The two Zeekr signing schemes, ported byte-for-byte from the proven
+ * `zeekr_ev_api` (`zeekr_hmac.generateHMAC` and `zeekr_app_sig.sign_request`).
  */
 object Signing {
 
-    fun headersToSign(headers: Map<String, String>): String =
-        headers.entries
-            .filter { it.key.lowercase().startsWith("x-api") }
-            .map { "${it.key.lowercase()}:${it.value}" }
-            .sorted()
-            .joinToString("\n")
+    // ==================== USER-CENTER (account/login) HMAC ====================
+    // headers: X-HMAC-ALGORITHM/SIGNATURE/ACCESS-KEY/DIGEST + X-DATE
+    // sign string = METHOD\npath\nquery\naccessKey\ngmtDate ; sig = HMAC(secret, that+"\n")
 
-    private fun enc(v: String): String =
-        URLEncoder.encode(v, "UTF-8")
-            .replace("+", "%20")
-            .replace("*", "%2A")
-            .replace("%7E", "~")
-            .replace("%2C", "%2C")
+    data class HmacHeaders(
+        val algorithm: String, val signature: String, val accessKey: String,
+        val digest: String, val date: String,
+    )
 
-    fun paramToSign(query: Map<String, String>): String {
-        if (query.isEmpty()) return ""
-        return query.keys.sorted().joinToString("&") { k -> "$k=${enc(query.getValue(k))}" }
+    fun usercenterHmac(method: String, url: String, accessKey: String, secretKey: String, body: ByteArray?): HmacHeaders {
+        val u = URI(url)
+        val date = gmtDate()
+        val segs = (u.path ?: "").trim('/').split("/").filter { it.isNotEmpty() }
+        val canonicalPath = if (segs.isEmpty()) "/" else "/" + segs.joinToString("/")
+        val canonicalQuery = canonicalQueryLowerSorted(u.rawQuery)
+        val signString = listOf(method.uppercase(), canonicalPath, canonicalQuery, accessKey, date).joinToString("\n")
+        val signature = hmacB64(signString + "\n", secretKey)
+        val digest = hmacB64(if (body == null) "" else String(body, Charsets.UTF_8), secretKey)
+        return HmacHeaders("hmac-sha256", signature, accessKey, digest, date)
     }
 
-    fun md5Hex(body: ByteArray?): String {
-        if (body == null || body.isEmpty()) return ""
-        val digest = MessageDigest.getInstance("MD5").digest(body)
-        return digest.joinToString("") { "%02x".format(it) }
+    /** query keys sorted case-insensitively, "k=v" joined by "&", values raw. */
+    private fun canonicalQueryLowerSorted(rawQuery: String?): String {
+        if (rawQuery.isNullOrEmpty()) return ""
+        val map = LinkedHashMap<String, String>()
+        for (pair in rawQuery.split("&")) {
+            val i = pair.indexOf('=')
+            if (i >= 0) map[pair.substring(0, i)] = pair.substring(i + 1)
+        }
+        return map.keys.sortedBy { it.lowercase() }.joinToString("&") { "$it=${map[it]}" }
     }
 
-    fun pathOf(url: String): String = (URI(url).path ?: "/").ifEmpty { "/" }
+    // ==================== TSP gateway (app-signed) X-SIGNATURE ====================
 
-    fun buildStringToSign(
-        method: String,
-        url: String,
-        headers: Map<String, String>,
-        query: Map<String, String>,
-        body: ByteArray?,
-    ): String = buildString {
-        append(headersToSign(headers)); append('\n')
-        append(paramToSign(query)); append('\n')
-        append(md5Hex(body)); append('\n')
-        append(method.uppercase()); append('\n')
-        append(pathOf(url))
+    private val ALLOWED = setOf(
+        "x-app-id", "content-type", "x-api-signature-nonce", "x-timestamp",
+        "x-api-signature-version", "x-project-id", "authorization", "accept-language",
+        "x-vin", "x-device-id", "x-platform",
+    )
+
+    /**
+     * X-SIGNATURE over the decorated request (zeekr_app_sig.calculate_sig), key = prod_secret.
+     * @param headers all request headers (already incl. nonce/timestamp).
+     */
+    fun tspSignature(method: String, url: String, headers: Map<String, String>, body: ByteArray?, secret: String): String {
+        val u = URI(url)
+
+        // canonical headers: allowed only, x-vin/authorization must be non-empty; "k:v\n" sorted by k
+        val hdr = headers.entries
+            .map { it.key.lowercase() to it.value }
+            .filter { (k, v) ->
+                k in ALLOWED && !((k == "x-vin" || k == "authorization") && v.isEmpty())
+            }
+            .sortedBy { it.first }
+            .joinToString("") { (k, v) -> "$k:$v\n" }
+
+        // canonical query: sorted by key; value.replace(%2F->/,%3F->?,*->%2A); "k=v" joined "&"
+        val query = buildString {
+            val q = u.rawQuery
+            if (!q.isNullOrEmpty()) {
+                val map = LinkedHashMap<String, String>()
+                for (pair in q.split("&")) {
+                    val i = pair.indexOf('='); val k = if (i >= 0) pair.substring(0, i) else pair
+                    val v = if (i >= 0) pair.substring(i + 1) else ""
+                    map[k] = v
+                }
+                var first = true
+                for (k in map.keys.sorted()) {
+                    val v = (map[k] ?: "").replace("%2F", "/").replace("%3F", "?").replace("*", "%2A")
+                    if (!first) append("&"); first = false
+                    append("$k=$v")
+                }
+            }
+        }
+
+        // body hash: base64(MD5(canonical sorted-key JSON)) when content-type is json
+        val ct = headers.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value ?: ""
+        var bodyHash = ""
+        if (ct.contains("application/json", true) && body != null && body.isNotEmpty()) {
+            runCatching {
+                val canonical = canonicalizeJson(String(body, Charsets.UTF_8))
+                val md5 = MessageDigest.getInstance("MD5").digest(canonical.toByteArray(Charsets.UTF_8))
+                bodyHash = Base64.encodeToString(md5, Base64.NO_WRAP)
+            }
+        }
+
+        val base = buildString {
+            if (hdr.isNotEmpty()) append(hdr)
+            if (query.isNotEmpty()) { append(query); append("\n") }
+            if (bodyHash.isNotEmpty()) { append(bodyHash); append("\n") }
+            append(method.uppercase()); append("\n")
+            append((u.path ?: "").trimEnd())
+        }
+        return hmacB64(base, secret)
     }
 
-    /** Returns X-SIGNATURE (base64) for the given base string and secret. */
-    fun sign(stringToSign: String, secret: String, algo: String): String {
-        val macAlgo = if (algo.equals("sha256", true)) "HmacSHA256" else "HmacSHA1"
-        val mac = Mac.getInstance(macAlgo)
-        mac.init(SecretKeySpec(secret.toByteArray(Charsets.UTF_8), macAlgo))
-        val raw = mac.doFinal(stringToSign.toByteArray(Charsets.UTF_8))
-        return Base64.encodeToString(raw, Base64.NO_WRAP)
+    /**
+     * Recursively sort object keys, compact (Gson-sorted-keys equivalent).
+     *
+     * Public because the DK/TSP gateway computes the body MD5 over the body
+     * **as received** (not re-sorted) — so the client must SEND this exact
+     * canonical form, or verification fails with 079025. [SignInterceptor] uses
+     * this to rewrite the outgoing body so sent-bytes == signed-bytes.
+     */
+    fun canonicalJson(text: String): String = canonicalizeJson(text)
+
+    private fun canonicalizeJson(text: String): String {
+        val el = Json.parseToJsonElement(text)
+        return sortEl(el).toString()
+    }
+
+    private fun sortEl(el: JsonElement): JsonElement = when (el) {
+        is JsonObject -> buildJsonObject { el.keys.sorted().forEach { put(it, sortEl(el.getValue(it))) } }
+        is JsonArray -> buildJsonArray { el.forEach { add(sortEl(it)) } }
+        is JsonPrimitive -> el
+    }
+
+    // ==================== shared ====================
+
+    private fun hmacB64(data: String, secret: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        return Base64.encodeToString(mac.doFinal(data.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+    }
+
+    private fun gmtDate(): String {
+        val fmt = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+        fmt.timeZone = TimeZone.getTimeZone("GMT")
+        return fmt.format(java.util.Date())
     }
 }

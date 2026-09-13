@@ -12,3 +12,4 @@
 # Never commit real secrets:
 secrets.json
 zeekr_secrets.json
+secrets.properties

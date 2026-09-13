@@ -1,5 +1,11 @@
 # OpenZeekr
 
+> 🚧 **Not usable yet — work in progress, no support.** This is an experimental,
+> incomplete research project, provided **as-is with no warranty and no support**
+> (no issues, no help, no guarantees it works or is safe to use). Nothing here is
+> confirmed working end-to-end; expect breakage and changes without notice. Use
+> entirely at your own risk.
+
 A clean-room Android companion app for a **Zeekr (overseas / EU) vehicle** — remote
 control over the Geely/ECARX TSP cloud, and the groundwork for the BLE digital-key
 channel (proximity unlock and remote parking).
@@ -10,6 +16,11 @@ for interoperability and research.
 > ⚠️ **Authorized use only.** Use this only with a Zeekr account and vehicle that
 > **you own or are explicitly authorized to access.** This is a research tool, not a
 > way to access cars that aren't yours.
+
+> 🌍 **EU only, and only lightly tested.** Everything has ever only been pointed at
+> the **EU** TSP server with an **EU** vehicle and account. Other regions are
+> unlikely to work as-is: **some endpoints, hosts, region and project-id values are
+> currently hardcoded for EU inside the app.** Non-EU support is not implemented.
 
 ## Credits & thanks 🙏
 
@@ -24,17 +35,29 @@ OpenZeekr reimplements the cloud layer independently (Kotlin/Android) and adds t
 BLE / digital-key research, but the account and signing groundwork was inspired by
 their work. Following their convention, **no decrypted app secrets are published here.**
 
+## Support this work 💛
+
+This comes with **no support** — but a *lot* of time, tooling and late nights went
+into reverse-engineering it and bringing it this far. If it's useful to you, a small
+token of appreciation is genuinely welcome (never expected):
+
+**→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
+
 ## What it does
+
+Legend: ✅ working & verified · 🟡 built but **unverified** (may or may not work) · 🔴 not working yet.
 
 | Area | Status |
 |------|--------|
-| **Cloud remote control** (lock/unlock, climate, engine start, charge, windows, flash/horn, sentry mode, …) | ✅ Implemented — full command catalog → `PUT /remote-control/vehicle/telematics/{vin}` with `X-SIGNATURE` HMAC |
-| **Vehicle status** | ✅ Implemented |
-| **Sentry footage list / request-upload** | ✅ Implemented (cloud `sentinel-monitoring-service`) |
-| **Sentry live view** | 🟡 Token fetch works; rendering needs the RTC provider SDK (not yet identified) |
-| **Remote parking (RPA/RSPA)** | 🟡 Flow, opcodes, 500 ms heartbeat, challenge auto-answer hook, RSSI stream — all real; **transmit is gated on the DK session** |
+| **Account login** (idaas → TSP bearer) | ✅ Working (EU) — logs in and obtains the TSP bearer token |
+| **Cloud remote control** (lock/unlock, climate, engine start, charge, windows, flash/horn, sentry mode, …) | 🟡 Built — full catalog → `PUT /remote-control/vehicle/telematics/{vin}` with `X-SIGNATURE`; **we don't yet know if it actually works against a car** |
+| **Vehicle status** | 🟡 Built — **unverified** (unknown if it works) |
+| **Sentry footage list / request-upload** | 🟡 Built (cloud `sentinel-monitoring-service`) — **unverified** (unknown if it works) |
+| **Sentry live view** | 🔴 Token fetch only; no viewer (rendering needs the RTC provider SDK, not identified) |
+| **Remote parking (RPA/RSPA)** | 🟡 Flow, opcodes, 500 ms heartbeat, challenge auto-answer hook, RSSI stream — all real; transmit rides the DK session |
 | **Proximity unlock/lock (RSSI)** | 🟡 Ranging is real (live BLE scan, EMA-smoothed, hysteresis + signal-loss watchdog); the unlock/lock action rides the DK session |
-| **Digital-key lock/unlock + DK BLE session** (handshake, AES-GCM/CMAC, RPA challenge) | 🔴 **Placeholder** (`PlaceholderDkSession`) — the DK handshake crypto is still being reversed |
+| **DK BLE handshake** (cert exchange → ECDH → AES-GCM session) | 🟡 **Works at the car** — the session establishes; the rest of the BLE protocol is WIP |
+| **Digital-key lock/unlock + DK commands** (opcodes, RPA challenge) | 🔴 WIP — on top of the working handshake, not functional yet |
 
 The DK pieces are written against a real `DkSession` interface, so dropping in a
 working handshake implementation lights up lock/unlock and remote parking without
@@ -94,8 +117,11 @@ net/      Signing (X-SIGNATURE), interceptors, Retrofit TspApi, models
 remote/   Command catalog (serviceIds) + repositories (auth, control, sentry)
 ble/      DkSession (+placeholder), DkBleManager (GATT scaffold), DkLockController
 ble/rpa/  RpaOpcodes + RpaController (heartbeat / challenge / flow)
-ui/       Compose screens: Controls, Parking, Sentry, Settings
+ui/       Compose screens: Controls, Parking, Key (DK setup), Sentry, Settings
 ```
+
+> Note: region, base URL and project-id are EU defaults baked into
+> `SecretsConfig`/`ZeekrConst` — non-EU use would need these made configurable.
 
 ## Build
 
@@ -123,8 +149,9 @@ sdk.dir=/path/to/Android/Sdk
 <url path>
 ```
 
-`X-TIMESTAMP` is a plain header and is **not** part of the signed string. Default
-HMAC is SHA-1; switch to SHA-256 in Settings if the gateway rejects it.
+`X-TIMESTAMP` is a plain header and is **not** part of the signed string. The TSP
+gateway uses **HMAC-SHA-256** (key = `prod_secret`); this is the EU recipe and is
+what the app currently assumes.
 
 ## Roadmap — making DK functional
 

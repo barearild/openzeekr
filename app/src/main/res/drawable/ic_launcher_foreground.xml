@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Bold "Z" monogram with a lightning-bolt cut, kept inside the 66dp safe zone -->
+    <group android:name="mark">
+        <!-- The Z body (white) -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M30,32 L78,32 L78,45 L53,63 L78,63 L78,76 L30,76 L30,63 L55,45 L30,45 Z" />
+        <!-- Lightning bolt accent overlaying the diagonal -->
+        <path
+            android:fillColor="#FFEFFF3A"
+            android:pathData="M60,30 L46,58 L55,58 L48,82 L74,50 L63,50 L70,30 Z" />
+    </group>
+</vector>

@@ -28,6 +28,8 @@ import kotlinx.coroutines.launch
 class RpaController(
     private val session: DkSession,
     private val scope: CoroutineScope,
+    /** Live phone-status byte packed into each frame (in-call / background gate). */
+    private val phoneStatus: () -> Byte = { PhoneStatus.NORMAL.code.toByte() },
 ) {
     enum class Phase { IDLE, CONNECTING, READY, PARKING_IN, PARKING_OUT, MOVING, PAUSED, DONE, ERROR }
 
@@ -167,7 +169,7 @@ class RpaController(
         _state.value = _state.value.copy(phase = Phase.ERROR, message = t.message)
     }
 
-    private fun phoneStatusByte(): Byte = PhoneStatus.NORMAL.code.toByte()
+    private fun phoneStatusByte(): Byte = phoneStatus()
 
     private fun intToBytes(v: Int): ByteArray =
         byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte())
