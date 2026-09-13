@@ -77,10 +77,6 @@ class DkProvisioning(
             Logx.d("provision", "=== provision start (owner=$owner) ===")
             val userId = cfg.userId.ifBlank { error("account userId missing (log in first)") }
             val vin = cfg.vin.ifBlank { error("VIN not set (fetch after login)") }
-            // DIAGNOSTIC override: pair as a specific deviceId (e.g. the stock phone's getDeviceID).
-            cfg.dkDeviceId.takeIf { it.isNotBlank() }?.let {
-                identity.forceDeviceId(it); Logx.d("provision", "DK deviceId OVERRIDE -> $it")
-            }
             val deviceId = identity.deviceId
             Logx.d("provision", "userId=$userId vin=$vin deviceId=$deviceId")
             val sig = { identity.signDkMessage(userId, vin) }   // userId+deviceId+vin, re-signed per call

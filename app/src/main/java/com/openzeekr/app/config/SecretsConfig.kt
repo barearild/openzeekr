@@ -68,10 +68,6 @@ data class SecretsConfig(
     /** App-instance UUID for the X-DEVICE-ID header + app/hb online heartbeat (stock sends a
      *  UUID here, NOT the DK deviceId). Generated once by ConfigStore if blank. */
     val appInstanceId: String = "",
-    /** DIAGNOSTIC override for the DK deviceId. When set, openzeekr provisions/pairs AS this
-     *  deviceId instead of its own random one — e.g. paste the stock phone's getDeviceID to test
-     *  pairing with the exact device the car already knows. Blank = use our own. */
-    val dkDeviceId: String = "",
     val agentType: String = "APP",
     val agentVersion: String = "3.0.7",
     val envType: String = "prod",

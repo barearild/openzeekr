@@ -21,6 +21,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +34,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.openzeekr.app.Deps
+import com.openzeekr.app.ble.DkProvisioning
 import kotlinx.coroutines.launch
 
 private enum class Tab(val label: String, val icon: ImageVector) {
@@ -45,11 +48,30 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppRoot(deps: Deps) {
-    var tab by remember { mutableIntStateOf(0) }
     val tabs = remember { Tab.entries.toTypedArray() }
     val snackbarHost = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val snackbar: (String) -> Unit = { msg -> scope.launch { snackbarHost.showSnackbar(msg) } }
+
+    // Flow (mirrors the stock app): logged out -> Settings/login; logged in but no
+    // key yet -> Key provisioning; once provisioned -> Controls, and the foreground
+    // key service runs to keep BLE connected.
+    val cfg by deps.config.config.collectAsState()
+    val prov by deps.provisioning.state.collectAsState()
+    val loggedIn = cfg.accessToken.isNotBlank()
+    val provisioned = remember(prov.step) { deps.dkIdentity.isProvisioned } ||
+        prov.step == DkProvisioning.Step.DONE
+
+    AppBootstrap(deps, serviceEnabled = loggedIn && provisioned)
+
+    var tab by remember { mutableIntStateOf(Tab.SETTINGS.ordinal) }
+    LaunchedEffect(loggedIn, provisioned) {
+        tab = when {
+            !loggedIn -> Tab.SETTINGS.ordinal
+            !provisioned -> Tab.KEY.ordinal
+            else -> Tab.CONTROLS.ordinal
+        }
+    }
 
     Scaffold(
         topBar = {

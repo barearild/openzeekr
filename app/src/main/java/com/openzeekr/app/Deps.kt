@@ -34,15 +34,13 @@ class Deps(context: Context) {
     // as the stock app does (single getDeviceID). Also arm the BLE session if a
     // credential was already provisioned on a previous run.
     val dkIdentity: DkIdentity = DkIdentity.get(context).also { id ->
-        // DIAGNOSTIC: allow overriding our DK deviceId (e.g. to the stock phone's getDeviceID).
-        config.current().dkDeviceId.takeIf { it.isNotBlank() }?.let { id.forceDeviceId(it) }
         if (config.current().deviceIdentifier != id.deviceId) config.update { it.copy(deviceIdentifier = id.deviceId) }
         id.credential()?.let { ble.setCredential(it) }
     }
     val provisioning = DkProvisioning(config, dkIdentity, ble)
     val lock = DkLockController(ble.session)
     val phoneStatus = PhoneStatusProvider(appCtx)
-    val rpa = RpaController(ble.session, appScope, phoneStatus::stateByte)
+    val rpa = RpaController(ble.session, appScope, phoneStatus::stateByte, rssi = ble::pollRemoteRssi)
     val proximity = ProximityController(appCtx, config, lock, appScope)
 
     /** Call after the base URL / sign algo changes so the HTTP client rebuilds. */

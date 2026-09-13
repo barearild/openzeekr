@@ -30,22 +30,28 @@ data class ServiceParameter(
 )
 
 /**
- * Mirrors ECARX `RemoteControlRequest` — the body of
- * `PUT /remote-control/vehicle/telematics/{vin}`.
+ * Body of `POST /ms-remote-control/v1.0/remoteControl/control`.
+ *
+ * Byte-for-byte the stock `RemoteControlRequest` (smali): exactly three fields —
+ * `command`, `serviceId`, and a nested `setting`. There is NO top-level
+ * `serviceParameters`, `userId` or `timestamp`; the parameters live inside
+ * `setting`. Getting this wrong makes the gateway accept the request (HTTP 200)
+ * but the vehicle fail to execute it (code 037005 "execution failed").
  */
 @Serializable
 data class RemoteControlRequest(
-    val serviceId: String,
     val command: String,
-    val serviceParameters: List<ServiceParameter> = emptyList(),
+    val serviceId: String,
+    val setting: RemoteControlSetting,
+)
+
+/** Stock `RemoteControlSetting`: the parameter bag carried inside a control request.
+ *  `serviceParameters` has no default so it is always emitted (even when empty), and
+ *  `operationScheduling` is omitted when null (encodeDefaults = false). */
+@Serializable
+data class RemoteControlSetting(
+    val serviceParameters: List<ServiceParameter>,
     val operationScheduling: OperationScheduling? = null,
-    val userId: String? = null,
-    val creator: String? = null,
-    val engStrtType: String? = null,
-    val requestVersion: String? = null,
-    val timestamp: Long = System.currentTimeMillis(),
-    /** Present in the schema but never populated by the stock client. */
-    val pin: String? = null,
 )
 
 @Serializable

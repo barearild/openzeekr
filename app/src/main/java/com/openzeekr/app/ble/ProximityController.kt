@@ -61,6 +61,12 @@ class ProximityController(
     private var lastSeenMs = 0L
     private var watchdog: Job? = null
 
+    // ---- burst guard ----
+    /** Wall-clock of the last action we actually fired (for the cooldown gate). */
+    private var lastTriggerMs = 0L
+    /** True while an action is being sent, so overlapping triggers don't stack. */
+    @Volatile private var actionInFlight = false
+
     private val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val cfg = store.current()
@@ -95,7 +101,6 @@ class ProximityController(
             .onFailure { _state.value = _state.value.copy(error = it.message, running = false); return }
 
         startWatchdog()
-        store.update { it.copy(proximityEnabled = true) }
     }
 
     @SuppressLint("MissingPermission")
@@ -103,7 +108,6 @@ class ProximityController(
         watchdog?.cancel(); watchdog = null
         runCatching { adapter?.bluetoothLeScanner?.stopScan(callback) }
         _state.value = _state.value.copy(running = false)
-        store.update { it.copy(proximityEnabled = false) }
     }
 
     private fun onRssi(rssi: Int, unlockThresh: Int, lockThresh: Int) {
@@ -146,11 +150,32 @@ class ProximityController(
     }
 
     private fun trigger(label: String, action: suspend () -> Boolean) {
+        // Burst guard: never overlap actions, and enforce a cooldown between them so
+        // RSSI flapping across the threshold (or a signal-loss/return cycle) can't
+        // machine-gun lock/unlock at the car.
+        if (actionInFlight) {
+            _state.value = _state.value.copy(lastAction = "$label · busy")
+            return
+        }
+        val now = System.currentTimeMillis()
+        val sinceLast = now - lastTriggerMs
+        if (lastTriggerMs != 0L && sinceLast < ACTION_COOLDOWN_MS) {
+            _state.value = _state.value.copy(lastAction = "$label ⏳ cooldown (${(ACTION_COOLDOWN_MS - sinceLast) / 1000}s)")
+            return
+        }
+        actionInFlight = true
+        lastTriggerMs = now
         scope.launch {
             val result = runCatching { action() }
+            actionInFlight = false
             _state.value = _state.value.copy(
                 lastAction = label + (result.exceptionOrNull()?.let { " ✗ ${it.message}" } ?: " ✓"),
             )
         }
+    }
+
+    companion object {
+        /** Minimum spacing between auto lock/unlock actions (anti-burst). */
+        private const val ACTION_COOLDOWN_MS = 8_000L
     }
 }

@@ -33,8 +33,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import android.app.DownloadManager
+import android.content.Context
+import android.net.Uri
+import android.os.Environment
+import androidx.compose.material.icons.filled.Download
 import com.openzeekr.app.Deps
 import com.openzeekr.app.net.model.SentryVideoDetail
 import com.openzeekr.app.remote.CallResult
@@ -46,9 +52,30 @@ import java.util.Locale
 @Composable
 fun SentryScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var events by remember { mutableStateOf<List<SentryVideoDetail>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     val fmt = remember { SimpleDateFormat("MMM d · HH:mm", Locale.getDefault()) }
+
+    // Download a sentry clip: if the cloud URL is ready, enqueue it; otherwise ask
+    // the car to upload it, poll until the URL appears, then enqueue. Saves to the
+    // public Downloads folder via the system DownloadManager (its own scoped access).
+    fun download(e: SentryVideoDetail) {
+        val id = e.id ?: return
+        if (!e.alarmVideoUrl.isNullOrBlank()) {
+            enqueueDownload(context, e.alarmVideoUrl, "sentry_$id")
+            snackbar("Downloading clip $id…")
+            return
+        }
+        snackbar("Asking car to upload clip $id…")
+        scope.launch {
+            val end = System.currentTimeMillis()
+            when (val r = deps.sentry.prepareDownload(id, end - 24L * 3600 * 1000, end)) {
+                is CallResult.Ok -> { enqueueDownload(context, r.value, "sentry_$id"); snackbar("Downloading clip $id…") }
+                is CallResult.Err -> snackbar("✗ ${r.message}")
+            }
+        }
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -95,16 +122,15 @@ fun SentryScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = Mo
             item { EmptyState(loaded) }
         } else {
             items(events) { e ->
-                SentryEventCard(e, fmt.format(Date(e.alarmTime ?: 0))) {
-                    e.id?.let { id -> scope.launch { deps.sentry.requestUpload(listOf(id)); snackbar("Upload requested for $id") } }
-                }
+                SentryEventCard(e, fmt.format(Date(e.alarmTime ?: 0)), onDownload = { download(e) })
             }
         }
     }
 }
 
 @Composable
-private fun SentryEventCard(e: SentryVideoDetail, time: String, onRequestUpload: () -> Unit) {
+private fun SentryEventCard(e: SentryVideoDetail, time: String, onDownload: () -> Unit) {
+    val ready = !e.alarmVideoUrl.isNullOrBlank()
     Card(Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically,
@@ -118,17 +144,25 @@ private fun SentryEventCard(e: SentryVideoDetail, time: String, onRequestUpload:
                 Text("Level ${e.alarmLevel ?: "?"} event", fontWeight = FontWeight.SemiBold)
                 Text(time, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (e.alarmVideoUrl == null) {
-                    TextButton(onClick = onRequestUpload, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
-                        Icon(Icons.Filled.CloudUpload, null, modifier = Modifier.size(16.dp))
-                        Text("  Ask car to upload")
-                    }
-                } else {
-                    Text("clip ready", style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary)
+                TextButton(onClick = onDownload, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+                    Icon(if (ready) Icons.Filled.Download else Icons.Filled.CloudUpload, null, modifier = Modifier.size(16.dp))
+                    Text(if (ready) "  Download clip" else "  Upload + download")
                 }
             }
         }
+    }
+}
+
+/** Enqueue a sentry clip download to the public Downloads folder. */
+private fun enqueueDownload(context: Context, url: String, name: String) {
+    runCatching {
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val req = DownloadManager.Request(Uri.parse(url))
+            .setTitle("$name.mp4")
+            .setDescription("OpenZeekr sentry clip")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "$name.mp4")
+        dm.enqueue(req)
     }
 }
 

@@ -47,9 +47,6 @@ fun iconFor(cmd: Command): ImageVector = when (cmd) {
     Command.HONK -> Icons.Filled.VolumeUp
     Command.FLASH_HORN -> Icons.Filled.Campaign
     Command.SENTINEL_ON, Command.SENTINEL_OFF -> Icons.Filled.Shield
-    Command.APPROACH_UNLOCK_ON, Command.APPROACH_UNLOCK_OFF,
-    Command.WALK_AWAY_LOCK_ON, Command.WALK_AWAY_LOCK_OFF -> Icons.Filled.DirectionsWalk
-    Command.WAKE_UP -> Icons.Filled.Bolt
 }
 
 fun iconFor(category: Category): ImageVector = when (category) {

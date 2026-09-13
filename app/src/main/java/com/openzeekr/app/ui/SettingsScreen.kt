@@ -72,9 +72,6 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             LoginStatusBanner(loggedIn = loggedIn, email = cfg.email, vin = cfg.vin, userId = cfg.userId)
             Field("email", cfg.email) { v -> set { it.copy(email = v) } }
             Field("password", cfg.password, secret = true) { v -> set { it.copy(password = v) } }
-            // DIAGNOSTIC: force the DK deviceId (blank = our own random one). Paste the stock
-            // phone's getDeviceID to test pairing as the exact device the car already knows.
-            Field("dk_device_id override (diagnostic)", cfg.dkDeviceId) { v -> set { it.copy(dkDeviceId = v.trim()) } }
         }
         // Endpoint (EU), signing (SHA1) and device model (Pixel 9) are baked in
         // via SecretsConfig defaults — not user-configurable for now.

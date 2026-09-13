@@ -3,6 +3,12 @@ package com.openzeekr.app
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import com.openzeekr.app.net.AccountLogin
+import com.openzeekr.app.util.Logx
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /** Process-wide foreground flag, updated by [App]'s activity lifecycle callbacks. */
 object AppForeground {
@@ -14,27 +20,58 @@ class App : Application() {
     lateinit var deps: Deps
         private set
 
+    /** Online heartbeat runs ONLY while the app is in the foreground (see below). */
+    private var heartbeatJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         deps = Deps(this)
         registerActivityLifecycleCallbacks(ForegroundTracker())
     }
 
+    /**
+     * The account's "online device" heartbeat (ms-app-online-manager/app/hb) — the
+     * vehicle only executes remote (cloud) commands for the online device. We keep it
+     * strictly a foreground concern (NOT in the BLE foreground service): it starts when
+     * the app comes to the foreground and stops when it leaves. Manual commands also
+     * send one right before firing (see RemoteControlRepository).
+     */
+    private fun startHeartbeat() {
+        if (heartbeatJob?.isActive == true) return
+        heartbeatJob = deps.appScope.launch {
+            while (isActive) {
+                if (deps.config.current().accessToken.isNotBlank()) {
+                    runCatching { AccountLogin(deps.config).heartbeat() }
+                        .onFailure { Logx.w("app", "app/hb failed: ${it.message}") }
+                }
+                delay(HEARTBEAT_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel(); heartbeatJob = null
+    }
+
     /** Counts started activities to derive a reliable foreground/background flag. */
-    private class ForegroundTracker : ActivityLifecycleCallbacks {
+    private inner class ForegroundTracker : ActivityLifecycleCallbacks {
         private var started = 0
         override fun onActivityStarted(activity: Activity) {
             started++
-            AppForeground.isForeground = started > 0
+            if (started == 1) { AppForeground.isForeground = true; startHeartbeat() }
         }
         override fun onActivityStopped(activity: Activity) {
             started = (started - 1).coerceAtLeast(0)
-            AppForeground.isForeground = started > 0
+            if (started == 0) { AppForeground.isForeground = false; stopHeartbeat() }
         }
         override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
         override fun onActivityResumed(activity: Activity) {}
         override fun onActivityPaused(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         override fun onActivityDestroyed(activity: Activity) {}
+    }
+
+    private companion object {
+        private const val HEARTBEAT_INTERVAL_MS = 30_000L
     }
 }

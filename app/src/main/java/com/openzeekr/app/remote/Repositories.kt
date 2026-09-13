@@ -49,9 +49,14 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
             guarded {
                 val cfg = store.current()
                 require(cfg.vin.isNotBlank()) { "VIN not configured" }
-                // RemoteControlRequest.userId = the account id (IOVContext.getUserId),
-                // not our deviceId.
-                val body = cmd.toRequest(vinUserId = cfg.userId.ifBlank { cfg.deviceIdentifier }, extraParams = extraParams)
+                // The vehicle only executes remote commands for the account's ONLINE
+                // device. Stock heartbeats app/hb continuously; refresh our online
+                // status right before the command so the TSP doesn't reject execution
+                // (037005 "execution failed, please try again"). Best-effort.
+                runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
+                // Body = command/serviceId/setting{serviceParameters,...}; the account is
+                // identified by the bearer token + X-VIN header, not a body field.
+                val body = cmd.toRequest(extraParams = extraParams)
                 // VIN is carried in the X-VIN header by HeaderInterceptor.
                 val resp = client.api.sendControl(body)
                 resp.data ?: error(resp.message ?: "command failed (code=${resp.code})")
@@ -89,6 +94,33 @@ class SentryRepository(private val store: ConfigStore, private val client: ApiCl
     suspend fun requestUpload(ids: List<Long>): CallResult<Unit> = withContext(Dispatchers.IO) {
         guarded { client.api.sentryRequestUpload(SentryUploadReq(ids)); Unit }
     }
+
+    /**
+     * Get a playable clip URL for [id]: if the event already has one, return it;
+     * otherwise ask the car to upload it and poll the event list (over [startMs]..
+     * [endMs]) until the cloud URL appears. Returns the direct video URL to download.
+     */
+    suspend fun prepareDownload(id: Long, startMs: Long, endMs: Long): CallResult<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                var url = videoUrlFor(id, startMs, endMs)
+                if (url == null) {
+                    client.api.sentryRequestUpload(SentryUploadReq(listOf(id)))
+                    var tries = 0
+                    while (url == null && tries < 40) {   // ~2 min at 3s
+                        kotlinx.coroutines.delay(3000); tries++
+                        url = videoUrlFor(id, startMs, endMs)
+                    }
+                }
+                url?.let { CallResult.Ok(it) } ?: CallResult.Err("clip not ready after upload (timed out)")
+            } catch (e: Exception) {
+                CallResult.Err(e.message ?: e.javaClass.simpleName)
+            }
+        }
+
+    private suspend fun videoUrlFor(id: Long, startMs: Long, endMs: Long): String? =
+        (events(startMs, endMs) as? CallResult.Ok)?.value
+            ?.firstOrNull { it.id == id }?.alarmVideoUrl
 
     /** Obtain RTC join params for a live view. Rendering still needs the RTC
      *  provider SDK behind the returned appId (not yet identified). */

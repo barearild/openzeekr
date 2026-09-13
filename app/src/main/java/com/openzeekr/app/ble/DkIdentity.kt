@@ -122,17 +122,6 @@ class DkIdentity private constructor(private val prefs: android.content.SharedPr
         )
     }
 
-    /**
-     * DIAGNOSTIC: force the DK deviceId (e.g. to the stock phone's getDeviceID so we pair as the
-     * exact device the car already knows). Keeps our keypair. If it changes, wipes provisioned
-     * material so the next provision re-enrolls a cert for the new deviceId.
-     */
-    fun forceDeviceId(id: String) {
-        if (id.isBlank() || id == prefs.getString(K_DEVICE_ID, null)) return
-        prefs.edit().putString(K_DEVICE_ID, id).apply()
-        clearProvisioned()
-    }
-
     /** Wipe provisioned material (keep the keypair+deviceId) to re-provision. */
     fun clearProvisioned() {
         prefs.edit().remove(K_CERT).remove(K_DKID).remove(K_BOOKID)

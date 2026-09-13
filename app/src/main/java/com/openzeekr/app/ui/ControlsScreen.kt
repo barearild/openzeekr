@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.openzeekr.app.Deps
+import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.ProximityController
 import com.openzeekr.app.ble.ProximityService
 import com.openzeekr.app.remote.CallResult
@@ -59,6 +60,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun ControlsScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
+    val bleState by deps.ble.state.collectAsState()
+    val bleReady = bleState == DkBleManager.State.SESSION_READY
 
     fun fire(label: String, block: suspend () -> CallResult<*>) {
         snackbar("$label…")
@@ -75,7 +78,19 @@ fun ControlsScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
             runCatching { block() }.fold({ CallResult.Ok(it) }, { CallResult.Err(it.message ?: "error") })
         }
 
-    val byCategory = remember(Unit) { Command.entries.groupBy { it.category } }
+    // Unified door control: use the instant BLE digital key when the session is
+    // connected, otherwise fall back to the cloud (TSP) command. One button.
+    fun door(lockIt: Boolean) {
+        val name = if (lockIt) "Lock" else "Unlock"
+        if (bleReady) fireDk("$name (key)") { if (lockIt) deps.lock.lock() else deps.lock.unlock() }
+        else fire("$name (cloud)") { deps.control.send(if (lockIt) Command.LOCK else Command.UNLOCK) }
+    }
+
+    // The grid shows cloud commands; Lock/Unlock live only in the unified quick
+    // actions above, so drop them here to avoid duplicate BLE/API buttons.
+    val byCategory = remember(Unit) {
+        Command.entries.filter { it != Command.LOCK && it != Command.UNLOCK }.groupBy { it.category }
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -89,8 +104,8 @@ fun ControlsScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 QuickAction("Unlock", Icons.Filled.LockOpen, Modifier.weight(1f),
-                    accent = MaterialTheme.colorScheme.primary) { fireDk("DK Unlock") { deps.lock.unlock() } }
-                QuickAction("Lock", Icons.Filled.Lock, Modifier.weight(1f)) { fireDk("DK Lock") { deps.lock.lock() } }
+                    accent = MaterialTheme.colorScheme.primary) { door(lockIt = false) }
+                QuickAction("Lock", Icons.Filled.Lock, Modifier.weight(1f)) { door(lockIt = true) }
                 QuickAction("Climate", Icons.Filled.Thermostat, Modifier.weight(1f)) { fire("Climate On") { deps.control.send(Command.AC_ON) } }
                 QuickAction("Locate", Icons.Filled.Campaign, Modifier.weight(1f)) { fire("Flash + Horn") { deps.control.send(Command.FLASH_HORN) } }
             }
@@ -193,11 +208,14 @@ private fun ProximityCard(deps: Deps) {
                     }
                 }
                 Switch(
-                    checked = prox.running,
+                    // The persisted setting is the source of truth; the foreground key
+                    // service reacts to it (starts/stops the RSSI approach scan).
+                    checked = cfg.proximityEnabled,
                     onCheckedChange = { on ->
+                        deps.config.update { it.copy(proximityEnabled = on) }
                         if (on) {
                             if (hasBlePerms()) ProximityService.start(context) else permLauncher.launch(requestPerms())
-                        } else ProximityService.stop(context)
+                        }
                     },
                 )
             }

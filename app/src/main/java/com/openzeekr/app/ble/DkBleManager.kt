@@ -62,6 +62,19 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     /** Provide provisioned key material (from cloud provisioning / import). */
     fun setCredential(cred: DkCredential) { credential = cred }
 
+    /** True once a provisioned key is loaded, i.e. a DK session can be established. */
+    val hasCredential: Boolean get() = credential != null
+
+    // ---- live RSSI of the connected car (for the RPA proximity gate) ----
+    @Volatile private var lastRemoteRssi: Int? = null
+
+    /** Trigger a remote-RSSI read on the live GATT and return the most recent value. */
+    @SuppressLint("MissingPermission")
+    fun pollRemoteRssi(): Int? {
+        runCatching { gatt?.readRemoteRssi() }
+        return lastRemoteRssi
+    }
+
     // ---- GATT state ----
     private var gatt: BluetoothGatt? = null
     private var chWrite1: BluetoothGattCharacteristic? = null
@@ -266,6 +279,10 @@ class DkBleManager(private val appContext: Context) : DkTransport {
 
         override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
             notifyStep?.complete(status == BluetoothGatt.GATT_SUCCESS)
+        }
+
+        override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) lastRemoteRssi = rssi
         }
 
         // API < 33
