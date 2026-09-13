@@ -80,8 +80,9 @@ enum class Command(
     FLASH_HORN("Flash + Horn", Category.SIGNAL, "RHL", "start", listOf(ServiceParameter("rhl", "horn-light-flash"))),
 
     // ---- security ---- (RSM sentry sub-mode via rsm=<n>; private locker via RDL/RDU target=private-lock)
-    SENTINEL_ON("Sentry On", Category.SECURITY, "RSM", "start", listOf(ServiceParameter("rsm", "1"))),
-    SENTINEL_OFF("Sentry Off", Category.SECURITY, "RSM", "stop", listOf(ServiceParameter("rsm", "1"))),
+    // Sentry/guard = RSM sub-mode "6" (SentinelOn/OffCommandCreator). Valet would be "123456".
+    SENTINEL_ON("Sentry On", Category.SECURITY, "RSM", "start", listOf(ServiceParameter("RSM", "6"))),
+    SENTINEL_OFF("Sentry Off", Category.SECURITY, "RSM", "stop", listOf(ServiceParameter("RSM", "6"))),
     LOCKER_ON("Private Locker Lock", Category.SECURITY, "RDL", "start", listOf(ServiceParameter("target", "private-lock"), ServiceParameter("password", "1234"))),
     LOCKER_OFF("Private Locker Unlock", Category.SECURITY, "RDU", "stop", listOf(ServiceParameter("target", "private-lock"), ServiceParameter("password", "1234"))),
     ;

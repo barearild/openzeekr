@@ -227,8 +227,8 @@ class ProximityController(
 
     private fun onGattRssi(rssi: Int) {
         val cfg = store.current()
-        val unlockThresh = cfg.effectiveUnlockRssi
-        val lockThresh = cfg.effectiveLockRssi
+        val unlockThresh = cfg.sensitivityUnlockRssi
+        val lockThresh = cfg.sensitivityLockRssi
 
         val next = gattEma?.let { it + alpha * (rssi - it) } ?: rssi.toDouble()
         gattEma = next

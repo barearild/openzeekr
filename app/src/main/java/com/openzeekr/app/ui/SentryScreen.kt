@@ -62,8 +62,11 @@ fun SentryScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = Mo
     // public Downloads folder via the system DownloadManager (its own scoped access).
     fun download(e: SentryVideoDetail) {
         val id = e.id ?: return
-        if (!e.alarmVideoUrl.isNullOrBlank()) {
-            enqueueDownload(context, e.alarmVideoUrl, "sentry_$id")
+        // Capture into a local val: alarmVideoUrl is a property from another module
+        // (:core) so Kotlin can't smart-cast it to non-null after the check.
+        val ready = e.alarmVideoUrl
+        if (!ready.isNullOrBlank()) {
+            enqueueDownload(context, ready, "sentry_$id")
             snackbar("Downloading clip $id…")
             return
         }

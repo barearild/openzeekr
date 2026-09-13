@@ -10,14 +10,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-/** Process-wide foreground flag, updated by [App]'s activity lifecycle callbacks. */
-object AppForeground {
-    @Volatile var isForeground: Boolean = false
-        internal set
-}
-
-class App : Application() {
-    lateinit var deps: Deps
+class App : Application(), DepsHolder {
+    override lateinit var deps: Deps
         private set
 
     /** Online heartbeat runs ONLY while the app is in the foreground (see below). */
@@ -37,6 +31,7 @@ class App : Application() {
      * send one right before firing (see RemoteControlRepository).
      */
     private fun startHeartbeat() {
+        deps.vehicleState.start()   // live status polling follows the foreground too
         if (heartbeatJob?.isActive == true) return
         heartbeatJob = deps.appScope.launch {
             while (isActive) {
@@ -51,6 +46,7 @@ class App : Application() {
 
     private fun stopHeartbeat() {
         heartbeatJob?.cancel(); heartbeatJob = null
+        deps.vehicleState.stop()
     }
 
     /** Counts started activities to derive a reliable foreground/background flag. */

@@ -8,7 +8,10 @@ import com.openzeekr.app.net.model.RemoteControlResponse
 import com.openzeekr.app.net.model.SentryLiveTokenReq
 import com.openzeekr.app.net.model.SentryUploadReq
 import com.openzeekr.app.net.model.SentryVideoDetail
+import com.openzeekr.app.net.model.ModifyVehicleRequest
 import com.openzeekr.app.net.model.ServiceParameter
+import com.openzeekr.app.net.model.VehicleGarage
+import com.openzeekr.app.net.model.VehicleInfo
 import com.openzeekr.app.net.model.VehicleStatus
 import com.openzeekr.app.net.model.VehicleStatusBean
 import kotlinx.coroutines.Dispatchers
@@ -102,6 +105,16 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
             // `data` is a raw JsonObject; map it tolerantly (never throws on shape).
             VehicleStatus.parse(obj)
         }
+    }
+
+    /** Garage lookup: the car's model / colour / render / nickname (best-effort). */
+    suspend fun vehicleInfo(): CallResult<VehicleInfo?> = withContext(Dispatchers.IO) {
+        guarded { VehicleGarage.parse(client.api.vehicleList().data) }
+    }
+
+    /** Rename the car (cloud). vehicleId is optional; the backend also keys off X-VIN. */
+    suspend fun renameVehicle(name: String, vehicleId: String? = null): CallResult<Unit> = withContext(Dispatchers.IO) {
+        guarded { client.api.modifyVehicle(ModifyVehicleRequest(id = vehicleId, vehNickname = name)); Unit }
     }
 }
 

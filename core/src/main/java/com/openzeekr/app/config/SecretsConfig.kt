@@ -1,6 +1,6 @@
 package com.openzeekr.app.config
 
-import com.openzeekr.app.BuildConfig
+import com.openzeekr.core.BuildConfig
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -95,12 +95,18 @@ data class SecretsConfig(
     val lockRssi: Int = -70,
     /** If NEAR and no advertisement is seen for this long, treat as walked-away. */
     val proximityLostMs: Long = 8000,
+    /** Approach sensitivity preset (user-facing) — maps to unlock/lock RSSI below.
+     *  One of: "veryclose", "close", "far". */
+    val proximitySensitivity: String = "close",
 
     // ---- app-local UI state (not part of zeekr_secrets.json) ----
     /** First-run onboarding wizard completed (login → key provisioning). */
     val onboardingDone: Boolean = false,
     /** Collect + show the on-device debug log. Off hides the log viewer entirely. */
     val debugLogging: Boolean = false,
+    /** User-set display name for the car (shown in the top bar). Blank = use the model
+     *  name. The cloud rename API (modify-vehicle / vehNickname) is wired separately. */
+    val carNickname: String = "",
 ) {
     /** True when the minimum needed to talk to the cloud is present. */
     val cloudReady: Boolean
@@ -122,6 +128,17 @@ data class SecretsConfig(
      * dB weaker than unlock (fixed hysteresis). Lock fires when RSSI falls at/below.
      */
     val effectiveLockRssi: Int get() = effectiveUnlockRssi - LOCK_RSSI_GAP_DB
+
+    /** Unlock RSSI for the chosen sensitivity preset (hidden from the user). */
+    val sensitivityUnlockRssi: Int
+        get() = when (proximitySensitivity) {
+            "veryclose" -> -58
+            "far" -> -74
+            else -> -66 // close
+        }
+
+    /** Lock RSSI = unlock − 8 dB hysteresis for the preset. */
+    val sensitivityLockRssi: Int get() = sensitivityUnlockRssi - 8
 
     companion object {
         /** Unlock can never be set weaker (more negative) than this — safety floor. */

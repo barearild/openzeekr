@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "OpenZeekr"
 include(":app")
+include(":core")

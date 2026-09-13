@@ -12,10 +12,10 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import com.openzeekr.app.App
 import com.openzeekr.app.Deps
-import com.openzeekr.app.R
+import com.openzeekr.app.DepsHolder
 import com.openzeekr.app.util.Logx
+import com.openzeekr.core.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,7 +45,7 @@ class ProximityService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startInForeground()
-        val deps = (application as? App)?.deps ?: return START_STICKY
+        val deps = (application as? DepsHolder)?.deps ?: return START_STICKY
         if (loops?.isActive != true) {
             loops = scope.launch {
                 launch { keepConnected(deps) }
@@ -57,7 +57,7 @@ class ProximityService : Service() {
 
     override fun onDestroy() {
         loops?.cancel(); loops = null
-        (application as? App)?.deps?.proximity?.stop()
+        (application as? DepsHolder)?.deps?.proximity?.stop()
         scope.cancel()
         super.onDestroy()
     }

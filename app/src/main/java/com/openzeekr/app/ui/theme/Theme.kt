@@ -1,82 +1,95 @@
 package com.openzeekr.app.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
-// EV teal -> blue brand ramp (matches the app icon).
-private val Teal = Color(0xFF14C8BE)
-private val TealDim = Color(0xFF0E8F88)
-private val Blue = Color(0xFF3B82F6)
-private val BoltYellow = Color(0xFFEFFF3A)
+/**
+ * OpenZeekr is a dark-committed "cockpit" design (see the redesign mockup): a cool
+ * near-black ground, one electric-blue interactive accent, and semantic-only energy/
+ * secured/alert colours. We force the dark scheme regardless of system setting.
+ */
+private val Bg          = Color(0xFF0C0F12)
+private val Surface     = Color(0xFF14181C)
+private val Surface2    = Color(0xFF1C2227)
+private val Surface3    = Color(0xFF232B31)
+private val Line        = Color(0xFF2A3238)
+private val TextC       = Color(0xFFEAEEF1)
+private val Muted       = Color(0xFF8B979E)
+private val Faint       = Color(0xFF5E696F)
+private val Accent      = Color(0xFF5AA9FF)   // electric blue — interactive
+private val Energy      = Color(0xFFF5B740)   // amber — charging/energy
+private val Neon        = Color(0xFF31E08A)   // charge progress
+private val Good        = Color(0xFF46D8A0)   // secured/ok
+private val Crit        = Color(0xFFFF6B6B)   // alert/open
 
 private val DarkColors = darkColorScheme(
-    primary = Teal,
-    onPrimary = Color(0xFF00201E),
-    primaryContainer = Color(0xFF0E4A46),
-    onPrimaryContainer = Color(0xFF9FF3EC),
-    secondary = Color(0xFF8FB4FF),
-    onSecondary = Color(0xFF0A2447),
-    secondaryContainer = Color(0xFF1E3A63),
-    onSecondaryContainer = Color(0xFFD6E3FF),
-    tertiary = BoltYellow,
-    onTertiary = Color(0xFF2B2E00),
-    background = Color(0xFF0D1013),
-    onBackground = Color(0xFFE4E7EA),
-    surface = Color(0xFF14181D),
-    onSurface = Color(0xFFE4E7EA),
-    surfaceVariant = Color(0xFF232A31),
-    onSurfaceVariant = Color(0xFFB9C2CC),
-    outline = Color(0xFF3A424B),
-    error = Color(0xFFFF7A6E),
-)
-
-private val LightColors = lightColorScheme(
-    primary = TealDim,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFB6F2EC),
-    onPrimaryContainer = Color(0xFF00201E),
-    secondary = Color(0xFF2E5AAC),
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD9E4FF),
-    onSecondaryContainer = Color(0xFF001A41),
-    tertiary = Color(0xFF6B7000),
-    background = Color(0xFFF6F8FA),
-    onBackground = Color(0xFF181C20),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF181C20),
-    surfaceVariant = Color(0xFFE6EBF0),
-    onSurfaceVariant = Color(0xFF444B52),
-    outline = Color(0xFFC2CAD2),
+    primary = Accent,
+    onPrimary = Color(0xFF07121F),
+    primaryContainer = Color(0xFF16324B),
+    onPrimaryContainer = Color(0xFFCFE4FF),
+    secondary = Good,
+    onSecondary = Color(0xFF00251A),
+    tertiary = Energy,
+    onTertiary = Color(0xFF2A1E00),
+    background = Bg,
+    onBackground = TextC,
+    surface = Surface,
+    onSurface = TextC,
+    surfaceVariant = Surface2,
+    onSurfaceVariant = Muted,
+    outline = Line,
+    outlineVariant = Color(0xFF20272C),
+    error = Crit,
+    onError = Color(0xFF2A0A0A),
 )
 
 private val AppShapes = Shapes(
-    extraSmall = RoundedCornerShape(8.dp),
+    extraSmall = RoundedCornerShape(10.dp),
     small = RoundedCornerShape(12.dp),
-    medium = RoundedCornerShape(18.dp),
-    large = RoundedCornerShape(24.dp),
-    extraLarge = RoundedCornerShape(32.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(22.dp),
+    extraLarge = RoundedCornerShape(30.dp),
 )
 
-// Brand accents reusable by screens (gradients, bolt color).
+/** Extra brand tokens the screens use directly (beyond the Material scheme). */
 object Brand {
-    val teal = Teal
-    val blue = Blue
-    val bolt = BoltYellow
-    val gradient = listOf(Teal, Blue)
+    val accent = Accent
+    val energy = Energy
+    val neon = Neon
+    val good = Good
+    val crit = Crit
+    val surface2 = Surface2
+    val surface3 = Surface3
+    val line = Line
+    val muted = Muted
+    val faint = Faint
+    val badge = listOf(Color(0xFF6DB4FF), Color(0xFF3A6FF0))
+    /** Back-compat alias (used by BrandBadge / ParkingScreen). */
+    val gradient = badge
+
+    /** Metallic paint "identity card" gradient for a given paint colour. */
+    fun paintCard(paint: Color): Brush = Brush.radialGradient(
+        colors = listOf(
+            blend(paint, Color.White, 0.26f),
+            paint,
+            blend(paint, Color.Black, 0.46f),
+        ),
+    )
+    private fun blend(a: Color, b: Color, t: Float) = Color(
+        a.red + (b.red - a.red) * t,
+        a.green + (b.green - a.green) * t,
+        a.blue + (b.blue - a.blue) * t,
+        1f,
+    )
 }
 
 @Composable
-fun OpenZeekrTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = if (dark) DarkColors else LightColors,
-        shapes = AppShapes,
-        content = content,
-    )
+fun OpenZeekrTheme(dark: Boolean = true, content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = DarkColors, shapes = AppShapes, content = content)
 }

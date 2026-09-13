@@ -13,6 +13,7 @@ import com.openzeekr.app.net.ApiClient
 import com.openzeekr.app.remote.AuthRepository
 import com.openzeekr.app.remote.RemoteControlRepository
 import com.openzeekr.app.remote.SentryRepository
+import com.openzeekr.app.remote.VehicleStatusHolder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +30,8 @@ class Deps(context: Context) {
     val auth = AuthRepository(config, apiClient)
     val control = RemoteControlRepository(config, apiClient)
     val sentry = SentryRepository(config, apiClient)
+    /** Live vehicle status (foreground poll, no push) — observed by the UI. */
+    val vehicleState = VehicleStatusHolder(control, appScope)
 
     val ble: DkBleManager = DkBleManager.get(context)
     // One device id for both the TSP transport (x-device-id) and the DK body,

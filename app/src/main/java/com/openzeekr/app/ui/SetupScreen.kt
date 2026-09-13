@@ -15,6 +15,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -36,6 +37,7 @@ import androidx.core.content.ContextCompat
 import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkLockController
 import com.openzeekr.app.ble.DkProvisioning
+import com.openzeekr.app.config.ConfigStore
 import kotlinx.coroutines.launch
 
 /**
@@ -50,11 +52,13 @@ fun SetupScreen(
     provisioning: DkProvisioning,
     ble: DkBleManager,
     lock: DkLockController,
+    config: ConfigStore,
     isProvisioned: () -> Boolean,
     snackbar: (String) -> Unit,
 ) {
     val prov by provisioning.state.collectAsState()
     val bleState by ble.state.collectAsState()
+    val cfg by config.config.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var owner by remember { mutableStateOf(false) }
@@ -141,6 +145,40 @@ fun SetupScreen(
                                 .onFailure { snackbar("Lock error: ${it.message}") }
                         }
                     }, enabled = ready) { Text("Lock") }
+                }
+            }
+        }
+        // ---- passive entry ----
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Approach unlock & walk-away lock", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                        Text("Unlock as you near the car, lock when you leave.",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(checked = cfg.proximityEnabled, onCheckedChange = { on ->
+                        config.update { it.copy(proximityEnabled = on) }
+                    })
+                }
+                if (cfg.proximityEnabled) {
+                    Text("Sensitivity — how close before it unlocks",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("veryclose" to "Very close", "close" to "Close", "far" to "Far").forEach { (key, label) ->
+                            FilterChip(selected = cfg.proximitySensitivity == key,
+                                onClick = { config.update { it.copy(proximitySensitivity = key) } },
+                                label = { Text(label) })
+                        }
+                    }
+                    Text(
+                        when (cfg.proximitySensitivity) {
+                            "veryclose" -> "Unlocks within arm's reach · most secure"
+                            "far" -> "Unlocks within ~3–4 m · most convenient"
+                            else -> "Unlocks within ~1–2 m · balanced"
+                        },
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
         }

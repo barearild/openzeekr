@@ -2,6 +2,8 @@ package com.openzeekr.app.net.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -125,6 +127,59 @@ data class SentryLaunchLiveResp(
 @Serializable
 data class SentryUploadReq(val ids: List<Long>)
 
+// -------------------------------------------------------------- garage / identity
+/** Body for renaming the car (POST modify-vehicle). */
+@Serializable
+data class ModifyVehicleRequest(
+    val id: String? = null,
+    val vehNickname: String,
+    val vehiclePlateNum: String? = null,
+)
+
+/** Model/colour/render/nickname extracted from the vehicle-list. */
+data class VehicleInfo(
+    val model: String?,
+    val colorName: String?,
+    val nickName: String?,
+    val photoUrl: String?,
+    val vehicleId: String?,
+)
+
+/** Tolerant parse of the (shape-varying) vehicle-list `data`. */
+object VehicleGarage {
+    fun parse(data: JsonElement?): VehicleInfo? {
+        val v = firstVehicle(data) ?: return null
+        fun s(k: String) = (v[k] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        return VehicleInfo(
+            model = s("modelName") ?: s("seriesName") ?: s("innerCode") ?: s("seriesCode"),
+            colorName = s("colorName") ?: materialColor(v),
+            nickName = s("nickName") ?: s("vehicleNickname") ?: s("vehNickname") ?: s("remark"),
+            photoUrl = s("vehiclePhotoBig") ?: s("vehicleListImgUrl") ?: s("vehiclePhotoSmall"),
+            vehicleId = s("id") ?: s("vehicleId") ?: s("relationId"),
+        )
+    }
+
+    private fun firstVehicle(data: JsonElement?): JsonObject? {
+        when (data) {
+            is JsonArray -> return data.firstOrNull() as? JsonObject
+            is JsonObject -> {
+                (data["list"] as? JsonArray ?: data["records"] as? JsonArray
+                    ?: data["vehicleList"] as? JsonArray)?.let { return it.firstOrNull() as? JsonObject }
+                if (data.containsKey("modelName") || data.containsKey("seriesName") || data.containsKey("vin")) return data
+                data.values.forEach { if (it is JsonArray) (it.firstOrNull() as? JsonObject)?.let { o -> return o } }
+            }
+            else -> {}
+        }
+        return null
+    }
+
+    private fun materialColor(v: JsonObject): String? {
+        val mats = v["vehicleMaterials"] as? JsonArray ?: return null
+        return mats.mapNotNull { ((it as? JsonObject)?.get("materialName") as? JsonPrimitive)?.contentOrNull }
+            .firstOrNull { it.isNotBlank() }
+    }
+}
+
 // -------------------------------------------------------------- vehicle status
 // GET ms-vehicle-status/api/v1.0/vehicle/status/latest?latest=false&target=new
 // The car status tree. No @SerializedName in the stock beans, so JSON keys == the
@@ -213,7 +268,15 @@ data class ElectricStatusVo(
     /** UNRELIABLE on this car (reports false while actually charging) — derive from [chargeIAct]·[chargeUAct]. */
     val isCharging: Boolean? = null,
     val isPluggedIn: Boolean? = null,
+    /** Charger state enum (authoritative). Charging = {2,15,24,28,30}; 5=preheat, 6=scheduled, 4/26=complete. */
     val chargerState: String? = null,
+    /** AC cable connection (1/2/3 = connected, 0 = disconnected, 8=init, 9=fail, 10=partial). */
+    val statusOfChargerConnection: String? = null,
+    /** DC connection (1/2/3 = connected). */
+    val dcDcConnectStatus: String? = null,
+    /** Charge-port lid state: "1" = open, else closed (AC / DC flaps). */
+    val chargeLidAcStatus: String? = null,
+    val chargeLidDcAcStatus: String? = null,
     /** Live AC charge current (A) and voltage (V); their product is the real charge power. */
     val chargeIAct: String? = null,
     val chargeUAct: String? = null,
@@ -228,13 +291,30 @@ data class ElectricStatusVo(
             return a * v
         }
 
-    /** True charging state: trust live power over the (buggy) isCharging flag. */
+    /** Actively charging — by chargerState enum (isCharging is dead), power as fallback. */
     val chargingActive: Boolean
-        get() = (chargePowerW ?: 0.0) > CHARGE_POWER_ON_W || isCharging == true
+        get() {
+            val cs = chargerState?.toIntOrNull()
+            return (cs != null && cs in CHARGING_STATES) || (chargePowerW ?: 0.0) > CHARGE_POWER_ON_W
+        }
+
+    /** Cable plugged in (charging or not). conn/dc in {1,2,3} = connected (isPluggedIn is dead). */
+    val pluggedIn: Boolean
+        get() {
+            if (chargingActive) return true
+            val c = statusOfChargerConnection?.toIntOrNull()
+            if (c != null && c in CONNECTED_STATES) return true
+            val d = dcDcConnectStatus?.toIntOrNull()
+            return d != null && d in CONNECTED_STATES
+        }
+
+    /** Charge-port flap open. */
+    val portOpen: Boolean get() = chargeLidAcStatus == "1" || chargeLidDcAcStatus == "1"
 
     companion object {
-        /** Above this many watts we consider the car actively charging (ignores noise/trickle). */
         const val CHARGE_POWER_ON_W = 100.0
+        private val CHARGING_STATES = setOf(2, 15, 24, 28, 30)
+        private val CONNECTED_STATES = setOf(1, 2, 3)
     }
 }
 
@@ -325,6 +405,10 @@ object VehicleStatus {
                             isCharging = e.boolOf("isCharging"),
                             isPluggedIn = e.boolOf("isPluggedIn"),
                             chargerState = e.str("chargerState"),
+                            statusOfChargerConnection = e.str("statusOfChargerConnection"),
+                            dcDcConnectStatus = e.str("dcDcConnectStatus"),
+                            chargeLidAcStatus = e.str("chargeLidAcStatus"),
+                            chargeLidDcAcStatus = e.str("chargeLidDcAcStatus"),
                             chargeIAct = e.str("chargeIAct"),
                             chargeUAct = e.str("chargeUAct"),
                             distanceToEmptyOnBatteryOnly = e.str("distanceToEmptyOnBatteryOnly"),

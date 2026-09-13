@@ -25,7 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.openzeekr.app.R
+import com.openzeekr.core.R
 import com.openzeekr.app.ui.theme.Brand
 
 /** The gradient app badge with the OpenZeekr mark — used in the top bar. */

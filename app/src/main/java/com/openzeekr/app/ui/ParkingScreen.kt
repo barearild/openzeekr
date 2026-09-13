@@ -75,6 +75,9 @@ fun ParkingScreen(deps: Deps, modifier: Modifier = Modifier) {
         modifier = modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        // Where's my car — MapLibre location + navigate deeplink
+        CarLocationSection(deps)
+
         // Status hero
         Card(
             Modifier.fillMaxWidth(),

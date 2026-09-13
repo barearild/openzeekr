@@ -141,6 +141,18 @@ Create `local.properties` with your SDK path (Android Studio does this for you):
 sdk.dir=/path/to/Android/Sdk
 ```
 
+The app is split into two modules: **`:core`** (all BLE/DK/crypto/cloud logic + baked
+secrets) and **`:app`** (the Compose UI). The map uses **MapLibre + OpenFreeMap** — free,
+no API key, no Google Play Services.
+
+### Car renders (not shipped)
+
+The home screen tints a paint "identity card" and lays the car's white render on top.
+Those renders are Zeekr press images, so they're **gitignored** (like the secrets) and
+never published. Drop your own transparent white PNG/WebP per model into
+`app/src/main/assets/cars/` as `car_{001,x,7x,7gt,9x}.webp`. If absent, the hero simply
+shows the coloured card with no car — the app still builds and runs.
+
 ## Signing (`X-SIGNATURE`)
 
 `X-SIGNATURE = base64(HMAC(prod_secret, stringToSign))`, where `stringToSign` is:

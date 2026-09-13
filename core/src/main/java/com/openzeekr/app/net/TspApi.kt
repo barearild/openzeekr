@@ -9,6 +9,7 @@ import com.openzeekr.app.net.model.SentryLaunchLiveResp
 import com.openzeekr.app.net.model.SentryLiveTokenReq
 import com.openzeekr.app.net.model.SentryLiveTokenResp
 import com.openzeekr.app.net.model.SentryUploadReq
+import com.openzeekr.app.net.model.ModifyVehicleRequest
 import com.openzeekr.app.net.model.SentryVideoResp
 import kotlinx.serialization.json.JsonObject
 import retrofit2.http.Body
@@ -52,6 +53,15 @@ interface TspApi {
     // ---- remote-control live state (VIN via X-VIN header) ----
     @GET("ms-app-bff/api/v1.0/remoteControl/getVehicleState")
     suspend fun remoteControlState(): BaseResponse<Map<String, String>>
+
+    // ---- garage: model / colour / render / nickname per VIN ----
+    // Raw JsonObject (shape varies: object-with-list or array); mapped by VehicleInfo.parse.
+    @GET("ms-app-bff/api/v4.0/veh/vehicle-list")
+    suspend fun vehicleList(@Query("needSharedCar") needSharedCar: Boolean = false): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    // ---- rename the car (vehNickname) ----
+    @POST("ms-tsp-user-vehicle/api/v1/veh/owner/relation/modify-vehicle")
+    suspend fun modifyVehicle(@Body body: ModifyVehicleRequest): BaseResponse<JsonObject>
 
     // ---- sentry / sentinel-monitoring-service ----
     @GET("/sentinel-monitoring-service/api/v1/alarm/event/query")
