@@ -42,8 +42,10 @@ object DkOpcodes {
     const val CMD_A2V_VEHICLE_CTRL = DkProtocol.CMD_A2V_CONTROL   // 0x0110
 
     const val CMD_A2V_RPA_REQ = DkProtocol.CMD_A2V_RPA_REQ
+    const val CMD_V2A_RPA_STATUS = DkProtocol.CMD_V2A_RPA_STATUS
     const val CMD_V2A_RPA_CHALLENGE = DkProtocol.CMD_V2A_RPA_CHALLENGE
     const val CMD_A2V_RPA_ANSWER = DkProtocol.CMD_A2V_RPA_ANSWER
+    const val CMD_V2A_RPA_SYNC = DkProtocol.CMD_V2A_RPA_SYNC
     const val CMD_A2V_RSSI_SYNC = DkProtocol.CMD_A2V_RSSI_SYNC
 
     const val CTRL_UNLOCK: Byte = DkProtocol.CTRL_UNLOCK   // 0x01

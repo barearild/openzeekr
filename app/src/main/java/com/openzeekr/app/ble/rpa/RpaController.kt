@@ -46,6 +46,7 @@ class RpaController(
 
     private var heartbeat: Job? = null
     private var rssiJob: Job? = null
+    private var reqModeJob: Job? = null
     /** Current move direction (rspaControl), echoed as the challenge-answer gesture. */
     @Volatile private var gesture: Byte = 0
 
@@ -57,20 +58,46 @@ class RpaController(
     private fun block(rpaCtrl: Byte, rspaCtrl: Byte = 0, outMode: Byte = 0): ByteArray =
         byteArrayOf(rpaCtrl, rspaCtrl, outMode, phoneStatus())
 
-    /** Establish the DK session and enter RSPA straight-line (hold-to-move) mode. */
+    /**
+     * Establish the DK session and open an RPA session the way the stock app does:
+     * send **REQ_MODE alone** (`rpaControl=REQ_MODE, rspaControl=0, outMode=0`) on a
+     * 1 Hz repeating poll, and do nothing else until the car answers with a 0x0117
+     * RPA_SYNC. The stock `BleConnectDialog` polls REQ_MODE every 1000 ms and ignores
+     * NAKs (0x100a) until that SYNC arrives — it never sets both control lanes.
+     *
+     * (Our previous opener set rpaControl=REQ_MODE **and** rspaControl=RSPA_REQUEST in
+     * one frame, an illegal both-lanes combo that matches no car command → 0x100a
+     * EEC_cmdMatchErr, exactly what we saw at the car. See RPA_SEQUENCE_FINDINGS.md.)
+     */
     fun begin() {
         scope.launch {
-            _state.value = _state.value.copy(phase = Phase.CONNECTING, message = null)
-            runCatching {
-                if (!session.isEstablished) session.establish()
-                session.sendFrame(DkOpcodes.CMD_A2V_RPA_REQ,
-                    block(RpaReq.CMD_RPA_REQ_MODE, RpaReq.CMD_RSPA_REQUEST))
-            }.onSuccess {
-                _state.value = _state.value.copy(phase = Phase.READY)
-                startRssiStream()
-            }.onFailure { fail(it) }
+            _state.value = _state.value.copy(phase = Phase.CONNECTING, message = "requesting RPA mode…")
+            runCatching { if (!session.isEstablished) session.establish() }
+                .onFailure { fail(it); return@launch }
+            startRssiStream()
+            startReqModePoll()
         }
     }
+
+    /**
+     * Spam REQ_MODE(1,0,0) at 1 Hz until the car opens the session with a 0x0117
+     * SYNC (handled in [handleInbound]). NAKs are expected and non-fatal while the
+     * car's RPA function is not yet armed on the head unit.
+     */
+    private fun startReqModePoll() {
+        if (reqModeJob?.isActive == true) return
+        reqModeJob = scope.launch {
+            while (isActive) {
+                runCatching {
+                    session.sendFrame(DkOpcodes.CMD_A2V_RPA_REQ,
+                        block(RpaReq.CMD_RPA_REQ_MODE, RpaReq.CMD_NONE))
+                } // ignore NAK/0x100a — keep polling until the car sends 0x0117 SYNC
+                delay(REQ_MODE_POLL_MS)
+            }
+        }
+    }
+
+    private fun stopReqModePoll() { reqModeJob?.cancel(); reqModeJob = null }
 
     fun startParkIn() = oneShot(RpaReq.CMD_RPA_START_PARKING_IN, Phase.PARKING_IN)
     fun searchSlot() = oneShot(RpaReq.CMD_RPA_START_SEARCHING_SLOT, Phase.PARKING_IN)
@@ -79,7 +106,7 @@ class RpaController(
     fun undo() = oneShot(RpaReq.CMD_RPA_UNDO, Phase.READY)
 
     fun stop() {
-        stopHeartbeat(); stopRssiStream(); gesture = 0
+        stopHeartbeat(); stopRssiStream(); stopReqModePoll(); gesture = 0
         oneShot(RpaReq.CMD_RPA_STOP, Phase.READY)
     }
 
@@ -161,6 +188,18 @@ class RpaController(
 
     private fun handleInbound(cmd: Int, payload: ByteArray) {
         when (cmd) {
+            DkOpcodes.CMD_V2A_RPA_SYNC -> {
+                // The car has opened the RPA session — stop polling REQ_MODE and go READY.
+                // Stock gates on prkgModInclnUB==1 && prkgModIncln!=0 inside this frame, but
+                // the exact field offsets in RpaSyncParkPayload aren't reversed yet, so we
+                // treat the SYNC's arrival (the car only sends it once it will talk RPA) as
+                // the open signal. TODO: parse prkgModIncln to pick the offered mode.
+                if (reqModeJob?.isActive == true) {
+                    stopReqModePoll()
+                    _state.value = _state.value.copy(phase = Phase.READY, message = "car ready (RPA_SYNC)")
+                }
+                _state.value = _state.value.copy(lastStatus = payload.firstOrNull())
+            }
             DkOpcodes.CMD_V2A_RPA_CHALLENGE -> {
                 // Auto-answer the per-round anti-relay challenge. The session strips the
                 // nSeq/ts header, so payload = randX | randY | authStatus | …
@@ -194,10 +233,15 @@ class RpaController(
     private fun stopHeartbeat() { heartbeat?.cancel(); heartbeat = null }
 
     private fun fail(t: Throwable) {
-        stopHeartbeat(); stopRssiStream()
+        stopHeartbeat(); stopRssiStream(); stopReqModePoll()
         _state.value = _state.value.copy(phase = Phase.ERROR, message = t.message)
     }
 
     private fun intToBytes(v: Int): ByteArray =
         byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte())
+
+    private companion object {
+        /** REQ_MODE poll cadence while opening (matches stock BleConnectDialog 1 Hz). */
+        const val REQ_MODE_POLL_MS = 1000L
+    }
 }

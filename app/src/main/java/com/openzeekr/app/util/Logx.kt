@@ -26,6 +26,11 @@ object Logx {
 
     private val clock = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
+    /** On-device ring-buffer collection gate (logcat always fires). Driven by the
+     *  Settings "Debug logging" toggle; off by default until config is applied. */
+    @Volatile private var enabled = false
+    fun setEnabled(on: Boolean) { enabled = on; if (!on) _lines.value = emptyList() }
+
     fun d(area: String, msg: String) = emit('D', area, msg).also { Log.d(TAG, "[$area] $msg") }
     fun w(area: String, msg: String) = emit('W', area, msg).also { Log.w(TAG, "[$area] $msg") }
     fun e(area: String, msg: String, t: Throwable? = null) {
@@ -39,6 +44,7 @@ object Logx {
     fun dump(): String = _lines.value.joinToString("\n")
 
     private fun emit(level: Char, area: String, msg: String) {
+        if (!enabled) return
         val line = "${clock.format(Date())} $level/$area  $msg"
         val cur = _lines.value
         _lines.value = (if (cur.size >= MAX) cur.drop(cur.size - MAX + 1) else cur) + line

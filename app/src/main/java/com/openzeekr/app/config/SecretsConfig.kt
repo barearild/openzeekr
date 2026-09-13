@@ -79,18 +79,28 @@ data class SecretsConfig(
     /** BLE MAC of the vehicle to range against (blank = strongest advertiser). */
     val proximityDeviceMac: String = "",
     /**
-     * Unlock when the smoothed RSSI rises to/above this (dBm). Higher = closer.
-     * Default -65 dBm ≈ roughly within ~1–2 m of the car.
+     * Unlock when the aggressively-monitored (connected-GATT) RSSI rises to/above
+     * this (dBm). Higher = closer. Default -65 dBm ≈ roughly within ~1–2 m of the
+     * car. The user-set value is clamped by [effectiveUnlockRssi] so it can never
+     * be weaker (more negative) than [UNLOCK_RSSI_FLOOR] — an accidental unlock
+     * from across the street is not something we let the user opt into.
      */
     val unlockRssi: Int = -65,
     /**
-     * Lock when the smoothed RSSI falls to/below this (dBm). Lower = farther.
-     * Default -85 dBm ≈ walking away / edge of reliable range. The gap to
-     * [unlockRssi] is deliberate hysteresis so it doesn't flap at the boundary.
+     * DEPRECATED as a user knob: the lock threshold is now derived from the unlock
+     * value ([effectiveLockRssi] = unlock − [LOCK_RSSI_GAP_DB]) so there is always a
+     * fixed hysteresis gap and the two can't be set to overlap. Kept only so old
+     * imported JSON still parses; the controller ignores it.
      */
-    val lockRssi: Int = -85,
+    val lockRssi: Int = -70,
     /** If NEAR and no advertisement is seen for this long, treat as walked-away. */
     val proximityLostMs: Long = 8000,
+
+    // ---- app-local UI state (not part of zeekr_secrets.json) ----
+    /** First-run onboarding wizard completed (login → key provisioning). */
+    val onboardingDone: Boolean = false,
+    /** Collect + show the on-device debug log. Off hides the log viewer entirely. */
+    val debugLogging: Boolean = false,
 ) {
     /** True when the minimum needed to talk to the cloud is present. */
     val cloudReady: Boolean
@@ -100,7 +110,40 @@ data class SecretsConfig(
     /** The secret used for X-SIGNATURE. prodSecret per the reversing notes. */
     val signSecret: String get() = prodSecret
 
+    /**
+     * Effective unlock threshold (dBm): the user's [unlockRssi] clamped so it can
+     * never be weaker than [UNLOCK_RSSI_FLOOR]. Unlock fires when the connected
+     * RSSI is at/above this.
+     */
+    val effectiveUnlockRssi: Int get() = unlockRssi.coerceAtLeast(UNLOCK_RSSI_FLOOR)
+
+    /**
+     * Effective lock threshold (dBm) = unlock − [LOCK_RSSI_GAP_DB], always this many
+     * dB weaker than unlock (fixed hysteresis). Lock fires when RSSI falls at/below.
+     */
+    val effectiveLockRssi: Int get() = effectiveUnlockRssi - LOCK_RSSI_GAP_DB
+
     companion object {
+        /** Unlock can never be set weaker (more negative) than this — safety floor. */
+        const val UNLOCK_RSSI_FLOOR = -65
+        /** Lock threshold sits this many dB weaker than unlock (fixed hysteresis gap). */
+        const val LOCK_RSSI_GAP_DB = 5
+        /**
+         * Passive low-power scan RSSI at/above which we do a background connect so the
+         * aggressive connected-GATT RSSI monitor can take over. The user's "-70..-90
+         * connect band": we connect as soon as the car is seen at ≥ this far edge.
+         */
+        const val CONNECT_RSSI_FAR = -90
+
+        /**
+         * True when the app-global secrets were BAKED IN at build time (a private build
+         * from a populated `secrets.properties`). Used to lock down the Settings screen:
+         * such a build hides all secret config and shows only login + debug. A clean
+         * repo build has these blank and exposes the full secret configuration.
+         */
+        val SECRETS_BAKED: Boolean =
+            BuildConfig.SEC_PROD_SECRET.isNotBlank() && BuildConfig.SEC_HMAC_SECRET_KEY.isNotBlank()
+
         /**
          * Initial config seeded from the gitignored `secrets.properties` via
          * BuildConfig. Every value is empty when that file is absent (fresh

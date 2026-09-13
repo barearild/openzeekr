@@ -10,6 +10,7 @@ import com.openzeekr.app.net.model.SentryLiveTokenReq
 import com.openzeekr.app.net.model.SentryLiveTokenResp
 import com.openzeekr.app.net.model.SentryUploadReq
 import com.openzeekr.app.net.model.SentryVideoResp
+import kotlinx.serialization.json.JsonObject
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.PUT
@@ -38,8 +39,15 @@ interface TspApi {
     ): BaseResponse<RemoteControlResponse>
 
     // ---- vehicle status (VIN via X-VIN header) ----
+    // Stock always sends latest=false & target=new; the gateway may 4xx without them.
+    // `data` is returned as a raw JsonObject and mapped tolerantly (see
+    // VehicleStatus.parse) — the real tree is huge and field types vary, so we never
+    // bind it to a rigid schema that could throw on an unexpected shape.
     @GET("ms-vehicle-status/api/v1.0/vehicle/status/latest")
-    suspend fun vehicleStatus(): BaseResponse<Map<String, String>>
+    suspend fun vehicleStatus(
+        @Query("latest") latest: String = "false",
+        @Query("target") target: String = "new",
+    ): BaseResponse<JsonObject>
 
     // ---- remote-control live state (VIN via X-VIN header) ----
     @GET("ms-app-bff/api/v1.0/remoteControl/getVehicleState")

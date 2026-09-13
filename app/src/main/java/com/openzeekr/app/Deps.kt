@@ -23,6 +23,7 @@ class Deps(context: Context) {
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     val config: ConfigStore = ConfigStore.get(context)
+        .also { com.openzeekr.app.util.Logx.setEnabled(it.current().debugLogging) }
     val apiClient: ApiClient = ApiClient.get(config)
 
     val auth = AuthRepository(config, apiClient)
@@ -41,7 +42,7 @@ class Deps(context: Context) {
     val lock = DkLockController(ble.session)
     val phoneStatus = PhoneStatusProvider(appCtx)
     val rpa = RpaController(ble.session, appScope, phoneStatus::stateByte, rssi = ble::pollRemoteRssi)
-    val proximity = ProximityController(appCtx, config, lock, appScope)
+    val proximity = ProximityController(appCtx, config, lock, ble, appScope)
 
     /** Call after the base URL / sign algo changes so the HTTP client rebuilds. */
     fun onEndpointChanged() = apiClient.rebuild()

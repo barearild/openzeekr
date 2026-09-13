@@ -55,11 +55,10 @@ Legend: ✅ working & verified · 🟡 built but **unverified** (may or may not 
 | **DK cloud provisioning** (enrol our own keypair → key-info) | ✅ Working — provisions OpenZeekr's own digital key and pairs to the car |
 | **Cloud remote control** (lock/unlock, climate, engine, charge, windows, flash/horn, sentry, …) | ✅ **Core verified** — commands accepted (`000000`) via the stock body shape + `X-SIGNATURE`; some commands are vehicle-state gated (e.g. refused at low battery SOC) so remain effectively unverified |
 | **Unified quick action** (BLE if a DK session is connected, else cloud) | ✅ Working |
-| **Foreground service** (keeps the DK BLE session connected; approach unlock/lock) | 🟡 Working keep-alive + ranging; a smarter low-power scan/connect policy is WIP |
-| **Proximity unlock / walk-away lock (RSSI)** | 🟡 Ranging is real (live BLE scan, EMA-smoothed, hysteresis + signal-loss watchdog); actuation issues real DK lock/unlock over the working session |
-| **Vehicle status** | 🟡 Built — **unverified** |
-| **Sentry footage list + clip download** | 🟡 Built (cloud `sentinel-monitoring-service`; system DownloadManager) — **unverified** |
-| **Sentry live view** | 🔴 Token fetch only; no viewer (rendering needs the RTC provider SDK, not identified) |
+| **Foreground service** (keeps the DK BLE session connected; approach unlock/lock) | 🟡 Two-stage policy: low-power hardware-filtered passive scan → background connect on approach → clean disconnect on walk-away; keep-alive suspended while proximity owns the link — **pending at-car tuning** |
+| **Proximity unlock / walk-away lock (RSSI)** | 🟡 Passive `SCAN_MODE_LOW_POWER` trip-wire, then aggressive connected-GATT RSSI; unlock at a user threshold (floored −65 dBm), auto-lock at unlock−5; connect-before-unlock, clean disconnect after lock — **pending at-car tuning** |
+| **Vehicle status** | ✅ **Working (EU)** — single GET (`vehicle/status/latest?latest=false&target=new`), tolerant JSON map (lock/doors/SOC/range/climate/odometer/tyres/location). Handles this platform's quirks: SOC lives in `chargeLevel` (not blank `stateOfCharge`); charging derived from live `chargeIAct×chargeUAct` kW (the `isCharging` flag is wrong) |
+| **Sentry footage / live view** | 🔴 **CN-only — not available on EU (or any overseas) gateway.** `sentinel-monitoring-service` is unrouted (gateway 404 `00A01`); our request is byte-identical to stock, so it's a server-side regional gap, not a client bug. **Hidden in the app for now; back-burner** — see below |
 | **Remote parking (RPA/RSPA)** | 🟡 Fully wired — flow, opcodes, 500 ms dead-man heartbeat, challenge auto-answer, RSSI stream, **and the AES-CMAC frame trailer + ECIES `cmacKey` unwrap** (reversed from the native lib, offline unit-tested). At the car the request is still NAK'd (`0x100a` cmdMatchErr → sequencing / must be armed in-car) — **pending at-car** |
 
 The digital-key handshake and lock/unlock are real and verified; RPA rides the same
@@ -121,7 +120,8 @@ net/      Signing (X-SIGNATURE), interceptors, Retrofit TspApi, models
 remote/   Command catalog (serviceIds) + repositories (auth, control, sentry)
 ble/      DkSession (+placeholder), DkBleManager (GATT scaffold), DkLockController
 ble/rpa/  RpaOpcodes + RpaController (heartbeat / challenge / flow)
-ui/       Compose screens: Controls, Parking, Key (DK setup), Sentry, Settings
+ui/       Compose screens: Controls, Parking, Key (DK setup), Settings
+          (Sentry screen exists but its tab is hidden — see back-burner note)
 ```
 
 > Note: region, base URL and project-id are EU defaults baked into
@@ -161,17 +161,32 @@ what the app currently assumes.
 
 Done: ✅ DK BLE handshake + session-key/IV derivation · ✅ digital-key lock/unlock at
 the car · ✅ GATT UUIDs + frame layout · ✅ RPA challenge-answer grid · ✅ RPA AES-CMAC
-trailer + ECIES `cmacKey` unwrap (offline-validated).
+trailer + ECIES `cmacKey` unwrap (offline-validated) · ✅ vehicle status (EU) · ✅
+first-run onboarding · ✅ two-stage low-power proximity policy.
 
 Next:
 
 1. **Remote parking at the car** — confirm the arming/sequencing (the request is
-   currently NAK'd `0x100a` cmdMatchErr) and capture a live golden vector to close the
-   CMAC loop end-to-end.
-2. **First-run onboarding** — guided login → BLE key provisioning (skippable) → main.
-3. **Smarter proximity** — low-power hardware-filtered scan, background connect in the
-   −70…−90 dBm band, tighter RSSI actuation thresholds.
-4. **Sentry live view** — identify the RTC provider SDK behind the token.
+   currently NAK'd `0x100a` cmdMatchErr — likely must be armed on the head unit) and
+   capture a live golden vector to close the CMAC loop end-to-end.
+2. **Proximity at the car** — tune the connect band / actuation thresholds on real
+   approach/walk-away runs.
+
+### Back-burner: Sentry / Sentinel (footage + live view) — CN-only
+
+The `sentinel-monitoring-service` backend is **not deployed on the EU (or any
+overseas) API gateway** — a live request returns HTTP 404 `00A01` ("no route
+registered"). Our path, query and signing are **byte-identical to the stock app**
+(verified against both `com.zeekr.overseas` 3.0.7 and `com.zeekr.global` 1.6.3 —
+same interface class, same host table, same call-sites), so this is a **server-side
+regional gap, not a client bug**. All five endpoints share one service prefix, so
+footage list, snapshots and live view fall together. Auth is region-scoped (the
+bearer token's issuer is the EU inner gateway; the VIN is registered EU-side), so an
+EU account can't simply borrow another region's gateway. The feature is therefore
+**hidden in the app for now and not testable on this vehicle** — parked here until a
+workaround surfaces (e.g. a gateway that both routes the service and accepts the
+credentials). Client code + reversed schemas are kept in `SENTRY_ENDPOINT_FINDINGS.md`
+for when that day comes.
 
 ## License
 

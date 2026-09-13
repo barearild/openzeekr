@@ -9,6 +9,8 @@ import com.openzeekr.app.net.model.SentryLiveTokenReq
 import com.openzeekr.app.net.model.SentryUploadReq
 import com.openzeekr.app.net.model.SentryVideoDetail
 import com.openzeekr.app.net.model.ServiceParameter
+import com.openzeekr.app.net.model.VehicleStatus
+import com.openzeekr.app.net.model.VehicleStatusBean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.security.KeyFactory
@@ -24,6 +26,24 @@ sealed interface CallResult<out T> {
 private inline fun <T> guarded(block: () -> T): CallResult<T> =
     runCatching { CallResult.Ok(block()) }
         .getOrElse { CallResult.Err(it.message ?: it.javaClass.simpleName) }
+
+/**
+ * User message for a sentry/sentinel failure. The `sentinel-monitoring-service` is
+ * NOT routed on the EU TSP gateway (the gateway answers 404 / code "00A01" — verified:
+ * our path & params are byte-identical to the stock app; the service is only deployed
+ * behind CN/other-region gateways). Surface that plainly instead of a raw HTTP 404.
+ */
+const val SENTRY_REGION_UNAVAILABLE =
+    "Sentry isn't available for this account's region — the sentinel-monitoring-service " +
+        "isn't routed on the EU gateway. It only works on CN (or other-region) accounts."
+
+fun sentryMessage(t: Throwable): String =
+    if ((t as? retrofit2.HttpException)?.code() == 404) SENTRY_REGION_UNAVAILABLE
+    else t.message ?: t.javaClass.simpleName
+
+private inline fun <T> sentryGuarded(block: () -> T): CallResult<T> =
+    runCatching { CallResult.Ok(block()) }
+        .getOrElse { CallResult.Err(sentryMessage(it)) }
 
 class AuthRepository(private val store: ConfigStore, private val client: ApiClient) {
 
@@ -63,12 +83,24 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
             }
         }
 
-    suspend fun status(): CallResult<Map<String, String>> = withContext(Dispatchers.IO) {
+    /**
+     * Fetch the real vehicle status tree (lock/doors/SOC/range/climate/odometer/…).
+     * A plain GET already returns real data; we heartbeat first (as with [send]) so
+     * the cloud has us marked ONLINE and returns a fresh snapshot. VIN rides in the
+     * X-VIN header; the query params (latest=false, target=new) mirror the stock app.
+     */
+    suspend fun status(): CallResult<VehicleStatusBean> = withContext(Dispatchers.IO) {
         guarded {
             val cfg = store.current()
             require(cfg.vin.isNotBlank()) { "VIN not configured" }
-            // VIN is carried in the X-VIN header by HeaderInterceptor.
-            client.api.vehicleStatus().data ?: emptyMap()
+            runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
+            val resp = client.api.vehicleStatus()
+            val obj = resp.data ?: error(resp.message ?: "status failed (code=${resp.code})")
+            // PII-safe: log only the key structure (names, never values like VIN/GPS/SOC)
+            // so an unexpected shape can be diagnosed from the on-device debug log.
+            com.openzeekr.app.util.Logx.d("status", "keys=${VehicleStatus.keyTree(obj)}")
+            // `data` is a raw JsonObject; map it tolerantly (never throws on shape).
+            VehicleStatus.parse(obj)
         }
     }
 }
@@ -77,7 +109,7 @@ class SentryRepository(private val store: ConfigStore, private val client: ApiCl
 
     suspend fun events(startMs: Long, endMs: Long): CallResult<List<SentryVideoDetail>> =
         withContext(Dispatchers.IO) {
-            guarded {
+            sentryGuarded {
                 val cfg = store.current()
                 val params = mapOf(
                     "alarmVin" to cfg.vin,
@@ -92,7 +124,7 @@ class SentryRepository(private val store: ConfigStore, private val client: ApiCl
 
     /** Ask the car to upload specific event clips to the cloud first. */
     suspend fun requestUpload(ids: List<Long>): CallResult<Unit> = withContext(Dispatchers.IO) {
-        guarded { client.api.sentryRequestUpload(SentryUploadReq(ids)); Unit }
+        sentryGuarded { client.api.sentryRequestUpload(SentryUploadReq(ids)); Unit }
     }
 
     /**
@@ -114,7 +146,7 @@ class SentryRepository(private val store: ConfigStore, private val client: ApiCl
                 }
                 url?.let { CallResult.Ok(it) } ?: CallResult.Err("clip not ready after upload (timed out)")
             } catch (e: Exception) {
-                CallResult.Err(e.message ?: e.javaClass.simpleName)
+                CallResult.Err(sentryMessage(e))
             }
         }
 
@@ -125,7 +157,7 @@ class SentryRepository(private val store: ConfigStore, private val client: ApiCl
     /** Obtain RTC join params for a live view. Rendering still needs the RTC
      *  provider SDK behind the returned appId (not yet identified). */
     suspend fun liveToken(roomId: String): CallResult<String> = withContext(Dispatchers.IO) {
-        guarded {
+        sentryGuarded {
             val cfg = store.current()
             val tok = client.api.sentryLiveToken(SentryLiveTokenReq(roomId, cfg.deviceIdentifier)).data
             client.api.sentryLaunchLive(cfg.vin)

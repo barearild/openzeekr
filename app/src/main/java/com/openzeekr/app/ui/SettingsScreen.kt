@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -23,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -50,13 +52,17 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
         modifier = modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        val baked = SecretsConfig.SECRETS_BAKED
         Text("Configuration", style = MaterialTheme.typography.titleLarge)
         Text(
-            "Secrets are stored only on-device (encrypted) and never compiled in. Import an existing zeekr_secrets.json below, or fill fields manually.",
+            if (baked)
+                "This build ships with its keys built in. Just log in below; flip Debug logging if you need the on-device log."
+            else
+                "Secrets are stored only on-device (encrypted) and never compiled in. Import an existing zeekr_secrets.json below, or fill fields manually.",
             style = MaterialTheme.typography.bodySmall,
         )
 
-        SectionCard("Extracted app-global secrets") {
+        if (!baked) SectionCard("Extracted app-global secrets") {
             Field("hmac_access_key", cfg.hmacAccessKey, secret = true) { v -> set { it.copy(hmacAccessKey = v) } }
             Field("hmac_secret_key", cfg.hmacSecretKey, secret = true) { v -> set { it.copy(hmacSecretKey = v) } }
             Field("password_public_key", cfg.passwordPublicKey, secret = true) { v -> set { it.copy(passwordPublicKey = v) } }
@@ -109,34 +115,54 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             }) { Text("Login") }
         }
 
-        OutlinedButton(onClick = {
-            store.resetToBuildDefaults()
-            cfg = store.current()
-            deps.onEndpointChanged()
-            status = "Reset to build defaults."
-        }) { Text("Reset to build defaults") }
+        if (!baked) {
+            OutlinedButton(onClick = {
+                store.resetToBuildDefaults()
+                cfg = store.current()
+                deps.onEndpointChanged()
+                status = "Reset to build defaults."
+            }) { Text("Reset to build defaults") }
 
-        Divider()
-        SectionCard("Import / Export JSON") {
-            OutlinedTextField(
-                value = importText,
-                onValueChange = { importText = it },
-                label = { Text("Paste zeekr_secrets.json here") },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 3,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    status = store.importJson(importText).fold({ cfg = store.current(); "Imported." }, { "Import failed: ${it.message}" })
-                }) { Text("Import") }
-                OutlinedButton(onClick = { importText = store.exportJson() }) { Text("Export to box") }
+            Divider()
+            SectionCard("Import / Export JSON") {
+                OutlinedTextField(
+                    value = importText,
+                    onValueChange = { importText = it },
+                    label = { Text("Paste zeekr_secrets.json here") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        status = store.importJson(importText).fold({ cfg = store.current(); "Imported." }, { "Import failed: ${it.message}" })
+                    }) { Text("Import") }
+                    OutlinedButton(onClick = { importText = store.exportJson() }) { Text("Export to box") }
+                }
             }
         }
 
         if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.bodyMedium)
 
         Divider()
-        LogViewer()
+        // Debug logging toggle — gates the on-device log (logcat is unaffected).
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Debug logging", style = MaterialTheme.typography.titleMedium)
+                Text("Record and show the on-device log below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = cfg.debugLogging, onCheckedChange = { on ->
+                store.update { it.copy(debugLogging = on) }
+                cfg = store.current()
+                Logx.setEnabled(on)
+            })
+        }
+        if (cfg.debugLogging) LogViewer()
     }
 }
 

@@ -62,10 +62,18 @@ class ProximityService : Service() {
         super.onDestroy()
     }
 
-    /** Hold the DK BLE session connected; reconnect whenever it goes idle/errored. */
+    /**
+     * Hold the DK BLE session connected; reconnect whenever it goes idle/errored.
+     *
+     * Suspended while proximity is enabled: in that mode the [ProximityController]
+     * owns the connection lifecycle (passive scan → background connect on approach →
+     * release on walk-away), and an always-on keep-alive would both defeat the
+     * power saving and fight the controller for the GATT.
+     */
     private suspend fun keepConnected(deps: Deps) {
         while (scope.isActive) {
-            if (deps.ble.hasCredential && deps.ble.bluetoothAvailable) {
+            if (!deps.config.current().proximityEnabled &&
+                deps.ble.hasCredential && deps.ble.bluetoothAvailable) {
                 when (deps.ble.state.value) {
                     DkBleManager.State.IDLE, DkBleManager.State.ERROR -> {
                         Logx.d("svc", "keep-alive: (re)connecting DK session")

@@ -7,7 +7,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.LocalParking
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,7 +40,9 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     CONTROLS("Controls", Icons.Filled.DirectionsCar),
     PARKING("Parking", Icons.Filled.LocalParking),
     KEY("Key", Icons.Filled.VpnKey),
-    SENTRY("Sentry", Icons.Filled.Videocam),
+    // SENTRY hidden for now: sentinel-monitoring-service is not routed on the EU (or
+    // any overseas) gateway — it's a CN-only backend, so footage + live view 404.
+    // SentryScreen is kept in the tree for when a workaround is found. See README.
     SETTINGS("Settings", Icons.Filled.Settings),
 }
 
@@ -61,6 +62,12 @@ fun AppRoot(deps: Deps) {
     val loggedIn = cfg.accessToken.isNotBlank()
     val provisioned = remember(prov.step) { deps.dkIdentity.isProvisioned } ||
         prov.step == DkProvisioning.Step.DONE
+
+    // First run: guided wizard (login → key). Skip straight to the app once done.
+    if (!cfg.onboardingDone) {
+        OnboardingScreen(deps, onDone = { deps.config.update { it.copy(onboardingDone = true) } })
+        return
+    }
 
     AppBootstrap(deps, serviceEnabled = loggedIn && provisioned)
 
@@ -117,7 +124,6 @@ fun AppRoot(deps: Deps) {
                     snackbar = snackbar,
                 )
             }
-            Tab.SENTRY -> SentryScreen(deps, snackbar, m)
             Tab.SETTINGS -> SettingsScreen(deps, m)
         }
     }
