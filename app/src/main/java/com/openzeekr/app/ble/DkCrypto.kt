@@ -1,5 +1,8 @@
 package com.openzeekr.app.ble
 
+import org.bouncycastle.crypto.engines.AESEngine
+import org.bouncycastle.crypto.macs.CMac
+import org.bouncycastle.crypto.params.KeyParameter
 import org.bouncycastle.jce.ECNamedCurveTable
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec
@@ -141,6 +144,49 @@ object DkCrypto {
         c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key16, "AES"), GCMParameterSpec(128, iv12))
         c.updateAAD(iv12)
         return c.doFinal(ciphertextWithTag)
+    }
+
+    // ---------------- AES-CMAC + RPA cmacKey unwrap (remote parking 0x0113/0x0116) ----------------
+
+    /** Fallback CMAC key (BleConstant.CMACKEY) used only when there's no per-DK key: 16 × 0x55. */
+    val CMAC_FALLBACK_KEY: ByteArray = ByteArray(16) { 0x55 }
+
+    /**
+     * AES-CMAC (NIST SP800-38B) truncated to the first 6 bytes — the RPA frame trailer.
+     * The car's native `cmacCompute` is stock OpenSSL AES-CMAC (cipher chosen by key length,
+     * 16B → AES-128; output cut to [0:6]). See CMAC_FINDINGS.md §2.
+     */
+    fun aesCmac6(key: ByteArray, msg: ByteArray): ByteArray {
+        val mac = CMac(AESEngine.newInstance())
+        mac.init(KeyParameter(key))
+        mac.update(msg, 0, msg.size)
+        val full = ByteArray(mac.macSize)
+        mac.doFinal(full, 0)
+        return full.copyOfRange(0, 6)
+    }
+
+    /**
+     * Decrypt the cloud-issued `cmacKeyCert` envelope to the 16-byte AES-CMAC key using our own
+     * DK private key. The envelope is a minimal ECIES(P-256)+AES-256-GCM container (NOT X9.63/HMAC):
+     *   `[len(4 BE)=L] ‖ ephPub(L = 04‖X‖Y) ‖ ciphertext ‖ gcmTag(16)`
+     * where `SK = ECDH(ourPriv, ephPub).X` (raw 32-byte X, no KDF), then AES-256-GCM with
+     * `key=SK, iv=SK[0:12], aad=SK[12:16]`, tag = last 16 B. Recovered plaintext = the 16-byte key.
+     * Reversed from libiwallca.so `ecies_decrypt`@0x1bcf78 and round-trip validated (CMAC_FINDINGS §7–9).
+     */
+    fun unwrapCmacKey(envelope: ByteArray, dkPrivate: PrivateKey): ByteArray {
+        require(envelope.size >= 4) { "cmacKeyCert envelope too short (${envelope.size})" }
+        val l = ((envelope[0].toInt() and 0xFF) shl 24) or ((envelope[1].toInt() and 0xFF) shl 16) or
+            ((envelope[2].toInt() and 0xFF) shl 8) or (envelope[3].toInt() and 0xFF)
+        require(l in 33..120 && envelope.size >= 4 + l + 16) {
+            "cmacKeyCert envelope malformed (size=${envelope.size}, L=$l)"
+        }
+        val ephPoint = envelope.copyOfRange(4, 4 + l)                     // 04‖X‖Y
+        val ctTag = envelope.copyOfRange(4 + l, envelope.size)           // ciphertext ‖ tag
+        val sk = ecdhSharedPoint(dkPrivate, ephPoint).copyOfRange(0, 32)  // raw ECDH X (32B)
+        val c = Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(Cipher.DECRYPT_MODE, SecretKeySpec(sk, "AES"), GCMParameterSpec(128, sk, 0, 12))
+        c.updateAAD(sk, 12, 4)
+        return c.doFinal(ctTag)
     }
 
     // ---------------- ECDSA / hash ----------------

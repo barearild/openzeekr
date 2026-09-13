@@ -41,6 +41,9 @@ class RealDkSession(
 
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
 
+    /** 16-byte AES-CMAC key for RPA frames (ECIES-unwrapped once from the credential). */
+    @Volatile private var cmacKeyCache: ByteArray? = null
+
     init { transport.onInbound(::onRawInbound) }
 
     // ---------------- handshake ----------------
@@ -233,21 +236,53 @@ class RealDkSession(
     override fun onInbound(handler: (Int, ByteArray) -> Unit) { appHandler = handler }
 
     override fun close() {
-        isEstablished = false; cryptoReady = false
+        isEstablished = false; cryptoReady = false; cmacKeyCache = null
         pending.values.forEach { it.cancel() }; pending.clear()
         transport.close()
     }
 
+    /**
+     * The 16-byte AES-CMAC key for RPA (0x0113/0x0116) frames: ECIES-unwrap the credential's
+     * cmacKeyCert with our own DK private key (CMAC_FINDINGS §7–8). On any failure fall back to
+     * 0x55×16 — matching stock's behaviour when asymmDecrypt throws — so RPA still transmits and
+     * the failure is visible in the log rather than crashing. Cached for the session.
+     */
+    private fun cmacKey(): ByteArray {
+        cmacKeyCache?.let { return it }
+        val cred = credentialProvider()
+        val key = try {
+            if (cred != null && cred.cmacKeyCert.isNotEmpty())
+                DkCrypto.unwrapCmacKey(cred.cmacKeyCert, cred.dkPrivateKey).also {
+                    Logx.d("dk", "RPA cmacKey unwrapped via ECIES (${it.size}B, cert=${cred.cmacKeyCert.size}B)")
+                }
+            else {
+                Logx.w("dk", "RPA cmacKey: no cmacKeyCert on credential — using 0x55 fallback")
+                DkCrypto.CMAC_FALLBACK_KEY
+            }
+        } catch (e: Exception) {
+            Logx.w("dk", "RPA cmacKey ECIES unwrap failed (${e.message}) — using 0x55 fallback")
+            DkCrypto.CMAC_FALLBACK_KEY
+        }
+        cmacKeyCache = key
+        return key
+    }
+
     // ---------------- frame I/O ----------------
 
-    /** Build (auto nSeq/ts, GCM if needed) and write; no wait. */
+    /** Build (auto nSeq/ts, 6-byte CMAC trailer for RPA, GCM if needed) and write; no wait. */
     private suspend fun send(cmdId: Int, tail: ByteArray): Boolean {
         val nSeq = DkPayload.nextSeq(); val ts = DkPayload.timestamp()
-        val plain = DkPayload.wrap(nSeq, ts, tail)
+        // RPA frames append AES-CMAC(cmacKey, ts(4 BE) ‖ tail)[0:6] inside the GCM plaintext.
+        val fullTail = if (DkProtocol.needsCmac(cmdId)) tail + DkCrypto.aesCmac6(cmacKey(), tsBytes(ts) + tail) else tail
+        val plain = DkPayload.wrap(nSeq, ts, fullTail)
         val body = if (DkProtocol.isEncrypted(cmdId)) DkCrypto.gcmEncrypt(sKey, iv, plain) else plain
         val frame = DkFrame(cmdId, DkProtocol.INST_REQ, body).encode()
         return transport.write(cmdId, frame)
     }
+
+    /** The 4-byte big-endian timestamp exactly as DkPayload.wrap serializes it (for the CMAC input). */
+    private fun tsBytes(ts: Int): ByteArray =
+        byteArrayOf((ts ushr 24).toByte(), (ts ushr 16).toByte(), (ts ushr 8).toByte(), ts.toByte())
 
     /** Send (auto nSeq/ts wrap) then await [expect]; returns the decrypted response body (incl nSeq||ts). */
     private suspend fun exchange(cmdId: Int, tail: ByteArray, expect: Int): ByteArray {

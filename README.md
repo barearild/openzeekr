@@ -7,8 +7,9 @@
 > entirely at your own risk.
 
 A clean-room Android companion app for a **Zeekr (overseas / EU) vehicle** — remote
-control over the Geely/ECARX TSP cloud, and the groundwork for the BLE digital-key
-channel (proximity unlock and remote parking).
+control over the Geely/ECARX TSP cloud, and a working **offline BLE digital key**
+(lock/unlock at the car), with proximity unlock and remote-parking research on the
+same digital-key channel.
 
 Built from independent reverse-engineering of the author's **own** vehicle and app,
 for interoperability and research.
@@ -50,18 +51,20 @@ Legend: ✅ working & verified · 🟡 built but **unverified** (may or may not 
 | Area | Status |
 |------|--------|
 | **Account login** (idaas → TSP bearer) | ✅ Working (EU) — logs in and obtains the TSP bearer token |
-| **Cloud remote control** (lock/unlock, climate, engine start, charge, windows, flash/horn, sentry mode, …) | 🟡 Built — full catalog → `PUT /remote-control/vehicle/telematics/{vin}` with `X-SIGNATURE`; **we don't yet know if it actually works against a car** |
-| **Vehicle status** | 🟡 Built — **unverified** (unknown if it works) |
-| **Sentry footage list / request-upload** | 🟡 Built (cloud `sentinel-monitoring-service`) — **unverified** (unknown if it works) |
+| **DK BLE digital key — pair + lock/unlock** | ✅ **Working & verified at the car.** Clean-room handshake (cert exchange → ECDH → AES-128-GCM session) + control opcodes `0x110`/`0x111`; locks and unlocks over BLE, no native libs |
+| **DK cloud provisioning** (enrol our own keypair → key-info) | ✅ Working — provisions OpenZeekr's own digital key and pairs to the car |
+| **Cloud remote control** (lock/unlock, climate, engine, charge, windows, flash/horn, sentry, …) | ✅ **Core verified** — commands accepted (`000000`) via the stock body shape + `X-SIGNATURE`; some commands are vehicle-state gated (e.g. refused at low battery SOC) so remain effectively unverified |
+| **Unified quick action** (BLE if a DK session is connected, else cloud) | ✅ Working |
+| **Foreground service** (keeps the DK BLE session connected; approach unlock/lock) | 🟡 Working keep-alive + ranging; a smarter low-power scan/connect policy is WIP |
+| **Proximity unlock / walk-away lock (RSSI)** | 🟡 Ranging is real (live BLE scan, EMA-smoothed, hysteresis + signal-loss watchdog); actuation issues real DK lock/unlock over the working session |
+| **Vehicle status** | 🟡 Built — **unverified** |
+| **Sentry footage list + clip download** | 🟡 Built (cloud `sentinel-monitoring-service`; system DownloadManager) — **unverified** |
 | **Sentry live view** | 🔴 Token fetch only; no viewer (rendering needs the RTC provider SDK, not identified) |
-| **Remote parking (RPA/RSPA)** | 🟡 Flow, opcodes, 500 ms heartbeat, challenge auto-answer hook, RSSI stream — all real; transmit rides the DK session |
-| **Proximity unlock/lock (RSSI)** | 🟡 Ranging is real (live BLE scan, EMA-smoothed, hysteresis + signal-loss watchdog); the unlock/lock action rides the DK session |
-| **DK BLE handshake** (cert exchange → ECDH → AES-GCM session) | 🟡 **Works at the car** — the session establishes; the rest of the BLE protocol is WIP |
-| **Digital-key lock/unlock + DK commands** (opcodes, RPA challenge) | 🔴 WIP — on top of the working handshake, not functional yet |
+| **Remote parking (RPA/RSPA)** | 🟡 Fully wired — flow, opcodes, 500 ms dead-man heartbeat, challenge auto-answer, RSSI stream, **and the AES-CMAC frame trailer + ECIES `cmacKey` unwrap** (reversed from the native lib, offline unit-tested). At the car the request is still NAK'd (`0x100a` cmdMatchErr → sequencing / must be armed in-car) — **pending at-car** |
 
-The DK pieces are written against a real `DkSession` interface, so dropping in a
-working handshake implementation lights up lock/unlock and remote parking without
-touching the UI or controllers.
+The digital-key handshake and lock/unlock are real and verified; RPA rides the same
+`DkSession` and is byte-complete pending an at-car session where remote parking is
+armed. See `CMAC_FINDINGS.md` (local) for the RPA crypto derivation.
 
 ## 🔑 Getting your own keys (required — none are shipped)
 
@@ -107,7 +110,8 @@ car-side `DKB` switch). Configure on the **Controls** screen:
 - Optionally pin the vehicle's BLE MAC; blank ranges the strongest advertiser.
 
 RSSI is exponentially smoothed (α=0.4). Zone transitions fire once: FAR→NEAR
-unlocks, NEAR→FAR locks. (Actuation is live once the DK session is implemented.)
+unlocks, NEAR→FAR locks — issuing **real DK lock/unlock** over the working BLE
+session. (A lower-power hardware-filtered scan + background-connect policy is WIP.)
 
 ## Project structure
 
@@ -153,12 +157,21 @@ sdk.dir=/path/to/Android/Sdk
 gateway uses **HMAC-SHA-256** (key = `prod_secret`); this is the EU recipe and is
 what the app currently assumes.
 
-## Roadmap — making DK functional
+## Roadmap
 
-1. Reverse the DK BLE handshake → implement `DkSession.establish()` (session key,
-   IV, CMAC-key derivation).
-2. Extract the RPA challenge-answer grid → `DkSession.answerChallenge`.
-3. Fill the DK GATT service/characteristic UUIDs + frame layout in `DkBleManager`.
+Done: ✅ DK BLE handshake + session-key/IV derivation · ✅ digital-key lock/unlock at
+the car · ✅ GATT UUIDs + frame layout · ✅ RPA challenge-answer grid · ✅ RPA AES-CMAC
+trailer + ECIES `cmacKey` unwrap (offline-validated).
+
+Next:
+
+1. **Remote parking at the car** — confirm the arming/sequencing (the request is
+   currently NAK'd `0x100a` cmdMatchErr) and capture a live golden vector to close the
+   CMAC loop end-to-end.
+2. **First-run onboarding** — guided login → BLE key provisioning (skippable) → main.
+3. **Smarter proximity** — low-power hardware-filtered scan, background connect in the
+   −70…−90 dBm band, tighter RSSI actuation thresholds.
+4. **Sentry live view** — identify the RTC provider SDK behind the token.
 
 ## License
 

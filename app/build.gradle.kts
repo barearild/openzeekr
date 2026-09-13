@@ -112,4 +112,7 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     // DK provisioning: PKCS#10 CSR builder for cert enrolment.
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+
+    // JVM unit tests (offline validation of the DK crypto — RPA CMAC / ECIES key unwrap).
+    testImplementation("junit:junit:4.13.2")
 }

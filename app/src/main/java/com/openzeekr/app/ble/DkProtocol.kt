@@ -101,9 +101,19 @@ object DkProtocol {
         CMD_A2V_CONTROL, CMD_V2A_CMD_RECEIVED, CMD_V2A_RESULT,
         CMD_A2V_RPA_REQ, CMD_V2A_RPA_STATUS, CMD_V2A_RPA_CHALLENGE, CMD_A2V_RPA_ANSWER,
         CMD_V2A_RPA_SYNC, CMD_V2A_RPA_SYNC2, CMD_A2V_TRANS, CMD_V2A_VSTATUS_SYNC,
-        CMD_A2V_CUST_REQ, CMD_A2V_RSSI_SYNC, CMD_V2A_APPROACHLOCK_NOTIFY -> true
+        CMD_A2V_CUST_REQ, CMD_V2A_APPROACHLOCK_NOTIFY -> true
+        // NB: CMD_A2V_RSSI_SYNC (0x0158) is sent PLAINTEXT — the stock RSSI packer (p0/f0.b)
+        // returns the payload unencrypted (nSeq|ts|signal), unlike the other RPA frames.
         else -> false
     }
+
+    /**
+     * cmdIds whose GCM plaintext carries a trailing 6-byte AES-CMAC (remote parking).
+     * The MAC is over `ts(4 BE) ‖ controlBytes` (nSeq excluded); trailer = AES-CMAC[0:6].
+     * Only 0x0113 (RPA_REQ) and 0x0116 (RPA_ANSWER) — lock/unlock 0x0110 has no CMAC.
+     * See CMAC_FINDINGS.md §1.
+     */
+    fun needsCmac(cmdId: Int): Boolean = cmdId == CMD_A2V_RPA_REQ || cmdId == CMD_A2V_RPA_ANSWER
 
     /** Coef/calibration frames go on GATT channel 2 (char 2A12/2A13); everything else channel 1. */
     fun isChannel2(cmdId: Int): Boolean = when (cmdId) {
