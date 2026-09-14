@@ -30,7 +30,7 @@ import com.openzeekr.app.remote.Command
 fun iconFor(cmd: Command): ImageVector = when (cmd) {
     Command.UNLOCK, Command.TRUNK_UNLOCK, Command.LOCKER_OFF -> Icons.Filled.LockOpen
     Command.LOCK, Command.TRUNK_LOCK, Command.LOCKER_ON -> Icons.Filled.Lock
-    Command.FRONT_TRUNK -> Icons.Filled.Inventory2
+    Command.FRONT_TRUNK, Command.TRUNK_OPEN -> Icons.Filled.Inventory2
     Command.CHARGE_LID_OPEN, Command.CHARGE_LID_CLOSE -> Icons.Filled.EvStation
     Command.AC_ON, Command.AC_OFF, Command.CABIN_ON, Command.CABIN_OFF -> Icons.Filled.Air
     Command.DEFROST_ON, Command.DEFROST_OFF -> Icons.Filled.AcUnit

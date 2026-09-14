@@ -180,6 +180,174 @@ object VehicleGarage {
     }
 }
 
+// -------------------------------------------------------------- inbox / messages
+// Member message-center ("Inbox") — REST on the same app-BFF gateway, no push of
+// bodies (FCM only carries a deep-link nudge). See MESSAGE_CENTER_FINDINGS.md:
+//   GET  overseas-app/member/inbox           (pageNumber,pageSize,customTypeId,vin) — list
+//   GET  overseas-app/member/inbox/unread    -> { unreadNum }
+//   PUT  overseas-app/member/inbox/{id}      — mark one read
+//   POST overseas-app/member/inbox/read-all  { customTypeId, vin } — mark all read
+// Categories (customTypeId groups): VEHICLE (charging done/abnormal, alarm/abnormal
+// parking, remote-control results, low battery), OTA, AFTER_SALES, ZEEKR (marketing).
+// The paged wrapper shape isn't verified live, so parse tolerantly (array | {records}
+// | {list} | {rows} | {data:{…}}) rather than binding a rigid schema.
+
+/** One inbox message, flattened for the UI. */
+data class InboxMessage(
+    val id: String?,
+    val title: String?,
+    val body: String?,
+    val category: String?,
+    val redirectUrl: String?,
+    val imageUrl: String?,
+    val timeMs: Long?,
+    val read: Boolean,
+)
+
+object Inbox {
+    /** Tolerant parse of the (shape-varying) inbox `data` into a message list. */
+    fun parse(data: JsonElement?): List<InboxMessage> =
+        listNode(data).mapNotNull { (it as? JsonObject)?.let(::message) }
+
+    /** Tolerant parse of the unread-count `data` — either { unreadNum } or a bare number. */
+    fun parseUnread(data: JsonElement?): Int = when (data) {
+        is JsonPrimitive -> data.contentOrNull?.toIntOrNull() ?: 0
+        is JsonObject -> (listOf("unreadNum", "unread", "count", "total", "num")
+            .firstNotNullOfOrNull { (data[it] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() }) ?: 0
+        else -> 0
+    }
+
+    private fun message(o: JsonObject): InboxMessage {
+        fun s(vararg k: String) = k.firstNotNullOfOrNull { (o[it] as? JsonPrimitive)?.contentOrNull?.takeIf { v -> v.isNotBlank() } }
+        val ts = s("createTime", "sendTime", "createdTime", "time", "gmtCreate", "pushTime")
+        val readFlag = when (val r = o["read"] ?: o["isRead"] ?: o["readFlag"] ?: o["hasRead"]) {
+            is JsonPrimitive -> r.contentOrNull.let { it == "true" || it == "1" }
+            else -> false
+        }
+        return InboxMessage(
+            id = s("id", "messageId", "noticeId", "inboxId"),
+            title = s("title", "name", "subject", "noticeTitle"),
+            body = s("detail", "content", "body", "text", "summary", "noticeContent"),
+            category = s("customTypeId", "category", "type", "bizType", "groupType"),
+            redirectUrl = s("redirectUrl", "url", "linkUrl", "jumpUrl"),
+            imageUrl = s("attachment", "imageUrl", "image", "iconUrl", "picUrl"),
+            timeMs = ts?.let { it.toLongOrNull() ?: parseIso(it) },
+            read = readFlag,
+        )
+    }
+
+    /** Find the message array wherever it lives in the response wrapper. */
+    private fun listNode(data: JsonElement?): List<JsonElement> = when (data) {
+        is JsonArray -> data
+        is JsonObject -> {
+            val direct = (data["records"] ?: data["list"] ?: data["rows"]
+                ?: data["items"] ?: data["content"]) as? JsonArray
+            when {
+                direct != null -> direct
+                data["data"] != null && data["data"] !is JsonPrimitive -> listNode(data["data"])
+                else -> data.values.firstOrNull { it is JsonArray } as? JsonArray ?: emptyList()
+            }
+        }
+        else -> emptyList()
+    }
+
+    private fun parseIso(s: String): Long? = runCatching {
+        java.time.Instant.parse(if (s.endsWith("Z") || s.contains('+')) s else s + "Z").toEpochMilli()
+    }.getOrNull()
+}
+
+/** Body for POST overseas-app/member/inbox/read-all. */
+@Serializable
+data class MarkAllReadRequest(val customTypeId: String? = null, val vin: String? = null)
+
+// ---------------------------------------------------------- ecarx control (System B)
+// Physical-actuation commands (powered tailgate RDU_2/RDL_2, charge lids RDO/RDC) don't
+// execute via the plain POST /ms-remote-control path — stock dispatches them through the
+// ecarx "device-api" transport: PUT /remote-control/vehicle/telematics/{vin} with a FLAT
+// body (no setting{} wrapper). Same bearer + prod_secret X-SIGNATURE signing, so our
+// existing interceptors cover it. Success = code 1000 or 200 (int). See
+// SYSTEM_B_TRANSPORT_FINDINGS.md.
+
+@Serializable
+data class EcarxControlRequest(
+    val serviceId: String,
+    val command: String,
+    // NOTE: no default values here — the client Json uses encodeDefaults=false, which
+    // would drop a defaulted field. Every field the gateway expects must be passed
+    // explicitly by [Command.toEcarxRequest] so it is actually serialized.
+    val creator: String,
+    val userId: String,
+    val timestamp: String,
+    val serviceParameters: List<ServiceParameter>,
+    /** Always emitted (stock sends {} when there's no schedule). */
+    val operationScheduling: JsonObject,
+)
+
+@Serializable
+data class EcarxControlResponse(
+    val code: Int? = null,
+    val message: String? = null,
+    val success: Boolean = false,
+    val sessionId: String? = null,
+    val data: RemoteControlResponse? = null,
+) {
+    /** ecarx BaseResult success sentinel: code 1000 or 200 (or an explicit success flag). */
+    val ok: Boolean get() = success || code == 1000 || code == 200
+}
+
+// -------------------------------------------------------- vehicle capabilities (per-VIN)
+// GET ms-vehicle-capability/api/v1.0/vehicle/function/model/info -> List<VehicleFunctionBean>.
+// Presence of a functionCode = that remote function is supported on THIS car. The stock UI
+// hides unsupported buttons from this list. See VEHICLE_CAPABILITIES_FINDINGS.md.
+
+/**
+ * Supported-function flags for the current car. [known] is false when we couldn't fetch
+ * the list (endpoint unverified / offline) — in that case every flag reads true so we
+ * "fail open" and show all controls rather than hiding everything.
+ */
+data class VehicleCapabilities(val codes: Set<String>, val known: Boolean = true) {
+    private fun has(vararg keys: String): Boolean =
+        !known || keys.any { k -> codes.any { it.contains(k, ignoreCase = true) } }
+
+    val frunk get() = has("ZK_remote_hood_control", "hood")
+    val tailgate get() = has("C_RDU_2", "trunk")
+    val chargeCover get() = has("charging_cover", "charge_cover")
+    val sunroof get() = has("C_RWS_4", "sunroof")
+    val windows get() = has("remote_control_window")
+    val sunshade get() = has("curtain", "sunshade")
+    val engineRes get() = has("C_RES")
+    val rpa get() = has("RPA")
+    val sentry get() = has("sentry")
+    val fridge get() = has("refrigerator", "fridge")
+    val fragrance get() = has("fragrance")
+    val climate get() = has("climate")
+    val seatHeat get() = has("seat_heating")
+    val seatCool get() = has("seat_ventilation")
+    val steeringHeat get() = has("steering_wheel_heating")
+    val charging get() = has("V_RCS", "RCS")
+    val glovebox get() = has("storageBox_codeLock", "T_ZAP", "ZAD")
+    val visitor get() = has("visitor", "ZAG", "ZAS")
+
+    companion object {
+        /** Nothing fetched yet — every flag reads true (show all controls). */
+        val UNKNOWN = VehicleCapabilities(emptySet(), known = false)
+    }
+}
+
+object VehicleCapabilityParse {
+    fun parse(data: JsonElement?): VehicleCapabilities {
+        val arr = when (data) {
+            is JsonArray -> data
+            is JsonObject -> (data["list"] as? JsonArray ?: data["records"] as? JsonArray
+                ?: data["data"] as? JsonArray ?: data.values.firstOrNull { it is JsonArray } as? JsonArray)
+            else -> null
+        } ?: return VehicleCapabilities.UNKNOWN
+        val codes = arr.mapNotNull { ((it as? JsonObject)?.get("functionCode") as? JsonPrimitive)?.contentOrNull }
+            .filter { it.isNotBlank() }.toSet()
+        return if (codes.isEmpty()) VehicleCapabilities.UNKNOWN else VehicleCapabilities(codes)
+    }
+}
+
 // -------------------------------------------------------------- vehicle status
 // GET ms-vehicle-status/api/v1.0/vehicle/status/latest?latest=false&target=new
 // The car status tree. No @SerializedName in the stock beans, so JSON keys == the

@@ -236,9 +236,22 @@ class RealDkSession(
     override fun onInbound(handler: (Int, ByteArray) -> Unit) { appHandler = handler }
 
     override fun close() {
+        reset()
+        transport.close()
+    }
+
+    /**
+     * Reset session state for a fresh handshake on the NEXT connect, WITHOUT tearing down
+     * the transport wiring. The inbound handler is registered once in [init]; [close] nulls
+     * it via `transport.close()`, which — because this session instance is reused across
+     * reconnects — would permanently unwire inbound frames and silently break the next
+     * handshake. So an unexpected BLE drop calls [reset], not [close]: it clears the stale
+     * `isEstablished` flag and derived GCM keys (a new link needs a new pairing epoch + new
+     * keys) but leaves the transport handler live so the re-handshake still receives frames.
+     */
+    fun reset() {
         isEstablished = false; cryptoReady = false; cmacKeyCache = null
         pending.values.forEach { it.cancel() }; pending.clear()
-        transport.close()
     }
 
     /**

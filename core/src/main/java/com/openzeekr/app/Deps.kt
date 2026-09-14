@@ -11,6 +11,8 @@ import com.openzeekr.app.ble.rpa.RpaController
 import com.openzeekr.app.config.ConfigStore
 import com.openzeekr.app.net.ApiClient
 import com.openzeekr.app.remote.AuthRepository
+import com.openzeekr.app.remote.CapabilityHolder
+import com.openzeekr.app.remote.InboxRepository
 import com.openzeekr.app.remote.RemoteControlRepository
 import com.openzeekr.app.remote.SentryRepository
 import com.openzeekr.app.remote.VehicleStatusHolder
@@ -30,8 +32,12 @@ class Deps(context: Context) {
     val auth = AuthRepository(config, apiClient)
     val control = RemoteControlRepository(config, apiClient)
     val sentry = SentryRepository(config, apiClient)
+    /** Member message center (charging done, abnormal parking, alarms, OTA, …). */
+    val inbox = InboxRepository(config, apiClient)
     /** Live vehicle status (foreground poll, no push) — observed by the UI. */
     val vehicleState = VehicleStatusHolder(control, appScope)
+    /** Per-VIN supported functions — drives which controls the UI shows. */
+    val capabilities = CapabilityHolder(control, appScope)
 
     val ble: DkBleManager = DkBleManager.get(context)
     // One device id for both the TSP transport (x-device-id) and the DK body,

@@ -66,7 +66,8 @@ class AuthRepository(private val store: ConfigStore, private val client: ApiClie
 
 class RemoteControlRepository(private val store: ConfigStore, private val client: ApiClient) {
 
-    /** Fire a catalog command (all "remote API functions" flow through here). */
+    /** Fire a catalog command. Physical-actuation ids (RDU_2/RDL_2/RDO/RDC) route through
+     *  the ecarx device-api transport (System B); everything else through /ms-remote-control. */
     suspend fun send(cmd: Command, extraParams: List<ServiceParameter> = emptyList()): CallResult<RemoteControlResponse> =
         withContext(Dispatchers.IO) {
             guarded {
@@ -77,14 +78,24 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
                 // status right before the command so the TSP doesn't reject execution
                 // (037005 "execution failed, please try again"). Best-effort.
                 runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
-                // Body = command/serviceId/setting{serviceParameters,...}; the account is
-                // identified by the bearer token + X-VIN header, not a body field.
-                val body = cmd.toRequest(extraParams = extraParams)
-                // VIN is carried in the X-VIN header by HeaderInterceptor.
-                val resp = client.api.sendControl(body)
-                resp.data ?: error(resp.message ?: "command failed (code=${resp.code})")
+                if (cmd.usesSystemB) {
+                    // Flat body, PUT /remote-control/vehicle/telematics/{vin}, ecarx success sentinel.
+                    val resp = client.api.ecarxControl(cfg.vin, cmd.toEcarxRequest(cfg.userId, extraParams))
+                    if (!resp.ok) error(resp.message ?: "command failed (code=${resp.code})")
+                    resp.data ?: RemoteControlResponse(serviceId = cmd.serviceId, status = "ok")
+                } else {
+                    // Body = command/serviceId/setting{serviceParameters,...}; the account is
+                    // identified by the bearer token + X-VIN header, not a body field.
+                    val resp = client.api.sendControl(cmd.toRequest(extraParams = extraParams))
+                    resp.data ?: error(resp.message ?: "command failed (code=${resp.code})")
+                }
             }
         }
+
+    /** Per-VIN supported functions (drives button visibility). Fail-open on error. */
+    suspend fun capabilities(): CallResult<com.openzeekr.app.net.model.VehicleCapabilities> = withContext(Dispatchers.IO) {
+        guarded { com.openzeekr.app.net.model.VehicleCapabilityParse.parse(client.api.vehicleCapability().data) }
+    }
 
     /**
      * Fetch the real vehicle status tree (lock/doors/SOC/range/climate/odometer/…).
@@ -115,6 +126,60 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
     /** Rename the car (cloud). vehicleId is optional; the backend also keys off X-VIN. */
     suspend fun renameVehicle(name: String, vehicleId: String? = null): CallResult<Unit> = withContext(Dispatchers.IO) {
         guarded { client.api.modifyVehicle(ModifyVehicleRequest(id = vehicleId, vehNickname = name)); Unit }
+    }
+}
+
+/**
+ * Member message-center ("Inbox"): charging done/abnormal, alarm / abnormal parking,
+ * remote-control results, low battery, OTA, marketing. On-demand paged REST on the same
+ * gateway — there is no push of message bodies (FCM only deep-links). Endpoints and
+ * response shapes are reversed but not yet verified live, so everything is tolerant.
+ */
+class InboxRepository(private val store: ConfigStore, private val client: ApiClient) {
+
+    /** One page of messages (newest first as the server returns them). */
+    suspend fun messages(page: Int = 1, pageSize: Int = 30): CallResult<List<com.openzeekr.app.net.model.InboxMessage>> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                val cfg = store.current()
+                runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
+                com.openzeekr.app.net.model.Inbox.parse(
+                    client.api.inbox(INBOX, pageNumber = page, pageSize = pageSize, vin = cfg.vin.ifBlank { null }).data)
+            }
+        }
+
+    /** Unread badge count. */
+    suspend fun unreadCount(): CallResult<Int> = withContext(Dispatchers.IO) {
+        guarded { com.openzeekr.app.net.model.Inbox.parseUnread(client.api.inboxUnread("$INBOX/unread").data) }
+    }
+
+    /** Mark a single message read. */
+    suspend fun markRead(id: String): CallResult<Unit> = withContext(Dispatchers.IO) {
+        guarded { client.api.inboxMarkRead("$INBOX/$id"); Unit }
+    }
+
+    /** Mark every message read. */
+    suspend fun markAllRead(): CallResult<Unit> = withContext(Dispatchers.IO) {
+        guarded {
+            val cfg = store.current()
+            client.api.inboxReadAll("$INBOX/read-all", com.openzeekr.app.net.model.MarkAllReadRequest(vin = cfg.vin.ifBlank { null })); Unit
+        }
+    }
+
+    private companion object {
+        /**
+         * The inbox lives on a SEPARATE "overseas-app" backend — an Azure zeekr.eu gateway,
+         * not the TSP gateway (which 404s) and not overseas-app.lynkco.com (a marketing site
+         * that returns HTML). See INBOX_HOST_FINDINGS.md.
+         *
+         * ⚠️ AUTH DIFFERS: this host does NOT accept the TSP X-SIGNATURE(prod_secret)+X-VIN
+         * scheme our interceptors add. It needs its own header set — Authorization (bearer,
+         * which we have) + app-authorization + a static App-Code token + appSecret=zeekr_tis +
+         * Tmp-Tenant-Code + appId=TSP + appCode=eu-app + Client-Id + language/country, with vin
+         * as a @Query (already sent). Until a dedicated app-BFF client with those headers is
+         * wired, this call reaches the right host but 401s. Tracked as back-burner.
+         */
+        const val INBOX = "https://gateway-pub-azure.zeekr.eu/overseas-app/member/inbox"
     }
 }
 

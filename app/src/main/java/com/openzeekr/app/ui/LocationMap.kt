@@ -109,25 +109,12 @@ fun CarLocationSection(deps: Deps, modifier: Modifier = Modifier) {
             is CallResult.Err -> {}
         }
     }
-    Column(modifier.fillMaxWidth()) {
-        Box(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(16.dp))) {
+    CockpitCard(modifier) {
+        SectionHeader("Where's my car")
+        Box(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(14.dp))) {
             CarMap(pos?.first, pos?.second, Modifier.matchParentSize())
         }
-        Row(
-            Modifier.fillMaxWidth().padding(top = 10.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(if (pos != null) Brand.accent else Brand.surface2)
-                .let { if (pos != null) it.clickable { navigateToCar(ctx, pos!!.first, pos!!.second) } else it }
-                .padding(vertical = 13.dp),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Filled.Navigation, null, tint = if (pos != null) Color(0xFF07121F) else Brand.faint, modifier = Modifier.size(18.dp))
-            Text(
-                if (pos != null) "  Navigate to car" else "  Location unavailable",
-                color = if (pos != null) Color(0xFF07121F) else Brand.faint,
-                fontWeight = FontWeight.Bold, fontSize = 14.sp,
-            )
-        }
+        if (pos != null) PrimaryButton("Navigate to car", Modifier.fillMaxWidth()) { navigateToCar(ctx, pos!!.first, pos!!.second) }
+        else GhostButton("Location unavailable", Modifier.fillMaxWidth(), enabled = false, tint = Brand.muted) {}
     }
 }

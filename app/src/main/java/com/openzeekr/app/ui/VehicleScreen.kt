@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -71,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openzeekr.app.Deps
 import com.openzeekr.app.ble.DkBleManager
+import com.openzeekr.app.config.Units
 import com.openzeekr.app.net.model.ServiceParameter
 import com.openzeekr.app.net.model.VehicleInfo
 import com.openzeekr.app.net.model.VehicleStatusBean
@@ -92,8 +94,11 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     val bleReady = bleState == DkBleManager.State.SESSION_READY
 
     val status by deps.vehicleState.state.collectAsState()
+    val cfg by deps.config.config.collectAsState()
+    val caps by deps.capabilities.state.collectAsState()
     var info by remember { mutableStateOf<VehicleInfo?>(null) }
     LaunchedEffect(Unit) {
+        deps.capabilities.ensureLoaded()
         deps.vehicleState.refresh()
         when (val r = deps.control.vehicleInfo()) {
             is CallResult.Ok -> r.value?.let { vi ->
@@ -147,7 +152,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             StatItem("Central lock", if (locked) "Locked" else "Unlocked", if (locked) Brand.good else Brand.energy, Modifier.weight(1f))
             StatItem("Battery", soc?.let { "${fmt(it)}%" } ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
-            StatItem("Range", rangeStr?.let { "$it km" } ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+            StatItem("Range", rangeStr?.let { s -> s.toDoubleOrNull()?.let { Units.distance(it, cfg.distanceUnit) } ?: "$s km" } ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
         }
         Divider()
 
@@ -163,18 +168,21 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Ctl(Icons.Filled.Campaign, "Flash + Honk", modifier = Modifier.weight(1f)) { fire("Flash + Honk") { deps.control.send(Command.FLASH_HORN) } }
-                Ctl(Icons.Filled.Inventory2, "Frunk", modifier = Modifier.weight(1f)) { fire("Frunk") { deps.control.send(Command.FRONT_TRUNK) } }
-                Ctl(Icons.Filled.Inventory2, "Trunk", modifier = Modifier.weight(1f)) { fire("Trunk") { deps.control.send(Command.TRUNK_UNLOCK) } }
+                // Frunk/tailgate shown only if the car reports the capability (per-VIN).
+                if (caps.frunk) Ctl(Icons.Filled.Inventory2, "Frunk", modifier = Modifier.weight(1f)) { fire("Frunk") { deps.control.send(Command.FRONT_TRUNK) } }
+                if (caps.tailgate) Ctl(Icons.Filled.Inventory2, "Trunk", modifier = Modifier.weight(1f)) { fire("Trunk") { deps.control.send(Command.TRUNK_OPEN) } }
+                // keep the 3-across row balanced when a control is hidden
+                repeat((if (caps.frunk) 0 else 1) + (if (caps.tailgate) 0 else 1)) { Spacer(Modifier.weight(1f)) }
             }
         }
 
         // tyres — real values: MaintenanceStatusVo.tyreStatus* is pressure in kPa.
-        SectionLabel("Tyre pressure · bar")
+        SectionLabel("Tyre pressure · ${Units.pressureSuffix(cfg.pressureUnit)}")
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Tyre("Front L", maint?.tyreStatusDriver, Modifier.weight(1f)); Tyre("Front R", maint?.tyreStatusPassenger, Modifier.weight(1f))
+            Tyre("Front L", maint?.tyreStatusDriver, cfg.pressureUnit, Modifier.weight(1f)); Tyre("Front R", maint?.tyreStatusPassenger, cfg.pressureUnit, Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Tyre("Rear L", maint?.tyreStatusDriverRear, Modifier.weight(1f)); Tyre("Rear R", maint?.tyreStatusPassengerRear, Modifier.weight(1f))
+            Tyre("Rear L", maint?.tyreStatusDriverRear, cfg.pressureUnit, Modifier.weight(1f)); Tyre("Rear R", maint?.tyreStatusPassengerRear, cfg.pressureUnit, Modifier.weight(1f))
         }
     }
 
@@ -191,7 +199,7 @@ private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Flo
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
             .height(196.dp).clip(RoundedCornerShape(22.dp)).background(Brand.paintCard(paint.color)),
     ) {
-        if (charging) Box(Modifier.matchParentSize().background(Brand.neon.copy(alpha = breathe)))
+        if (charging) Box(Modifier.matchParentSize().background(Brand.energy.copy(alpha = breathe)))
         val bmp = rememberAssetBitmap(model.renderAsset)
         if (bmp != null) Image(bitmap = bmp, contentDescription = model.displayName,
             modifier = Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 4.dp).aspectRatio(16f / 8f))
@@ -203,7 +211,7 @@ private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Flo
         if (charging && soc != null) {
             val phase by trans.animateFloat(0f, 1f, infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart), label = "soc")
             val shimmer = Brush.linearGradient(
-                0f to Brand.neon.copy(alpha = .55f), 0.5f to Color.White.copy(alpha = .85f), 1f to Brand.neon.copy(alpha = .55f),
+                0f to Brand.energy.copy(alpha = .55f), 0.5f to Color.White.copy(alpha = .85f), 1f to Brand.energy.copy(alpha = .55f),
                 start = Offset(-160f + phase * 320f, 0f), end = Offset(phase * 320f, 0f), tileMode = TileMode.Mirror)
             Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(4.dp).background(Color.White.copy(alpha = .10f))) {
                 Box(Modifier.fillMaxWidth(soc / 100f).height(4.dp).background(shimmer))
@@ -260,13 +268,13 @@ private fun ChargeCtl(charging: Boolean, plugged: Boolean, soc: Float?, powerKw:
 }
 
 @Composable
-private fun Tyre(pos: String, kpa: String?, modifier: Modifier = Modifier) {
-    val bar = kpa?.toFloatOrNull()?.let { it / 100f }
-    val warn = bar != null && bar < 2.2f
+private fun Tyre(pos: String, kpa: String?, unit: String, modifier: Modifier = Modifier) {
+    val kpaV = kpa?.toDoubleOrNull()
+    val warn = kpaV != null && kpaV < 220.0   // < ~2.2 bar
     Row(modifier.clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
         .padding(horizontal = 12.dp, vertical = 9.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         Text(pos, color = Brand.muted, fontSize = 11.sp)
-        Text(bar?.let { "%.1f bar".format(it) } ?: "—", color = if (warn) Brand.energy else MaterialTheme.colorScheme.onSurface,
+        Text(kpaV?.let { Units.pressure(it, unit) } ?: "—", color = if (warn) Brand.energy else MaterialTheme.colorScheme.onSurface,
             fontSize = 14.sp, fontWeight = FontWeight.Bold)
     }
 }
@@ -286,7 +294,7 @@ private fun ChargeSheet(
                 Text(soc?.let { "${fmt(it)}%" } ?: "—", fontSize = 30.sp, fontWeight = FontWeight.Bold)
                 Column(horizontalAlignment = Alignment.End) {
                     Text(if (charging) (powerKw?.let { "${fmt1(it)} kW · 1-phase" } ?: "Charging") else if (plugged) "Plugged in" else "Unplugged",
-                        color = if (charging) Brand.neon else Brand.muted, fontWeight = FontWeight.SemiBold)
+                        color = if (charging) Brand.energy else Brand.muted, fontWeight = FontWeight.SemiBold)
                     status?.additionalVehicleStatus?.electricVehicleStatus?.distanceToEmptyOnBatteryOnly?.let { Text("$it km range", color = Brand.muted, fontSize = 12.sp) }
                 }
             }
@@ -298,12 +306,8 @@ private fun ChargeSheet(
             SheetToggleRow("Battery temp regulation", "Keep the pack in its ideal window") { on ->
                 onCmd(if (on) Command.BATTERY_PREHEAT_ON else Command.BATTERY_PREHEAT_OFF, emptyList())
             }
-            Button(onClick = { onCmd(if (charging) Command.CHARGING_OFF else Command.CHARGING_ON, emptyList()) },
-                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = if (charging) Brand.crit.copy(alpha = .22f) else Brand.accent,
-                    contentColor = if (charging) Color(0xFFFFB4B4) else Color(0xFF07121F))) {
-                Text(if (charging) "Stop charging" else "Start charging", fontWeight = FontWeight.Bold)
-            }
+            if (charging) GhostButton("Stop charging", Modifier.fillMaxWidth().padding(top = 12.dp), tint = Brand.crit) { onCmd(Command.CHARGING_OFF, emptyList()) }
+            else PrimaryButton("Start charging", Modifier.fillMaxWidth().padding(top = 12.dp)) { onCmd(Command.CHARGING_ON, emptyList()) }
         }
     }
 }
@@ -333,7 +337,7 @@ private fun SheetToggleRow(title: String, subtitle: String, onToggle: (Boolean) 
             Text(title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             if (subtitle.isNotBlank()) Text(subtitle, color = Brand.muted, fontSize = 11.5.sp)
         }
-        Switch(checked = on, onCheckedChange = { on = it; onToggle(it) }, colors = SwitchDefaults.colors(checkedTrackColor = Brand.accent))
+        Switch(checked = on, onCheckedChange = { on = it; onToggle(it) }, colors = brandSwitchColors())
     }
 }
 

@@ -21,6 +21,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.LocalParking
+import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.VpnKey
@@ -100,6 +101,25 @@ fun AppRoot(deps: Deps) {
     var renaming by remember { mutableStateOf(false) }
     var draftName by remember { mutableStateOf("") }
 
+    // Message center (charging done, abnormal parking, alarms, OTA, …) — a bell in the
+    // top bar with an unread badge; opening it takes over the screen.
+    var showInbox by remember { mutableStateOf(false) }
+    var unread by remember { mutableIntStateOf(0) }
+    val refreshUnread: () -> Unit = {
+        if (loggedIn) deps.appScope.launch {
+            when (val r = deps.inbox.unreadCount()) {
+                is com.openzeekr.app.remote.CallResult.Ok -> unread = r.value
+                is com.openzeekr.app.remote.CallResult.Err -> {}
+            }
+        }
+    }
+    LaunchedEffect(loggedIn) { refreshUnread() }
+
+    if (showInbox) {
+        InboxScreen(deps, onBack = { showInbox = false; refreshUnread() }, snackbar = snackbar)
+        return
+    }
+
     var tab by remember { mutableIntStateOf(Tab.SETTINGS.ordinal) }
     LaunchedEffect(loggedIn, provisioned) {
         tab = when {
@@ -129,6 +149,27 @@ fun AppRoot(deps: Deps) {
                     Text(if (cfg.vin.isNotBlank()) "VIN ••••${cfg.vin.takeLast(3)}" else "Tap the pencil to name your car",
                         color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
+                // Notifications bell with unread badge.
+                Box {
+                    Icon(
+                        Icons.Filled.NotificationsNone, "Messages", tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(38.dp).clip(CircleShape).clickable { showInbox = true }.padding(7.dp),
+                    )
+                    if (unread > 0) {
+                        Box(
+                            Modifier.align(Alignment.TopEnd).padding(3.dp)
+                                .size(if (unread > 9) 17.dp else 9.dp)
+                                .clip(CircleShape).background(Brand.crit),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (unread > 9) Text(
+                                if (unread > 99) "99+" else "$unread",
+                                color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.width(6.dp))
                 Row(
                     Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
                         .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape).padding(horizontal = 11.dp, vertical = 7.dp),
@@ -165,6 +206,11 @@ fun AppRoot(deps: Deps) {
                     lock = deps.lock,
                     config = deps.config,
                     isProvisioned = { deps.dkIdentity.isProvisioned },
+                    dkId = remember(provisioned) { runCatching { deps.dkIdentity.credential()?.dkId }.getOrNull() },
+                    onRemoveKey = {
+                        deps.dkIdentity.clearProvisioned()
+                        runCatching { deps.ble.disconnect() }
+                    },
                     snackbar = snackbar,
                 )
             }

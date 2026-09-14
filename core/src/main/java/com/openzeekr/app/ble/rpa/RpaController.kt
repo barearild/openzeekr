@@ -76,6 +76,21 @@ class RpaController(
                 .onFailure { fail(it); return@launch }
             startRssiStream()
             startReqModePoll()
+            // Watchdog: don't spin on "connecting" forever. If the car never opens the
+            // session (no 0x0117 SYNC), stop and surface the real reason. On this platform
+            // the car NAKs REQ_MODE (0x100a) until remote parking is ARMED on the head unit
+            // — see RPA_SEQUENCE_FINDINGS.md. Cancelled implicitly once phase leaves CONNECTING.
+            launch {
+                delay(CONNECT_TIMEOUT_MS)
+                if (_state.value.phase == Phase.CONNECTING) {
+                    stopReqModePoll(); stopRssiStream()
+                    _state.value = _state.value.copy(
+                        phase = Phase.ERROR,
+                        message = "The car didn't open a remote-parking session. Enable Remote Parking on " +
+                            "the car's centre screen first, then retry — the car ignores the request until " +
+                            "RPA is armed in-car.")
+                }
+            }
         }
     }
 
@@ -243,5 +258,7 @@ class RpaController(
     private companion object {
         /** REQ_MODE poll cadence while opening (matches stock BleConnectDialog 1 Hz). */
         const val REQ_MODE_POLL_MS = 1000L
+        /** Give up "connecting" after this long with no 0x0117 SYNC from the car. */
+        const val CONNECT_TIMEOUT_MS = 20_000L
     }
 }

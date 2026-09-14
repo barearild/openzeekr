@@ -1,9 +1,13 @@
 package com.openzeekr.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -11,6 +15,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchColors
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -27,6 +34,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openzeekr.core.R
 import com.openzeekr.app.ui.theme.Brand
+
+/**
+ * One consistent Switch palette for the whole app. The Material3 defaults wash out on
+ * the near-black cockpit ground (near-invisible OFF track, muddy ON thumb); this gives a
+ * bright accent ON track with a dark thumb, and a legible OFF track with a clear border.
+ */
+@Composable
+fun brandSwitchColors(checkedTrack: Color = Brand.accent): SwitchColors = SwitchDefaults.colors(
+    checkedThumbColor = Color(0xFF07121F),
+    checkedTrackColor = checkedTrack,
+    checkedBorderColor = Color.Transparent,
+    uncheckedThumbColor = Brand.muted,
+    uncheckedTrackColor = Brand.surface3,
+    uncheckedBorderColor = Brand.line,
+    disabledCheckedTrackColor = checkedTrack.copy(alpha = 0.35f),
+    disabledUncheckedTrackColor = Brand.surface2,
+)
 
 /** The gradient app badge with the OpenZeekr mark — used in the top bar. */
 @Composable
@@ -45,6 +69,64 @@ fun BrandBadge(size: Int = 30) {
             modifier = Modifier.size((size * 0.72f).dp),
         )
     }
+}
+
+/** Rounded surface panel — the cockpit "card". */
+@Composable
+fun CockpitCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(MaterialTheme.colorScheme.surface).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        content = content,
+    )
+}
+
+/**
+ * Primary action — a muted accent-tinted button (NOT a loud solid-blue fill). Full-saturation
+ * blue is reserved for the bottom nav; interactive surfaces use this restrained tint + accent
+ * text/border so the cockpit stays calm. Disabled stays legible (raised surface + faint text).
+ */
+@Composable
+fun PrimaryButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
+    Box(
+        modifier.clip(RoundedCornerShape(14.dp))
+            .background(if (enabled) Brand.accent.copy(alpha = 0.16f) else Brand.surface3)
+            .border(1.dp, if (enabled) Brand.accent.copy(alpha = 0.55f) else Brand.line, RoundedCornerShape(14.dp))
+            .let { if (enabled) it.clickable(onClick = onClick) else it }
+            .padding(vertical = 14.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(text, color = if (enabled) Brand.accent else Brand.muted, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
+}
+
+/** Muted segmented/toggle chip shared by the unit selectors and pickers (selected = accent
+ *  tint + light text, not a loud fill). Use everywhere a "radio" choice appears. */
+@Composable
+fun SelectChip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier.clip(RoundedCornerShape(10.dp))
+            .background(if (selected) Brand.accent.copy(alpha = 0.18f) else Brand.surface2)
+            .border(1.dp, if (selected) Brand.accent.copy(alpha = 0.5f) else Brand.line, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp, vertical = 7.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) Brand.accent else Brand.muted,
+            fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/** Secondary / outline action, cockpit-styled with a visible disabled state. */
+@Composable
+fun GhostButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, tint: Color = Brand.accent, onClick: () -> Unit) {
+    Box(
+        modifier.clip(RoundedCornerShape(14.dp)).background(Brand.surface2)
+            .border(1.dp, if (enabled) Brand.line else Brand.line.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+            .let { if (enabled) it.clickable(onClick = onClick) else it }
+            .padding(vertical = 14.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(text, color = if (enabled) tint else Brand.faint, fontWeight = FontWeight.SemiBold, fontSize = 15.sp) }
 }
 
 /** Subtle uppercase section label. */

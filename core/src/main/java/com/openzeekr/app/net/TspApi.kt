@@ -19,6 +19,7 @@ import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
 import retrofit2.http.QueryMap
+import retrofit2.http.Url
 
 /**
  * The remote (cloud) API surface, reconstructed from the ECARX/Geely TSP
@@ -50,6 +51,18 @@ interface TspApi {
         @Query("target") target: String = "new",
     ): BaseResponse<JsonObject>
 
+    // ---- ecarx "device-api" control (System B) — physical actuation (RDU_2/RDL_2/RDO/RDC) ----
+    // PUT with {vin} in the path + a FLAT body. Same signing as everything else here.
+    @PUT("remote-control/vehicle/telematics/{vin}")
+    suspend fun ecarxControl(
+        @Path("vin") vin: String,
+        @Body body: com.openzeekr.app.net.model.EcarxControlRequest,
+    ): com.openzeekr.app.net.model.EcarxControlResponse
+
+    // ---- per-VIN supported functions (drive button visibility) ----
+    @GET("ms-vehicle-capability/api/v1.0/vehicle/function/model/info")
+    suspend fun vehicleCapability(): BaseResponse<kotlinx.serialization.json.JsonElement>
+
     // ---- remote-control live state (VIN via X-VIN header) ----
     @GET("ms-app-bff/api/v1.0/remoteControl/getVehicleState")
     suspend fun remoteControlState(): BaseResponse<Map<String, String>>
@@ -62,6 +75,29 @@ interface TspApi {
     // ---- rename the car (vehNickname) ----
     @POST("ms-tsp-user-vehicle/api/v1/veh/owner/relation/modify-vehicle")
     suspend fun modifyVehicle(@Body body: ModifyVehicleRequest): BaseResponse<JsonObject>
+
+    // ---- member inbox / message center ----
+    // NOT on the TSP gateway — the inbox lives on the Geely overseas app-BFF host
+    // (overseas-app.lynkco.com), so these take an absolute @Url (built by InboxRepository).
+    // Same bearer + TSP signing (added by the interceptors regardless of host). Bodies are
+    // pulled on demand (no push); responses parsed tolerantly. See MESSAGE_CENTER_FINDINGS.md.
+    @GET
+    suspend fun inbox(
+        @Url url: String,
+        @Query("pageNumber") pageNumber: Int = 1,
+        @Query("pageSize") pageSize: Int = 30,
+        @Query("customTypeId") customTypeId: String? = null,
+        @Query("vin") vin: String? = null,
+    ): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    @GET
+    suspend fun inboxUnread(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    @PUT
+    suspend fun inboxMarkRead(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    @POST
+    suspend fun inboxReadAll(@Url url: String, @Body body: com.openzeekr.app.net.model.MarkAllReadRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
 
     // ---- sentry / sentinel-monitoring-service ----
     @GET("/sentinel-monitoring-service/api/v1/alarm/event/query")

@@ -1,9 +1,12 @@
 package com.openzeekr.app.remote
 
+import com.openzeekr.app.net.model.EcarxControlRequest
 import com.openzeekr.app.net.model.OperationScheduling
 import com.openzeekr.app.net.model.RemoteControlRequest
 import com.openzeekr.app.net.model.RemoteControlSetting
 import com.openzeekr.app.net.model.ServiceParameter
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /** UI grouping for the command grid. */
 enum class Category { DOORS, CLIMATE, WINDOWS, CHARGING, SIGNAL, SECURITY, COMFORT, SYSTEM }
@@ -32,8 +35,12 @@ enum class Command(
     // Params are LOWERCASE (door=all, target=trunk/hood). Frunk = RDU/start target=hood.
     UNLOCK("Unlock", Category.DOORS, "RDU", "stop", listOf(ServiceParameter("door", "all"))),
     LOCK("Lock", Category.DOORS, "RDL", "start", listOf(ServiceParameter("door", "all"))),
-    TRUNK_UNLOCK("Open Trunk", Category.DOORS, "RDU", "stop", listOf(ServiceParameter("target", "trunk"))),
-    TRUNK_LOCK("Lock Trunk", Category.DOORS, "RDL", "start", listOf(ServiceParameter("target", "trunk"))),
+    // Power tailgate OPEN is RDU_2/start (System-B "ActionControl") — NOT the latch
+    // unlock RDU/stop, which only releases the lock and does not power the tailgate up.
+    // Trunk LOCK is RDL_2/start. (TRUNK_UNLOCK kept for completeness / latch-only release.)
+    TRUNK_OPEN("Open Trunk", Category.DOORS, "RDU_2", "start", listOf(ServiceParameter("target", "trunk"))),
+    TRUNK_UNLOCK("Unlock Trunk", Category.DOORS, "RDU", "stop", listOf(ServiceParameter("target", "trunk"))),
+    TRUNK_LOCK("Lock Trunk", Category.DOORS, "RDL_2", "start", listOf(ServiceParameter("target", "trunk"))),
     FRONT_TRUNK("Open Frunk", Category.DOORS, "RDU", "start", listOf(ServiceParameter("target", "hood"))),
     CHARGE_LID_OPEN("Open Charge Lid", Category.DOORS, "RDO", "start", listOf(ServiceParameter("target", "front-charge-lid"))),
     CHARGE_LID_CLOSE("Close Charge Lid", Category.DOORS, "RDC", "stop", listOf(ServiceParameter("target", "front-charge-lid"))),
@@ -87,20 +94,47 @@ enum class Command(
     LOCKER_OFF("Private Locker Unlock", Category.SECURITY, "RDU", "stop", listOf(ServiceParameter("target", "private-lock"), ServiceParameter("password", "1234"))),
     ;
 
-    fun toRequest(extraParams: List<ServiceParameter> = emptyList()): RemoteControlRequest {
+    private fun allParams(extraParams: List<ServiceParameter>): List<ServiceParameter> = buildList {
+        addAll(params)
+        addAll(extraParams)
         // engStrtType is a serviceParameter (not a top-level field) in the stock request.
-        val allParams = buildList {
-            addAll(params)
-            addAll(extraParams)
-            engStrtType?.let { add(ServiceParameter("engStrtType", it)) }
-        }
-        return RemoteControlRequest(
+        engStrtType?.let { add(ServiceParameter("engStrtType", it)) }
+    }
+
+    fun toRequest(extraParams: List<ServiceParameter> = emptyList()): RemoteControlRequest =
+        RemoteControlRequest(
             command = command,
             serviceId = serviceId,
             setting = RemoteControlSetting(
-                serviceParameters = allParams,
+                serviceParameters = allParams(extraParams),
                 operationScheduling = durationSec?.let { OperationScheduling(duration = it) },
             ),
         )
+
+    /**
+     * True when this command must be dispatched through the ecarx "device-api" transport
+     * (System B) rather than /ms-remote-control — the physical-actuation serviceIds
+     * (powered tailgate RDU_2/RDL_2, charge lids RDO/RDC). These are accepted by the
+     * gateway on the plain path (HTTP 200) but the car doesn't act on them.
+     */
+    val usesSystemB: Boolean get() = serviceId in ECARX_SERVICE_IDS
+
+    /** Flat ecarx body for PUT /remote-control/vehicle/telematics/{vin}. */
+    fun toEcarxRequest(userId: String, extraParams: List<ServiceParameter> = emptyList()): EcarxControlRequest =
+        EcarxControlRequest(
+            serviceId = serviceId,
+            command = command,
+            creator = "tc",
+            userId = userId,
+            timestamp = System.currentTimeMillis().toString(),
+            serviceParameters = allParams(extraParams),
+            operationScheduling = durationSec
+                ?.let { JsonObject(mapOf("duration" to JsonPrimitive(it))) }
+                ?: JsonObject(emptyMap()),
+        )
+
+    companion object {
+        /** serviceIds that only actuate through System B (device-api). */
+        val ECARX_SERVICE_IDS = setOf("RDU_2", "RDL_2", "RDO", "RDC")
     }
 }

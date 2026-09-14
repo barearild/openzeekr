@@ -107,6 +107,14 @@ data class SecretsConfig(
     /** User-set display name for the car (shown in the top bar). Blank = use the model
      *  name. The cloud rename API (modify-vehicle / vehNickname) is wired separately. */
     val carNickname: String = "",
+
+    // ---- display units (UI only) ----
+    /** Tyre-pressure unit: "bar" | "psi" | "kpa". */
+    val pressureUnit: String = "bar",
+    /** Temperature unit: "c" | "f". */
+    val tempUnit: String = "c",
+    /** Distance / range unit: "km" | "mi". */
+    val distanceUnit: String = "km",
 ) {
     /** True when the minimum needed to talk to the cloud is present. */
     val cloudReady: Boolean

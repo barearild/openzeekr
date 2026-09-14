@@ -122,65 +122,77 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     }
 
     @SuppressLint("MissingPermission")
-    private fun startScan(a: BluetoothAdapter) {
+    private fun startScan(a: BluetoothAdapter, useBatching: Boolean = true) {
         val scanner = a.bluetoothLeScanner ?: run { fail("no LE scanner"); return }
         _state.value = State.SCANNING
         seenAdvertisers.clear()
         rndByMac.clear()
         advBroadcastRnd = null
+        // No device ScanFilter on the foreground connect: the car doesn't advertise the DK
+        // service UUID and its name format can vary, so filtering risks missing it — matching
+        // in-callback is faster/more reliable. To avoid the per-packet log firehose (the
+        // framework logs one line per advertisement), request BATCHED delivery: results arrive
+        // in periodic groups via onBatchScanResults instead of a continuous onScanResult stream.
+        // If the device can't offload batching we fall back to immediate delivery (onScanFailed).
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .apply { if (useBatching) setReportDelay(REPORT_DELAY_MS) }
+            .build()
         val target = UUID.fromString(DkProtocol.SERVICE_UUID)
-        val cb = object : ScanCallback() {
-            @SuppressLint("MissingPermission")
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val dev = result.device
-                val addr = dev.address ?: return
-                val rec = result.scanRecord
-                val name = rec?.deviceName ?: runCatching { dev.name }.getOrNull()
-                val uuids = rec?.serviceUuids
-                // Log every distinct advertiser once — so the car can be identified
-                // by name/MAC even if it doesn't advertise the DK service UUID.
-                if (seenAdvertisers.add(addr)) {
-                    Logx.d("ble", "adv $addr rssi=${result.rssi} name=${name ?: "?"} " +
-                        "uuids=${uuids?.joinToString { it.uuid.toString() } ?: "none"}")
-                }
-                // The DK broadcast-random rides a separate manufacturer-data advert PDU that can
-                // arrive apart from the name PDU (or drop at low RSSI). Capture it per-MAC from
-                // EVERY advert so it's available whichever PDU triggers the name match.
-                if (rndByMac[addr] == null) parseBroadcastRnd(rec?.bytes)?.let {
-                    rndByMac[addr] = it
-                    Logx.d("ble", "broadcastRnd[$addr]=${it.joinToString("") { b -> "%02x".format(b) }}")
-                }
-                // The car advertises name "Zeekr<last-3-of-VIN>" (e.g. Zeekr662) and
-                // does NOT advertise the 128-bit GATT service UUID, so match by name
-                // (like the stock fastble client). Keep the UUID match as a fallback.
-                val matchesName = name?.startsWith("Zeekr", ignoreCase = true) == true
-                val matchesUuid = uuids?.any { it.uuid == target } == true
-                if (matchesName || matchesUuid) {
-                    // Only connect once we actually hold the broadcast-random for this car — it's
-                    // required to derive the 0x0101 pairing connectKey. If the matching PDU didn't
-                    // carry it yet, keep scanning; a subsequent mfr-data advert will fill rndByMac.
-                    val rnd = rndByMac[addr]
-                    if (rnd == null) {
-                        Logx.d("ble", "matched ${if (matchesName) "name '$name'" else "uuid"} $addr but no " +
-                            "broadcastRnd yet — waiting for the DK mfr-data advert…")
-                        return
-                    }
-                    advBroadcastRnd = rnd
-                    Logx.d("ble", "match ${if (matchesName) "by name '$name'" else "by service uuid"} " +
-                        "rnd=${rnd.joinToString("") { "%02x".format(it) }} -> connecting $addr")
-                    stopScanInternal(scanner)
-                    _state.value = State.CONNECTING
-                    connectDevice(dev)
-                }
+
+        // Handle one advertisement; returns true once it matched the car and started connecting.
+        fun handleAdvert(result: ScanResult): Boolean {
+            val dev = result.device
+            val addr = dev.address ?: return false
+            val rec = result.scanRecord
+            val name = rec?.deviceName ?: runCatching { dev.name }.getOrNull()
+            val uuids = rec?.serviceUuids
+            if (seenAdvertisers.add(addr)) {
+                Logx.d("ble", "adv $addr rssi=${result.rssi} name=${name ?: "?"} " +
+                    "uuids=${uuids?.joinToString { it.uuid.toString() } ?: "none"}")
             }
-            override fun onScanFailed(errorCode: Int) { stopScanInternal(scanner); fail("scan failed: $errorCode") }
+            // The DK broadcast-random rides a separate manufacturer-data PDU; capture it per-MAC
+            // from every advert so it's ready whichever PDU triggers the name match.
+            if (rndByMac[addr] == null) parseBroadcastRnd(rec?.bytes)?.let {
+                rndByMac[addr] = it
+                Logx.d("ble", "broadcastRnd[$addr]=${it.joinToString("") { b -> "%02x".format(b) }}")
+            }
+            val matchesName = name?.startsWith("Zeekr", ignoreCase = true) == true
+            val matchesUuid = uuids?.any { it.uuid == target } == true
+            if (matchesName || matchesUuid) {
+                val rnd = rndByMac[addr]
+                if (rnd == null) {
+                    Logx.d("ble", "matched ${if (matchesName) "name '$name'" else "uuid"} $addr but no " +
+                        "broadcastRnd yet — waiting for the DK mfr-data advert…")
+                    return false
+                }
+                advBroadcastRnd = rnd
+                Logx.d("ble", "match ${if (matchesName) "by name '$name'" else "by service uuid"} " +
+                    "rnd=${rnd.joinToString("") { "%02x".format(it) }} -> connecting $addr")
+                stopScanInternal(scanner)
+                _state.value = State.CONNECTING
+                connectDevice(dev)
+                return true
+            }
+            return false
+        }
+
+        val cb = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) { handleAdvert(result) }
+            override fun onBatchScanResults(results: MutableList<ScanResult>) {
+                for (r in results) if (handleAdvert(r)) break
+            }
+            override fun onScanFailed(errorCode: Int) {
+                stopScanInternal(scanner)
+                if (useBatching && errorCode == ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED) {
+                    Logx.d("ble", "batched scan unsupported — retrying with immediate delivery")
+                    startScan(a, useBatching = false)
+                } else fail("scan failed: $errorCode")
+            }
         }
         scanCb = cb
-        // No filter -> receive ALL advertisers (the car likely does NOT advertise
-        // the 128-bit GATT service UUID; fastble in the stock app matches by name).
-        Logx.d("ble", "scanning (no filter) — logging all advertisers; matching DK service ${DkProtocol.SERVICE_UUID}")
+        Logx.d("ble", "scanning (no device filter, ${if (useBatching) "batched ${REPORT_DELAY_MS}ms" else "immediate"}) " +
+            "— match by name Zeekr* or DK service ${DkProtocol.SERVICE_UUID}")
         scanner.startScan(null, settings, cb)
         scanJob = scope.launch {
             delay(SCAN_TIMEOUT_MS)
@@ -230,9 +242,12 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     @SuppressLint("MissingPermission")
     fun disconnect() {
         adapter?.bluetoothLeScanner?.let { runCatching { stopScanInternal(it) } }
-        runCatching { session.close() }
+        // reset() (not close()) so the transport's inbound handler stays wired and a later
+        // connect() on this reused session can re-handshake. close() would unwire it.
+        (session as? RealDkSession)?.reset()
         runCatching { gatt?.disconnect(); gatt?.close() }
         gatt = null
+        chWrite1 = null; chWrite2 = null; chNotify1 = null; chNotify2 = null
         reasm1.reset(); reasm2.reset()
         _state.value = State.IDLE
     }
@@ -247,9 +262,18 @@ class DkBleManager(private val appContext: Context) : DkTransport {
                 _state.value = State.CONNECTED
                 g.requestMtu(247)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                if (_state.value != State.SESSION_READY) fail("disconnected (status=$status)")
-                else _state.value = State.IDLE
+                // A dropped link invalidates the DK session: the derived GCM keys and the
+                // car's per-connection pairing epoch cannot be reused. reset() (NOT close())
+                // clears them while keeping the transport's inbound handler wired, so the
+                // NEXT connect runs a fresh handshake instead of the stale isEstablished
+                // path — the root cause of "must force-stop the app to reconnect".
+                (session as? RealDkSession)?.reset()
+                chWrite1 = null; chWrite2 = null; chNotify1 = null; chNotify2 = null
+                reasm1.reset(); reasm2.reset()
+                val wasReady = _state.value == State.SESSION_READY
                 runCatching { g.close() }
+                gatt = null
+                if (wasReady) _state.value = State.IDLE else fail("disconnected (status=$status)")
             }
         }
 
@@ -377,6 +401,9 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     companion object {
         private const val TAG = "DkBleManager"
         private const val SCAN_TIMEOUT_MS = 20_000L
+        /** Batch window for foreground scan results — groups adverts so the framework doesn't
+         *  log (and wake us for) every single advertisement packet. Sub-second, still snappy. */
+        private const val REPORT_DELAY_MS = 500L
         @Volatile private var INSTANCE: DkBleManager? = null
         fun get(context: Context): DkBleManager =
             INSTANCE ?: synchronized(this) {

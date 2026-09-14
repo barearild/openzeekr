@@ -69,7 +69,7 @@ fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
                 Switch(checked = sentry, onCheckedChange = { on ->
                     sentry = on
                     fire(if (on) "Sentry on" else "Sentry off") { deps.control.send(if (on) Command.SENTINEL_ON else Command.SENTINEL_OFF) }
-                }, colors = SwitchDefaults.colors(checkedTrackColor = Brand.good))
+                }, colors = brandSwitchColors(Brand.good))
             }
             if (sentry) Row(
                 Modifier.fillMaxWidth().padding(start = 46.dp, bottom = 8.dp),
@@ -77,14 +77,14 @@ fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
             ) {
                 Text("Auto-arm every time the car locks", color = Brand.muted, fontSize = 12.5.sp)
                 Switch(checked = autoArm, onCheckedChange = { autoArm = it },
-                    colors = SwitchDefaults.colors(checkedTrackColor = Brand.good))
+                    colors = brandSwitchColors(Brand.good))
             }
             SecRow(Icons.Filled.Inventory2, "Glovebox PIN", "Lock the glovebox with a code",
                 onClick = { snackbar("Glovebox PIN — coming next") }) { Chevron() }
             SecRow(Icons.Filled.Person, "Visitor mode", "Restricted access for a guest / valet") {
                 Switch(checked = visitor, onCheckedChange = { on ->
                     visitor = on; snackbar(if (on) "Visitor mode on" else "Visitor mode off")
-                })
+                }, colors = brandSwitchColors())
             }
             SecRow(Icons.Filled.LocationOn, "Vehicle location", "Last parked spot on the map",
                 onClick = { snackbar("Opens the parked location in Maps") }) { Chevron() }
