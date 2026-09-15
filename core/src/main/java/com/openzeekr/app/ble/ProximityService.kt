@@ -65,15 +65,30 @@ class ProximityService : Service() {
     /**
      * Hold the DK BLE session connected; reconnect whenever it goes idle/errored.
      *
-     * Suspended while proximity is enabled: in that mode the [ProximityController]
-     * owns the connection lifecycle (passive scan → background connect on approach →
-     * release on walk-away), and an always-on keep-alive would both defeat the
-     * power saving and fight the controller for the GATT.
+     * This is the SOLE owner of the connection — it runs regardless of the proximity
+     * setting, so the session stays up constantly (instant lock/unlock, a stable link for
+     * RPA, and no churn). The [ProximityController] only reads RSSI off this live session;
+     * it never connects or disconnects, so the two can't fight over the GATT.
      */
     private suspend fun keepConnected(deps: Deps) {
         while (scope.isActive) {
-            if (!deps.config.current().proximityEnabled &&
-                deps.ble.hasCredential && deps.ble.bluetoothAvailable) {
+            // The watch is borrowing the car link (only one BLE peer allowed): stand down —
+            // release our session and don't reconnect until it resumes us (or the fail-safe
+            // deadline passes, in case the watch app died mid-handover).
+            if (com.openzeekr.app.wear.WearLinkArbiter.linkSuspended.value) {
+                if (com.openzeekr.app.wear.WearLinkArbiter.expired()) {
+                    Logx.d("svc", "keep-alive: watch link-borrow expired — reclaiming")
+                    com.openzeekr.app.wear.WearLinkArbiter.resume()
+                } else {
+                    when (deps.ble.state.value) {
+                        DkBleManager.State.IDLE, DkBleManager.State.ERROR -> {}
+                        else -> { Logx.d("svc", "keep-alive: releasing link for watch"); runCatching { deps.ble.disconnect() } }
+                    }
+                    delay(WATCH_YIELD_POLL_MS)
+                    continue
+                }
+            }
+            if (deps.ble.hasCredential && deps.ble.bluetoothAvailable) {
                 when (deps.ble.state.value) {
                     DkBleManager.State.IDLE, DkBleManager.State.ERROR -> {
                         Logx.d("svc", "keep-alive: (re)connecting DK session")
@@ -125,6 +140,8 @@ class ProximityService : Service() {
         private const val CHANNEL_ID = "proximity"
         private const val NOTIF_ID = 42
         private const val RECONNECT_INTERVAL_MS = 8_000L
+        /** While yielded to the watch, poll faster so we notice resume/expiry promptly. */
+        private const val WATCH_YIELD_POLL_MS = 1_000L
 
         fun start(context: Context) {
             val i = Intent(context, ProximityService::class.java)

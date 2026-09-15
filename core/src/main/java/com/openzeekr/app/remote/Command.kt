@@ -113,9 +113,13 @@ enum class Command(
 
     /**
      * True when this command must be dispatched through the ecarx "device-api" transport
-     * (System B) rather than /ms-remote-control — the physical-actuation serviceIds
-     * (powered tailgate RDU_2/RDL_2, charge lids RDO/RDC). These are accepted by the
-     * gateway on the plain path (HTTP 200) but the car doesn't act on them.
+     * (System B, PUT /remote-control/vehicle/telematics/{vin}) rather than /ms-remote-control.
+     * These serviceIds are only wired on the System B route in stock (the stock app builds
+     * every ActionControl and sends it via `iovdo` → telematics): System A accepts them with
+     * a hollow HTTP 200 + sessionId but the car never acts. Includes the physical-actuation
+     * ids (powered tailgate RDU_2/RDL_2, charge lids RDO/RDC) and RSM (sentry / sentinel) —
+     * confirmed at-car: RSM via System A returned 200 but surveillance never toggled, while
+     * the SAME shared account toggled it fine from the stock app (which uses System B).
      */
     val usesSystemB: Boolean get() = serviceId in ECARX_SERVICE_IDS
 
@@ -135,6 +139,6 @@ enum class Command(
 
     companion object {
         /** serviceIds that only actuate through System B (device-api). */
-        val ECARX_SERVICE_IDS = setOf("RDU_2", "RDL_2", "RDO", "RDC")
+        val ECARX_SERVICE_IDS = setOf("RDU_2", "RDL_2", "RDO", "RDC", "RSM")
     }
 }

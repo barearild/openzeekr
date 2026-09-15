@@ -218,6 +218,8 @@ private fun SecretsSection(cfg: SecretsConfig, set: ((SecretsConfig) -> SecretsC
             Field("vin_key", cfg.vinKey, secret = true) { v -> set { it.copy(vinKey = v) } }
             Field("vin_iv", cfg.vinIv, secret = true) { v -> set { it.copy(vinIv = v) } }
             Field("xchanger_sign_secret", cfg.xchangerSignSecret, secret = true) { v -> set { it.copy(xchangerSignSecret = v) } }
+            Field("overseas_access_key (notifications)", cfg.overseasAccessKey, secret = true) { v -> set { it.copy(overseasAccessKey = v) } }
+            Field("overseas_secret_key (notifications)", cfg.overseasSecretKey, secret = true) { v -> set { it.copy(overseasSecretKey = v) } }
             Field("VIN", cfg.vin) { v -> set { it.copy(vin = v) } }
             PrimaryButton("Save secrets", Modifier.fillMaxWidth()) { onSave() }
         }

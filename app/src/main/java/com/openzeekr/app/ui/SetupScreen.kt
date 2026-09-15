@@ -78,7 +78,8 @@ fun SetupScreen(
     val cfg by config.config.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    var owner by remember { mutableStateOf(false) }
+    // Owner vs shared is known from the vehicle-list (`isOwner`) captured at login — no manual pick.
+    val owner = cfg.isOwner
     var confirmRemove by remember { mutableStateOf(false) }
 
     val ready = isProvisioned() || prov.step == DkProvisioning.Step.DONE
@@ -138,10 +139,11 @@ fun SetupScreen(
                 StepRow("Fetch key list", prov.step, DkProvisioning.Step.KEY_LIST)
                 StepRow("Fetch key material", prov.step, DkProvisioning.Step.KEY_INFO)
                 prov.message?.let { Text(it, color = Brand.muted, fontSize = 12.sp) }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SelectChip("Shared key", selected = !owner) { owner = false }
-                    SelectChip("Car owner", selected = owner) { owner = true }
-                }
+                Text(
+                    if (owner) "This account owns the car — an owner key will be created."
+                    else "Shared account — using a key the owner has shared with you.",
+                    color = Brand.muted, fontSize = 12.sp,
+                )
                 PrimaryButton(if (busy) "Provisioning…" else "Set up digital key", Modifier.fillMaxWidth(), enabled = !busy) { provision() }
             }
         }

@@ -95,6 +95,17 @@ fun AppRoot(deps: Deps) {
 
     AppBootstrap(deps, serviceEnabled = loggedIn && provisioned)
 
+    // Account taken over on another device (TSP 079021): the interceptor already cleared the
+    // token (so we're now on the signed-out flow) — just explain why. Mirrors the stock app,
+    // which also signs you out when the account goes active elsewhere.
+    val loggedInElsewhere by com.openzeekr.app.net.SessionSignal.loggedInElsewhere.collectAsState()
+    LaunchedEffect(loggedInElsewhere) {
+        if (loggedInElsewhere) {
+            snackbar("Signed out — your account was opened on another device (e.g. the Zeekr app). Sign in again to reconnect.")
+            com.openzeekr.app.net.SessionSignal.loggedInElsewhere.value = false
+        }
+    }
+
     val bleState by deps.ble.state.collectAsState()
     val bleReady = bleState == DkBleManager.State.SESSION_READY || bleState == DkBleManager.State.CONNECTED
     val carName = cfg.carNickname.ifBlank { "My Zeekr" }

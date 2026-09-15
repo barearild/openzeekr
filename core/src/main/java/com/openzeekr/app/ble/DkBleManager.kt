@@ -102,6 +102,17 @@ class DkBleManager(private val appContext: Context) : DkTransport {
 
     @SuppressLint("MissingPermission")
     fun connect(deviceMac: String?) {
+        // Idempotent: a second connect() while we're already scanning/connecting/connected
+        // would start a *new* scan on the shared scanner — which resets state to SCANNING and
+        // nulls advBroadcastRnd out from under the live session. That's what made proximity +
+        // manual lock/unlock collide ("BT goes bunkers"). Only (re)connect from a resting state.
+        when (_state.value) {
+            State.SCANNING, State.CONNECTING, State.CONNECTED, State.SESSION_READY -> {
+                Logx.d("ble", "connect() ignored — already ${_state.value}")
+                return
+            }
+            else -> {}
+        }
         Logx.d("ble", "connect(${deviceMac ?: "scan-by-service"}) credential=${if (credential != null) "present" else "none"}")
         val a = adapter ?: run { fail("no bluetooth adapter"); return }
         if (!a.isEnabled) { fail("bluetooth disabled"); return }

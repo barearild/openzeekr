@@ -118,9 +118,15 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
         }
     }
 
-    /** Garage lookup: the car's model / colour / render / nickname (best-effort). */
+    /** Garage lookup: the car's model / colour / render / nickname (best-effort). Also
+     *  refreshes the persisted `isOwner` flag so provisioning picks owner vs shared correctly
+     *  even on a session that logged in before that flag was captured. */
     suspend fun vehicleInfo(): CallResult<VehicleInfo?> = withContext(Dispatchers.IO) {
-        guarded { VehicleGarage.parse(client.api.vehicleList().data) }
+        guarded {
+            VehicleGarage.parse(client.api.vehicleList().data)?.also { info ->
+                if (info.isOwner != store.current().isOwner) store.update { it.copy(isOwner = info.isOwner) }
+            }
+        }
     }
 
     /** Rename the car (cloud). vehicleId is optional; the backend also keys off X-VIN. */
@@ -142,26 +148,31 @@ class InboxRepository(private val store: ConfigStore, private val client: ApiCli
         withContext(Dispatchers.IO) {
             guarded {
                 val cfg = store.current()
+                require(cfg.overseasReady) { NOT_CONFIGURED }
                 runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
                 com.openzeekr.app.net.model.Inbox.parse(
                     client.api.inbox(INBOX, pageNumber = page, pageSize = pageSize, vin = cfg.vin.ifBlank { null }).data)
             }
         }
 
-    /** Unread badge count. */
+    /** Unread badge count. Silently 0 when the inbox keys aren't configured. */
     suspend fun unreadCount(): CallResult<Int> = withContext(Dispatchers.IO) {
-        guarded { com.openzeekr.app.net.model.Inbox.parseUnread(client.api.inboxUnread("$INBOX/unread").data) }
+        guarded {
+            if (!store.current().overseasReady) return@guarded 0
+            com.openzeekr.app.net.model.Inbox.parseUnread(client.api.inboxUnread("$INBOX/unread").data)
+        }
     }
 
     /** Mark a single message read. */
     suspend fun markRead(id: String): CallResult<Unit> = withContext(Dispatchers.IO) {
-        guarded { client.api.inboxMarkRead("$INBOX/$id"); Unit }
+        guarded { require(store.current().overseasReady) { NOT_CONFIGURED }; client.api.inboxMarkRead("$INBOX/$id"); Unit }
     }
 
     /** Mark every message read. */
     suspend fun markAllRead(): CallResult<Unit> = withContext(Dispatchers.IO) {
         guarded {
             val cfg = store.current()
+            require(cfg.overseasReady) { NOT_CONFIGURED }
             client.api.inboxReadAll("$INBOX/read-all", com.openzeekr.app.net.model.MarkAllReadRequest(vin = cfg.vin.ifBlank { null })); Unit
         }
     }
@@ -180,6 +191,7 @@ class InboxRepository(private val store: ConfigStore, private val client: ApiCli
          * wired, this call reaches the right host but 401s. Tracked as back-burner.
          */
         const val INBOX = "https://gateway-pub-azure.zeekr.eu/overseas-app/member/inbox"
+        const val NOT_CONFIGURED = "Notifications need your overseas-app keys — add them in Settings › App secrets."
     }
 }
 

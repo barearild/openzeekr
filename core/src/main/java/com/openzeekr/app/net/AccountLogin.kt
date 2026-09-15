@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.int
@@ -278,9 +279,10 @@ class AccountLogin(private val store: ConfigStore) {
                 val vehData = tspGetArray("$tsp${ZeekrConst.VEHLIST_URL}")
                 val first = vehData?.firstOrNull()?.jsonObject
                 val vin = first?.get("vin")?.jsonPrimitive?.contentOrNull
+                val isOwner = first?.get("isOwner")?.jsonPrimitive?.booleanOrNull ?: false
                 if (!vin.isNullOrBlank()) {
-                    store.update { it.copy(vin = vin) }
-                    Logx.d("login", "step 6/6 vehicle-list OK, vin=$vin")
+                    store.update { it.copy(vin = vin, isOwner = isOwner) }
+                    Logx.d("login", "step 6/6 vehicle-list OK, vin=$vin isOwner=$isOwner")
                 } else {
                     Logx.w("login", "step 6/6 vehicle-list returned no vin (enter it manually if needed)")
                 }

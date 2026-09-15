@@ -84,7 +84,7 @@ fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
             SecRow(Icons.Filled.Person, "Visitor mode", "Restricted access for a guest / valet") {
                 Switch(checked = visitor, onCheckedChange = { on ->
                     visitor = on; snackbar(if (on) "Visitor mode on" else "Visitor mode off")
-                }, colors = brandSwitchColors())
+                }, colors = brandSwitchColors(Brand.good))
             }
             SecRow(Icons.Filled.LocationOn, "Vehicle location", "Last parked spot on the map",
                 onClick = { snackbar("Opens the parked location in Maps") }) { Chevron() }

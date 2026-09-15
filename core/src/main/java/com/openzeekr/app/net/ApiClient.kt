@@ -34,8 +34,13 @@ class ApiClient private constructor(private val store: ConfigStore) {
         val ok = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            // Watches every response for the 079021 "logged in elsewhere" kick-out.
+            .addInterceptor(KickoutInterceptor(store))
             .addInterceptor(HeaderInterceptor(store))
             .addInterceptor(SignInterceptor(store))
+            // Signs the overseas-app inbox host with its own HMAC AK/SK (the two above
+            // passthrough for that host); no-op for every other request.
+            .addInterceptor(OverseasAppAuthInterceptor(store))
             .addInterceptor(logging)
             .build()
 

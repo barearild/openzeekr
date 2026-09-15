@@ -10,6 +10,28 @@ import okio.Buffer
 import java.util.UUID
 
 /**
+ * Detects the TSP "account logged in elsewhere" rejection — HTTP 401 whose body carries
+ * code `079021` (the single-online-device slot was taken by another app/device, e.g. the
+ * stock Zeekr app on the same account). On detection it clears the access token (so the UI
+ * reflects the signed-out state) and raises [SessionSignal.loggedInElsewhere] so the UI can
+ * explain why. Peeks the body (never consumes it), so the real call still sees its response.
+ */
+class KickoutInterceptor(private val store: ConfigStore) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val resp = chain.proceed(chain.request())
+        if (resp.code == 401) {
+            val body = runCatching { resp.peekBody(1024).string() }.getOrNull()
+            if (body?.contains("079021") == true) {
+                Logx.w("session", "079021 account logged in elsewhere — signing out")
+                if (store.current().accessToken.isNotBlank()) store.update { it.copy(accessToken = "") }
+                SessionSignal.loggedInElsewhere.value = true
+            }
+        }
+        return resp
+    }
+}
+
+/**
  * TSP-gateway transport (bearer login, vehicle list, DK provisioning, remote
  * control). Ported from `zeekr_ev_api` appSignedPost/appSignedGet:
  *   HeaderInterceptor -> LOGGED_IN_HEADERS + authorization + (x-vin)
@@ -19,8 +41,13 @@ import java.util.UUID
  * Account/login requests use a SEPARATE user-center client (see AccountLogin)
  * with DEFAULT_HEADERS + X-HMAC-* — do NOT route those through these.
  */
+/** The overseas-app gateway (message inbox) uses its own HMAC AK/SK auth, not the TSP
+ *  scheme — the TSP interceptors passthrough for it and [OverseasAppAuthInterceptor] signs it. */
+internal fun okhttp3.Request.isOverseasApp(): Boolean = url.encodedPath.startsWith("/overseas-app")
+
 class HeaderInterceptor(private val store: ConfigStore) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
+        if (chain.request().isOverseasApp()) return chain.proceed(chain.request())
         val cfg = store.current()
         val b = chain.request().newBuilder()
 
@@ -54,6 +81,7 @@ class HeaderInterceptor(private val store: ConfigStore) : Interceptor {
  */
 class SignInterceptor(private val store: ConfigStore) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
+        if (chain.request().isOverseasApp()) return chain.proceed(chain.request())
         val cfg = store.current()
         var req = chain.request().newBuilder()
             .header("X-API-SIGNATURE-NONCE", UUID.randomUUID().toString())
@@ -93,5 +121,66 @@ class SignInterceptor(private val store: ConfigStore) : Interceptor {
 
     companion object {
         private val JSON_CT = "application/json; charset=UTF-8".toMediaType()
+    }
+}
+
+/**
+ * Signs requests to the overseas-app gateway (the message inbox on
+ * gateway-pub-azure.zeekr.eu) with its HMAC-SHA256 AK/SK scheme + required headers — a
+ * SEPARATE auth from the TSP X-SIGNATURE (see [OverseasSign], OVERSEAS_APP_AUTH_FINDINGS.md).
+ *
+ * The access key + secret are the sensitive native (libenv.so) values, supplied via config
+ * ([SecretsConfig.overseasAccessKey]/`overseasSecretKey`); the App-Code / Client-Id / tenant
+ * are non-crypto app constants (plaintext in the APK, useless without the AK/SK gate), same
+ * category as the already-committed appId/projectId defaults.
+ */
+class OverseasAppAuthInterceptor(private val store: ConfigStore) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val req = chain.request()
+        if (!req.isOverseasApp()) return chain.proceed(req)
+        val cfg = store.current()
+        val xDate = OverseasSign.dateHeader()
+        val bodyBytes = req.body?.let { body -> Buffer().use { buf -> body.writeTo(buf); buf.readByteArray() } } ?: ByteArray(0)
+        val sig = OverseasSign.signature(
+            method = req.method,
+            path = req.url.encodedPath,
+            sortedQuery = OverseasSign.sortedQuery(req.url),
+            accessKey = cfg.overseasAccessKey,
+            xDate = xDate,
+            secret = cfg.overseasSecretKey,
+        )
+        val digest = OverseasSign.digest(bodyBytes, cfg.overseasSecretKey)
+        val b = req.newBuilder()
+            .header("X-DATE", xDate)
+            .header("X-HMAC-ALGORITHM", OverseasSign.ALGORITHM)
+            .header("X-HMAC-ACCESS-KEY", cfg.overseasAccessKey)
+            .header("X-HMAC-SIGNATURE", sig)
+            .header("X-HMAC-DIGEST", digest)
+            .header("App-Code", OVERSEAS_APP_CODE)
+            .header("appId", "TSP")
+            .header("appCode", "eu-app")
+            .header("appSecret", "zeekr_tis")
+            .header("Tmp-Tenant-Code", OVERSEAS_TENANT)
+            .header("Brand", "ZEEKR")
+            .header("Client-Id", OVERSEAS_CLIENT_ID)
+            // App-layer message-center identifiers the stock m.A() header set sends on EVERY
+            // overseas-app request (member/inbox included). Captured from the working
+            // zom-message-core call: app-authorization=msgClientId=1009 (prod tenant l.f()),
+            // msgAppId=10008 (prod push id l.e()). Missing these was the /overseas-app 401.
+            .header("app-authorization", OVERSEAS_APP_AUTHORIZATION)
+            .header("msgClientId", OVERSEAS_APP_AUTHORIZATION)
+            .header("msgAppId", OVERSEAS_MSG_APP_ID)
+            .header("Device-Type", "app")
+            .header("Call-Source", "android")
+        if (cfg.accessToken.isNotBlank()) b.header("Authorization", cfg.accessToken)
+        return chain.proceed(b.build())
+    }
+
+    private companion object {
+        const val OVERSEAS_APP_CODE = "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc"
+        const val OVERSEAS_CLIENT_ID = "1d1921ad4d314ab7b0042a2fe0f479c3"
+        const val OVERSEAS_TENANT = "3300671070785540000"
+        const val OVERSEAS_APP_AUTHORIZATION = "1009"
+        const val OVERSEAS_MSG_APP_ID = "10008"
     }
 }

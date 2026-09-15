@@ -261,7 +261,8 @@ private fun KeyStep(deps: Deps) {
                     Button(
                         enabled = !busy,
                         onClick = {
-                            scope.launch { deps.provisioning.provision(owner = false) }
+                            // Owner vs shared comes from the vehicle-list captured at login.
+                            scope.launch { deps.provisioning.provision(owner = deps.config.current().isOwner) }
                         },
                     ) {
                         if (busy) CircularProgressIndicator(Modifier.height(16.dp), strokeWidth = 2.dp)

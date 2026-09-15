@@ -35,10 +35,19 @@ data class SecretsConfig(
     /** HF/xchanger (ECARX) HMAC-SHA1 signing key = NativeSecretLib.getTSPSecretValue("EU","ONLINE"). */
     @SerialName("xchanger_sign_secret") val xchangerSignSecret: String = "",
 
+    /** Overseas-app (Azure gateway) HMAC AK/SK — ONLY for the message inbox on
+     *  gateway-pub-azure.zeekr.eu (separate auth from TSP). Native libenv.so
+     *  getNativeApplicationId / getNativeSecret (EU/PROD), Frida-dumped. Blank = inbox off. */
+    @SerialName("overseas_access_key") val overseasAccessKey: String = "",
+    @SerialName("overseas_secret_key") val overseasSecretKey: String = "",
+
     // ---- account / vehicle ----
     val email: String = "",
     val password: String = "",
     val vin: String = "",
+    /** Whether this account owns the active vehicle (vehicle-list `isOwner`). Drives the
+     *  provisioning path automatically: owner → create-owner-blu-key, shared → key-list. */
+    val isOwner: Boolean = false,
     /** Numeric account id (IOVContext.getUserId), Frida-confirmed. */
     val userId: String = "",
     /** A pre-captured bearer/access token, if you already have one (skips login). */
@@ -124,6 +133,9 @@ data class SecretsConfig(
     /** The secret used for X-SIGNATURE. prodSecret per the reversing notes. */
     val signSecret: String get() = prodSecret
 
+    /** True once the overseas-app HMAC AK/SK are present, i.e. the message inbox can auth. */
+    val overseasReady: Boolean get() = overseasAccessKey.isNotBlank() && overseasSecretKey.isNotBlank()
+
     /**
      * Effective unlock threshold (dBm): the user's [unlockRssi] clamped so it can
      * never be weaker than [UNLOCK_RSSI_FLOOR]. Unlock fires when the connected
@@ -182,6 +194,8 @@ data class SecretsConfig(
             vinKey = BuildConfig.SEC_VIN_KEY,
             vinIv = BuildConfig.SEC_VIN_IV,
             xchangerSignSecret = BuildConfig.SEC_XCHANGER_SIGN_SECRET,
+            overseasAccessKey = BuildConfig.SEC_OVERSEAS_ACCESS_KEY,
+            overseasSecretKey = BuildConfig.SEC_OVERSEAS_SECRET_KEY,
             // NOTE: email / password / vin / userId are intentionally NOT baked
             // in (see build.gradle.kts). They start blank and are entered on the
             // Settings screen, then persisted only in encrypted on-device prefs.

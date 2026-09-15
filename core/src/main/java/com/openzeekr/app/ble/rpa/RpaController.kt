@@ -104,8 +104,11 @@ class RpaController(
         reqModeJob = scope.launch {
             while (isActive) {
                 runCatching {
-                    session.sendFrame(DkOpcodes.CMD_A2V_RPA_REQ,
-                        block(RpaReq.CMD_RPA_REQ_MODE, RpaReq.CMD_NONE))
+                    val blk = block(RpaReq.CMD_RPA_REQ_MODE, RpaReq.CMD_NONE)
+                    com.openzeekr.app.util.Logx.d("dk", "RPA REQ_MODE block=" +
+                        blk.joinToString("") { "%02x".format(it) } +
+                        " (phoneStatus=%02x)".format(blk[3]))
+                    session.sendFrame(DkOpcodes.CMD_A2V_RPA_REQ, blk)
                 } // ignore NAK/0x100a — keep polling until the car sends 0x0117 SYNC
                 delay(REQ_MODE_POLL_MS)
             }

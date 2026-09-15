@@ -128,6 +128,26 @@ class DkIdentity private constructor(private val prefs: android.content.SharedPr
             .remove(K_DIGKEY).remove(K_CMAC).remove(K_COEF).apply()
     }
 
+    /**
+     * Export the full provisioned identity (keypair + deviceId + cloud material) as a flat
+     * string map, to CLONE onto a companion device (the Wear app). Includes the PRIVATE key,
+     * so transfer it only over a secure channel to another device you own (the encrypted Wear
+     * Data Layer between a paired phone + watch). Null until provisioned.
+     */
+    fun exportCredentialBlob(): Map<String, String>? {
+        if (!isProvisioned) return null
+        return CLONE_KEYS.mapNotNull { k -> prefs.getString(k, null)?.let { k to it } }.toMap()
+    }
+
+    /**
+     * Import an identity blob from [exportCredentialBlob] (received from the phone). The watch
+     * becomes a clone of the phone's key — same cert/dkId/deviceId — so the car authenticates
+     * it as the same digital key (used one device at a time).
+     */
+    fun importCredentialBlob(blob: Map<String, String>) {
+        prefs.edit().apply { CLONE_KEYS.forEach { k -> blob[k]?.let { putString(k, it) } } }.apply()
+    }
+
     companion object {
         private const val FILE = "openzeekr_dk_identity"
         private const val K_DEVICE_ID = "device_id"
@@ -136,6 +156,12 @@ class DkIdentity private constructor(private val prefs: android.content.SharedPr
         private const val K_DIGKEY = "digital_key"; private const val K_CMAC = "cmac_key_cert"
         private const val K_COEF = "coef_small"; private const val K_VIN = "vin"
         private const val K_COEFBIG = "coef_big"; private const val K_MOBILECODE = "mobile_code"
+
+        /** Every persisted key that makes up the transferable identity (phone → watch clone). */
+        private val CLONE_KEYS = listOf(
+            K_DEVICE_ID, K_PRIV, K_PUB, K_CERT, K_DKID, K_BOOKID,
+            K_DIGKEY, K_CMAC, K_COEF, K_VIN, K_COEFBIG, K_MOBILECODE,
+        )
 
         @Volatile private var INSTANCE: DkIdentity? = null
         fun get(context: Context): DkIdentity = INSTANCE ?: synchronized(this) {

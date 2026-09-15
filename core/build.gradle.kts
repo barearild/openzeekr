@@ -31,6 +31,10 @@ android {
         buildConfigField("String", "SEC_VIN_KEY", "\"${bakedSecret("VIN_KEY")}\"")
         buildConfigField("String", "SEC_VIN_IV", "\"${bakedSecret("VIN_IV")}\"")
         buildConfigField("String", "SEC_XCHANGER_SIGN_SECRET", "\"${bakedSecret("XCHANGER_SIGN_SECRET")}\"")
+        // Overseas-app (Azure gateway) HMAC AK/SK — for the message inbox. Native
+        // (getNativeApplicationId / getNativeSecret in libenv.so), Frida-dumped per region/env.
+        buildConfigField("String", "SEC_OVERSEAS_ACCESS_KEY", "\"${bakedSecret("OVERSEAS_ACCESS_KEY")}\"")
+        buildConfigField("String", "SEC_OVERSEAS_SECRET_KEY", "\"${bakedSecret("OVERSEAS_SECRET_KEY")}\"")
     }
 
     compileOptions {

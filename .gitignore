@@ -5,6 +5,7 @@
 /build/
 /app/build/
 /core/build/
+/wear/build/
 /captures/
 .externalNativeBuild/
 .cxx/
@@ -18,3 +19,6 @@ secrets.properties
 # Zeekr press renders are copyrighted — bundle locally, never publish.
 # Drop your own per-model white PNG/WebP here (see README): car_{001,x,7x,7gt,9x}.webp
 /app/src/main/assets/cars/
+
+# Watch hero car cutout (copyrighted render, supply locally)
+/wear/src/main/assets/cars/

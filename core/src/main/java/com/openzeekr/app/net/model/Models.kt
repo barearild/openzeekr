@@ -143,6 +143,8 @@ data class VehicleInfo(
     val nickName: String?,
     val photoUrl: String?,
     val vehicleId: String?,
+    /** Whether the logged-in account owns this car (drives the provisioning path). */
+    val isOwner: Boolean = false,
 )
 
 /** Tolerant parse of the (shape-varying) vehicle-list `data`. */
@@ -150,12 +152,16 @@ object VehicleGarage {
     fun parse(data: JsonElement?): VehicleInfo? {
         val v = firstVehicle(data) ?: return null
         fun s(k: String) = (v[k] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        val ownerFlag = (v["isOwner"] as? JsonPrimitive)?.contentOrNull?.let {
+            it.equals("true", ignoreCase = true) || it == "1"
+        } ?: false
         return VehicleInfo(
             model = s("modelName") ?: s("seriesName") ?: s("innerCode") ?: s("seriesCode"),
             colorName = s("colorName") ?: materialColor(v),
             nickName = s("nickName") ?: s("vehicleNickname") ?: s("vehNickname") ?: s("remark"),
             photoUrl = s("vehiclePhotoBig") ?: s("vehicleListImgUrl") ?: s("vehiclePhotoSmall"),
             vehicleId = s("id") ?: s("vehicleId") ?: s("relationId"),
+            isOwner = ownerFlag,
         )
     }
 
