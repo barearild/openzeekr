@@ -172,7 +172,19 @@ class OverseasAppAuthInterceptor(private val store: ConfigStore) : Interceptor {
             .header("msgAppId", OVERSEAS_MSG_APP_ID)
             .header("Device-Type", "app")
             .header("Call-Source", "android")
-        if (cfg.accessToken.isNotBlank()) b.header("Authorization", cfg.accessToken)
+        // Authorization for /overseas-app is NOT the TSP bearer — it is the client-minted
+        // HS256 token (see InboxAuthToken): payload uuid = account openId, Client-Id const,
+        // timeMillis = now, signed with the baked inbox HS256 secret. Fall back to the bearer
+        // only when we can't mint yet (no openId captured, or no inbox secret configured).
+        val inboxAuth = InboxAuthToken.mint(
+            openId = cfg.accountUuid,
+            clientId = OVERSEAS_CLIENT_ID,
+            secret = cfg.inboxAuthSecret,
+        )
+        when {
+            inboxAuth != null -> b.header("Authorization", inboxAuth)
+            cfg.accessToken.isNotBlank() -> b.header("Authorization", cfg.accessToken)
+        }
         return chain.proceed(b.build())
     }
 

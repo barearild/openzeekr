@@ -9,6 +9,7 @@ import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkIdentity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -70,8 +71,16 @@ class PhoneKeySyncService : WearableListenerService() {
         if (deps == null) { send(nodeId, WearKeyProtocol.PATH_PAUSED, ByteArray(0)); return }
         deps.appScope.launch(Dispatchers.Main) {
             runCatching { deps.ble.disconnect() }
-            delay(CAR_SLOT_SETTLE_MS) // give the car time to release the single peer slot
-            Log.i(TAG, "link released for watch — acking")
+            // Wait until we're actually disconnected (IDLE), THEN let the car free its single
+            // peer slot before we tell the watch to connect — otherwise the watch races the
+            // still-tearing-down link and its connect fails.
+            runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(3000) {
+                    deps.ble.state.first { it == DkBleManager.State.IDLE || it == DkBleManager.State.ERROR }
+                }
+            }
+            delay(CAR_SLOT_SETTLE_MS)
+            Log.i(TAG, "link released for watch (state=${deps.ble.state.value}) — acking")
             send(nodeId, WearKeyProtocol.PATH_PAUSED, ByteArray(0))
         }
     }
@@ -83,6 +92,6 @@ class PhoneKeySyncService : WearableListenerService() {
     }
 
     private companion object {
-        const val CAR_SLOT_SETTLE_MS = 700L
+        const val CAR_SLOT_SETTLE_MS = 1000L
     }
 }

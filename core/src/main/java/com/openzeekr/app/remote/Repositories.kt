@@ -118,6 +118,17 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
         }
     }
 
+    /** Live control-mode state map (getVehicleState): sentry/valet = `vstdModeState` ("1"=on),
+     *  visitor = `visitorModeState`, glovebox = `storageBoxStatus`, etc. (captured 2026-09-16). */
+    suspend fun controlState(): CallResult<Map<String, String>> = withContext(Dispatchers.IO) {
+        guarded {
+            val cfg = store.current()
+            require(cfg.vin.isNotBlank()) { "VIN not configured" }
+            val resp = client.api.remoteControlState()
+            resp.data ?: error(resp.message ?: "state failed (code=${resp.code})")
+        }
+    }
+
     /** Garage lookup: the car's model / colour / render / nickname (best-effort). Also
      *  refreshes the persisted `isOwner` flag so provisioning picks owner vs shared correctly
      *  even on a session that logged in before that flag was captured. */
@@ -193,6 +204,40 @@ class InboxRepository(private val store: ConfigStore, private val client: ApiCli
         const val INBOX = "https://gateway-pub-azure.zeekr.eu/overseas-app/member/inbox"
         const val NOT_CONFIGURED = "Notifications need your overseas-app keys — add them in Settings › App secrets."
     }
+}
+
+/**
+ * Journey log: the car's trip history (distance / energy / duration / odometer) with an
+ * optional per-trip GPS track. Read-only paged REST on the TSP gateway (ms-vehicle-trail),
+ * same bearer + X-SIGNATURE + X-VIN signing the interceptors add for every other call.
+ */
+class JourneyRepository(private val store: ConfigStore, private val client: ApiClient) {
+
+    /** One page of trips over the last [days], newest first (as the server returns them).
+     *  Keep the window + pageSize SMALL: a 90-day × 50 request 504'd the gateway (upstream timeout);
+     *  stock uses pageSize 10. 30 days × 15 returns promptly. */
+    suspend fun trips(days: Int = 30, pageSize: Int = 15): CallResult<List<com.openzeekr.app.net.model.JourneyTrip>> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                val cfg = store.current()
+                require(cfg.vin.isNotBlank()) { "VIN not configured" }
+                val now = System.currentTimeMillis()
+                val body = com.openzeekr.app.net.model.JourneyPageRequest(
+                    current = 1,
+                    pageSize = pageSize,
+                    startTime = now - days * 86_400_000L,
+                    endTime = now,
+                    lastId = -1,
+                )
+                com.openzeekr.app.net.model.Journey.parseTrips(client.api.journeyTrips(body).data)
+            }
+        }
+
+    /** The GPS track for a single trip (optional detail). */
+    suspend fun trackpoints(reportTime: Long, tripId: Int): CallResult<List<com.openzeekr.app.net.model.JourneyTrackpoint>> =
+        withContext(Dispatchers.IO) {
+            guarded { com.openzeekr.app.net.model.Journey.parseTrackpoints(client.api.journeyTrackpoints(reportTime, tripId).data) }
+        }
 }
 
 class SentryRepository(private val store: ConfigStore, private val client: ApiClient) {

@@ -85,9 +85,11 @@ fun InboxScreen(deps: Deps, onBack: () -> Unit, snackbar: (String) -> Unit, modi
         ) {
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack, "Back",
+                tint = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.size(40.dp).clip(CircleShape).clickable { onBack() }.padding(8.dp),
             )
-            Text("Messages", fontWeight = FontWeight.Bold, fontSize = 18.sp, modifier = Modifier.weight(1f).padding(start = 4.dp))
+            Text("Messages", fontWeight = FontWeight.Bold, fontSize = 18.sp,
+                color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f).padding(start = 4.dp))
             if (messages.any { !it.read }) {
                 Text(
                     "Mark all read", color = Brand.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,

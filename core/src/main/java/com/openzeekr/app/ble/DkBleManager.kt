@@ -10,7 +10,9 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanSettings
+import android.os.ParcelUuid
 import android.content.Context
 import android.os.Build
 import android.util.Log
@@ -52,6 +54,15 @@ class DkBleManager(private val appContext: Context) : DkTransport {
         (appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     }
     val bluetoothAvailable: Boolean get() = adapter?.isEnabled == true
+
+    // Wear OS BLE: Samsung's watch stack advertises hardware scan-batching as supported but often
+    // never flushes it (no onBatchScanResults, no onScanFailed) — the scan just silently finds
+    // nothing. So on a watch we default to IMMEDIATE (unbatched) delivery. The phone keeps batched
+    // low-power delivery for the background keep-alive. (Verified 2026-09-15: phone connects from a
+    // spot where the watch's batched scan matched zero devices.)
+    private val isWear: Boolean by lazy {
+        appContext.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WATCH)
+    }
 
     // ---- session (stable instance; reads the credential at establish() time) ----
     @Volatile private var credential: DkCredential? = null
@@ -125,7 +136,14 @@ class DkBleManager(private val appContext: Context) : DkTransport {
                 _state.value = State.CONNECTING
                 connectDevice(a.getRemoteDevice(deviceMac))
             } else {
-                startScan(a)
+                // IMMEDIATE (unbatched) delivery, always. Batched delivery (setReportDelay>0) does
+                // NOT flush to a dozing app process when the screen is off — even with a filter that
+                // makes the scan screen-off-legal and even holding a wakelock — so the batched
+                // foreground re-scan matched nothing screen-off (confirmed 2026-09-15: offloaded
+                // FIRST_MATCH fired, but the follow-up batched connect timed out at 20s every time).
+                // Batching was only ever to avoid a per-advert log firehose, and the 0xFDFD/0x06FE
+                // FILTER already solves that (only the car matches). So: immediate everywhere.
+                startScan(a, useBatching = false)
             }
         } catch (e: SecurityException) {
             fail("missing Bluetooth permission (grant BLUETOOTH_SCAN/CONNECT): ${e.message}")
@@ -150,9 +168,15 @@ class DkBleManager(private val appContext: Context) : DkTransport {
             .apply { if (useBatching) setReportDelay(REPORT_DELAY_MS) }
             .build()
         val target = UUID.fromString(DkProtocol.SERVICE_UUID)
+        val advTarget = UUID.fromString(DK_ADV_SERVICE_UUID)  // the 16-bit UUID the car ADVERTISES
 
         // Handle one advertisement; returns true once it matched the car and started connecting.
         fun handleAdvert(result: ScanResult): Boolean {
+            // Once we've matched and left the scanning state, ignore every further advert. The
+            // batched scanner can deliver the car in several callbacks before stopScan takes
+            // effect; without this guard we'd call connectGatt twice → two GATT clients to the
+            // same device → status 133 (the connection never establishes). See onScanResult.
+            if (_state.value != State.SCANNING) return true
             val dev = result.device
             val addr = dev.address ?: return false
             val rec = result.scanRecord
@@ -160,7 +184,11 @@ class DkBleManager(private val appContext: Context) : DkTransport {
             val uuids = rec?.serviceUuids
             if (seenAdvertisers.add(addr)) {
                 Logx.d("ble", "adv $addr rssi=${result.rssi} name=${name ?: "?"} " +
-                    "uuids=${uuids?.joinToString { it.uuid.toString() } ?: "none"}")
+                    "uuids=${uuids?.joinToString { it.uuid.toString() } ?: "none"} " +
+                    // Full raw advert bytes — needed to build the hardware ScanFilter (company id =
+                    // first 2B of the 0xFF mfr AD, then the constant/masked bytes) for a
+                    // PendingIntent offloaded scan that runs screen-off with the CPU asleep.
+                    "raw=${rec?.bytes?.joinToString("") { "%02x".format(it) } ?: ""}")
             }
             // The DK broadcast-random rides a separate manufacturer-data PDU; capture it per-MAC
             // from every advert so it's ready whichever PDU triggers the name match.
@@ -169,7 +197,10 @@ class DkBleManager(private val appContext: Context) : DkTransport {
                 Logx.d("ble", "broadcastRnd[$addr]=${it.joinToString("") { b -> "%02x".format(b) }}")
             }
             val matchesName = name?.startsWith("Zeekr", ignoreCase = true) == true
-            val matchesUuid = uuids?.any { it.uuid == target } == true
+            // target = DK GATT service (not advertised); advTarget = the 0xFDFD the car DOES
+            // advertise in its primary packet — matching it means we don't depend on the
+            // scan-response name, which a screen-off scan can drop.
+            val matchesUuid = uuids?.any { it.uuid == target || it.uuid == advTarget } == true
             if (matchesName || matchesUuid) {
                 val rnd = rndByMac[addr]
                 if (rnd == null) {
@@ -202,9 +233,9 @@ class DkBleManager(private val appContext: Context) : DkTransport {
             }
         }
         scanCb = cb
-        Logx.d("ble", "scanning (no device filter, ${if (useBatching) "batched ${REPORT_DELAY_MS}ms" else "immediate"}) " +
-            "— match by name Zeekr* or DK service ${DkProtocol.SERVICE_UUID}")
-        scanner.startScan(null, settings, cb)
+        Logx.d("ble", "scanning (filtered 0xFDFD/0x06FE, ${if (useBatching) "batched ${REPORT_DELAY_MS}ms" else "immediate"}) " +
+            "— match by name Zeekr*, adv-uuid 0xFDFD, or DK service ${DkProtocol.SERVICE_UUID}")
+        scanner.startScan(carScanFilters(), settings, cb)
         scanJob = scope.launch {
             delay(SCAN_TIMEOUT_MS)
             if (_state.value == State.SCANNING) {
@@ -245,8 +276,100 @@ class DkBleManager(private val appContext: Context) : DkTransport {
         scanCb?.let { runCatching { scanner.stopScan(it) } }; scanCb = null
     }
 
+    /**
+     * The car's advert filter list. FILTERED scanning is mandatory for screen-off: Android blocks
+     * UNFILTERED LE scans while the screen is off ("Cannot start unfiltered scan in screen-off").
+     * The car advertises 16-bit service UUID 0xFDFD + manufacturer company id 0x06FE in its PRIMARY
+     * packet (captured 2026-09-15) — filter on EITHER (OR-list) so we still catch it if one field is
+     * ever absent. Note 0xFDFD is a shared Bluetooth-SIG 16-bit UUID (every Zeekr advertises it, not
+     * unique per car); per-car identity is verified AFTER a match (name Zeekr<vin-suffix> +
+     * broadcastRnd + the DK handshake, which only our provisioned key completes).
+     */
+    private fun carScanFilters(): List<ScanFilter> {
+        val advTarget = UUID.fromString(DK_ADV_SERVICE_UUID)
+        return listOf(
+            ScanFilter.Builder().setServiceUuid(ParcelUuid(advTarget)).build(),
+            ScanFilter.Builder().setManufacturerData(DK_MFR_COMPANY_ID, ByteArray(0)).build(),
+        )
+    }
+
+    /** True while a hardware-offloaded presence scan (PendingIntent) is registered. */
+    @Volatile var presenceArmed: Boolean = false
+        private set
+
+    /**
+     * Arm a HARDWARE-OFFLOADED presence scan: the Bluetooth controller watches for the car's
+     * advert (same [carScanFilters]) with the CPU asleep and wakes us via [BleScanReceiver] on
+     * FIRST_MATCH / MATCH_LOST. This is the zero-CPU idle path — no wakelock, no continuous
+     * foreground scan — for "parked at home for hours". Edge-triggered: FIRST_MATCH fires once when
+     * the car enters range (again only after a MATCH_LOST), so callers must ALSO do a one-shot
+     * foreground probe for the already-in-range case (started right next to the car).
+     *
+     * Idempotent. Returns true if armed (or already armed).
+     */
+    @SuppressLint("MissingPermission")
+    fun armPresenceScan(): Boolean {
+        if (presenceArmed) return true
+        val scanner = adapter?.bluetoothLeScanner ?: return false
+        if (adapter?.isEnabled != true) return false
+        val settings = ScanSettings.Builder()
+            // LOW_POWER + hardware match: the controller does the watching, not the CPU.
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    // Edge-triggered: notify once when found, once when lost (STICKY = must be seen a
+                    // few times before "found"/"lost" to debounce flapping at the range edge).
+                    setCallbackType(ScanSettings.CALLBACK_TYPE_FIRST_MATCH or ScanSettings.CALLBACK_TYPE_MATCH_LOST)
+                    setMatchMode(ScanSettings.MATCH_MODE_STICKY)
+                    setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
+                }
+            }
+            .build()
+        val res = runCatching { scanner.startScan(carScanFilters(), settings, presencePendingIntent()) }
+        return if (res.getOrDefault(-1) == 0) {
+            presenceArmed = true
+            Logx.d("ble", "presence scan ARMED (offloaded 0xFDFD/0x06FE, FIRST_MATCH/MATCH_LOST, CPU may sleep)")
+            true
+        } else {
+            Logx.e("ble", "presence scan arm failed (${res.exceptionOrNull()?.message ?: "startScan!=0"})")
+            false
+        }
+    }
+
+    /** Stop the hardware-offloaded presence scan (e.g. once we're engaged with a live session). */
+    @SuppressLint("MissingPermission")
+    fun disarmPresenceScan() {
+        if (!presenceArmed) return
+        val scanner = adapter?.bluetoothLeScanner
+        runCatching { scanner?.stopScan(presencePendingIntent()) }
+        presenceArmed = false
+        Logx.d("ble", "presence scan DISARMED")
+    }
+
+    /** Broadcast PendingIntent the offloaded scanner fires; delivered to [BleScanReceiver]. */
+    private fun presencePendingIntent(): android.app.PendingIntent {
+        val intent = android.content.Intent(appContext, BleScanReceiver::class.java)
+            .setAction(BleScanReceiver.ACTION_SCAN_RESULT)
+        // MUTABLE: the framework fills in the scan-result extras. FLAG_MUTABLE is required on API 31+.
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+            android.app.PendingIntent.FLAG_MUTABLE
+        else 0
+        return android.app.PendingIntent.getBroadcast(
+            appContext, PRESENCE_REQUEST_CODE, intent, flags
+        )
+    }
+
     @SuppressLint("MissingPermission")
     private fun connectDevice(device: BluetoothDevice) {
+        // Hard dedupe: never open a second GATT client while one is live. Two concurrent
+        // connectGatt() calls to the same peripheral is what produced the status-133 storm
+        // (clientIf 7 AND 8 to the same MAC). The scan-match guard above should prevent a
+        // second call, but this makes it impossible.
+        if (gatt != null) {
+            Logx.d("ble", "connectDevice ignored — a GATT client is already active (${device.address})")
+            return
+        }
+        Logx.d("ble", "connectGatt ${device.address}")
         gatt = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
@@ -411,6 +534,16 @@ class DkBleManager(private val appContext: Context) : DkTransport {
 
     companion object {
         private const val TAG = "DkBleManager"
+        /** The 16-bit service UUID the car ADVERTISES (0xFDFD) — used to filter the scan so it's
+         *  allowed to run screen-off, and to match without the scan-response name. NOT the DK GATT
+         *  service ([DkProtocol.SERVICE_UUID] 0x02362A…), which the car does not advertise. */
+        private const val DK_ADV_SERVICE_UUID = "0000fdfd-0000-1000-8000-00805f9b34fb"
+        /** Manufacturer company id in the car's 0xFF advert block (LE `fe 06`); a scan-filter on it
+         *  keeps the scan hardware-filtered/screen-off-legal. */
+        private const val DK_MFR_COMPANY_ID = 0x06FE
+        /** Stable request code for the offloaded presence-scan PendingIntent (arm/disarm must
+         *  build an equal PendingIntent, so the request code + intent action are fixed). */
+        private const val PRESENCE_REQUEST_CODE = 0x2ee5  // "ZEE(kr)"
         private const val SCAN_TIMEOUT_MS = 20_000L
         /** Batch window for foreground scan results — groups adverts so the framework doesn't
          *  log (and wake us for) every single advertisement packet. Sub-second, still snappy. */

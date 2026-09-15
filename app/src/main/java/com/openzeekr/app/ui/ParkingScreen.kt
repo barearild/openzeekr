@@ -57,22 +57,6 @@ import com.openzeekr.app.ui.theme.Brand
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ParkingScreen(deps: Deps, modifier: Modifier = Modifier) {
-    val rpa = deps.rpa
-    val state by rpa.state.collectAsState()
-    var showSheet by remember { mutableStateOf(false) }
-
-    // Dead-man safety: losing foreground or disposal releases immediately (stops the 500 ms
-    // heartbeat so the car halts even if a finger-up never arrives).
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_PAUSE) rpa.releaseMove() }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer); rpa.releaseMove() }
-    }
-
-    val phase = state.phase
-    val connecting = phase == RpaController.Phase.CONNECTING
-
     Column(
         modifier = modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -80,31 +64,25 @@ fun ParkingScreen(deps: Deps, modifier: Modifier = Modifier) {
         // Where's my car — MapLibre location + navigate deeplink.
         CarLocationSection(deps)
 
-        // Remote parking — opens the control modal.
-        CockpitCard(Modifier.clickable { showSheet = true }) {
+        // Remote parking — BLOCKED. RPA is gated on the car side: it needs a DK 3.0 (CCC Wallet SE)
+        // key with UWB/secure ranging, which our clean-room BLE key can't satisfy — the car refuses
+        // the REQ_MODE→SYNC handshake (0x100a). Not usable until we find a DK3.0 workaround or Zeekr
+        // ships an official remote-park path. Shown disabled so it's clear it exists but is gated.
+        CockpitCard {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Brand.accent.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.LocalParking, null, tint = Brand.accent, modifier = Modifier.size(22.dp))
+                Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Brand.faint.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.LocalParking, null, tint = Brand.faint, modifier = Modifier.size(22.dp))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text("Remote Parking", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text("Park in / out from your phone · hold to move", color = Brand.muted, fontSize = 12.sp)
+                    Text("Remote Parking", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Brand.muted)
+                    Text("Gated by the car — needs a DK 3.0 key (UWB). Not usable yet; awaiting a workaround or official support.",
+                        color = Brand.faint, fontSize = 12.sp)
                 }
-                if (phase == RpaController.Phase.IDLE) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Open", tint = Brand.faint)
-                else PhasePill(phase, connecting)
+                Row(
+                    Modifier.clip(CircleShape).background(Brand.faint.copy(alpha = 0.16f)).padding(horizontal = 11.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) { Text("Locked", color = Brand.faint, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold) }
             }
-        }
-    }
-
-    if (showSheet) {
-        val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { rpa.releaseMove(); showSheet = false },
-            sheetState = sheet,
-            containerColor = MaterialTheme.colorScheme.surface,
-        ) {
-            RemoteParkingControls(rpa, state)
-            Spacer(Modifier.height(24.dp))
         }
     }
 }
@@ -132,6 +110,13 @@ private fun RemoteParkingControls(rpa: RpaController, state: RpaController.UiSta
             PrimaryButton(if (connecting) "Connecting…" else "Connect", Modifier.weight(1f), enabled = canConnect) { rpa.begin() }
             GhostButton("Stop", Modifier.weight(1f), enabled = active, tint = Brand.crit) { rpa.stop() }
         }
+
+        // DEBUG: fire every maneuver opcode once (skips the REQ_MODE→SYNC gate) to learn if
+        // any command downstream gets a non-0x100a response. RPA is absent from stock Android
+        // (iOS/DK3.0/UWB-gated), so this is exploratory. ⚠️ Keep clear space around the car.
+        GhostButton("Blind probe (debug) — watch logcat", Modifier.fillMaxWidth(), tint = Brand.energy) { rpa.blindProbe() }
+        Text("Fires all park/move opcodes once, ignoring the car's gate. Only run with clear space around the car — if the car accepts an autonomous command it can move.",
+            color = Brand.faint, fontSize = 11.sp)
 
         SectionHeader("Park in")
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

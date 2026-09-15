@@ -23,6 +23,17 @@
             </intent-filter>
         </activity>
 
+        <!-- Shares the exported journey-log CSV out via the system share sheet. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- Answers the watch's request for the digital key (Wear Data Layer). -->
         <service
             android:name=".wear.PhoneKeySyncService"

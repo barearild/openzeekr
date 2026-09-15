@@ -20,7 +20,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
-import androidx.compose.material.icons.filled.LocalParking
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
@@ -62,7 +62,7 @@ import kotlinx.coroutines.launch
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     VEHICLE("Vehicle", Icons.Filled.DirectionsCar),
-    PARKING("Parking", Icons.Filled.LocalParking),
+    PARKING("Location", Icons.Filled.LocationOn),
     SECURITY("Security", Icons.Filled.Shield),
     KEY("Key", Icons.Filled.VpnKey),
     SETTINGS("Settings", Icons.Filled.Settings),
@@ -104,6 +104,13 @@ fun AppRoot(deps: Deps) {
             snackbar("Signed out — your account was opened on another device (e.g. the Zeekr app). Sign in again to reconnect.")
             com.openzeekr.app.net.SessionSignal.loggedInElsewhere.value = false
         }
+    }
+
+    // The moment a key is provisioned, push it to any paired watch so it's armed without the
+    // user opening the watch app (the watch caches it; it also pulls on open as a fallback).
+    val pushCtx = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(prov.step) {
+        if (prov.step == DkProvisioning.Step.DONE) com.openzeekr.app.wear.PhoneKeyPush.pushToWatches(pushCtx)
     }
 
     val bleState by deps.ble.state.collectAsState()

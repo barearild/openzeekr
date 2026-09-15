@@ -87,15 +87,15 @@ fun CockpitCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.
  * text/border so the cockpit stays calm. Disabled stays legible (raised surface + faint text).
  */
 @Composable
-fun PrimaryButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
+fun PrimaryButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, tint: Color = Brand.accent, onClick: () -> Unit) {
     Box(
         modifier.clip(RoundedCornerShape(14.dp))
-            .background(if (enabled) Brand.accent.copy(alpha = 0.16f) else Brand.surface3)
-            .border(1.dp, if (enabled) Brand.accent.copy(alpha = 0.55f) else Brand.line, RoundedCornerShape(14.dp))
+            .background(if (enabled) tint.copy(alpha = 0.16f) else Brand.surface3)
+            .border(1.dp, if (enabled) tint.copy(alpha = 0.55f) else Brand.line, RoundedCornerShape(14.dp))
             .let { if (enabled) it.clickable(onClick = onClick) else it }
             .padding(vertical = 14.dp),
         contentAlignment = Alignment.Center,
-    ) { Text(text, color = if (enabled) Brand.accent else Brand.muted, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
+    ) { Text(text, color = if (enabled) tint else Brand.muted, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
 }
 
 /** Muted segmented/toggle chip shared by the unit selectors and pickers (selected = accent

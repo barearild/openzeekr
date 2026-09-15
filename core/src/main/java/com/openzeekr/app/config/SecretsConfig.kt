@@ -1,5 +1,6 @@
 package com.openzeekr.app.config
 
+import android.annotation.SuppressLint
 import com.openzeekr.core.BuildConfig
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -23,6 +24,7 @@ import kotlinx.serialization.Serializable
  *     - prodSecret          -> the X-SIGNATURE signing secret (getSignSecret)
  *     - vinKey / vinIv      -> AES key/iv used to encrypt the VIN header
  */
+@SuppressLint("UnsafeOptInUsageError")
 @Serializable
 data class SecretsConfig(
     // ---- the six extracted secrets (configurable, never hardcoded) ----
@@ -41,6 +43,13 @@ data class SecretsConfig(
     @SerialName("overseas_access_key") val overseasAccessKey: String = "",
     @SerialName("overseas_secret_key") val overseasSecretKey: String = "",
 
+    /** Baked HS256 secret that signs the client-minted `Authorization` token for the message
+     *  inbox on the overseas-app host (see [com.openzeekr.app.net.InboxAuthToken]). A THIRD credential,
+     *  separate from the TSP bearer and the overseas X-HMAC AK/SK. Not a plaintext constant in
+     *  the stock APK — Frida-dumped at runtime and supplied here. Blank = fall back to the bearer
+     *  on inbox requests (which the gateway rejects with 401). */
+    @SerialName("inbox_auth_secret") val inboxAuthSecret: String = "",
+
     // ---- account / vehicle ----
     val email: String = "",
     val password: String = "",
@@ -50,6 +59,9 @@ data class SecretsConfig(
     val isOwner: Boolean = false,
     /** Numeric account id (IOVContext.getUserId), Frida-confirmed. */
     val userId: String = "",
+    /** Account openId (user-center user/info `uuid`, 32-hex) — the `uuid` claim of the inbox
+     *  HS256 [com.openzeekr.app.net.InboxAuthToken]. Captured + persisted at login; NOT [userId]. */
+    val accountUuid: String = "",
     /** A pre-captured bearer/access token, if you already have one (skips login). */
     val accessToken: String = "",
     /** xchanger/ECARX DK-backend session (from login step 4b) — DK stack authenticates with these. */
@@ -107,6 +119,15 @@ data class SecretsConfig(
     /** Approach sensitivity preset (user-facing) — maps to unlock/lock RSSI below.
      *  One of: "veryclose", "close", "far". */
     val proximitySensitivity: String = "close",
+    /**
+     * Hardware-offloaded presence scan: when idle (no live DK session), hand the car's
+     * advert filter (0xFDFD / company 0x06FE) to the Bluetooth controller via a
+     * PendingIntent scan and let the CPU sleep. The controller wakes us with FIRST_MATCH
+     * when the car comes into range; we only hold a wakelock + a live GATT while actually
+     * engaged. This removes the always-on PARTIAL_WAKE_LOCK that drained the battery while
+     * parked at home. Off = legacy behavior (continuous foreground scan + held wakelock).
+     */
+    val presenceOffloadEnabled: Boolean = true,
 
     // ---- app-local UI state (not part of zeekr_secrets.json) ----
     /** First-run onboarding wizard completed (login → key provisioning). */
@@ -135,6 +156,11 @@ data class SecretsConfig(
 
     /** True once the overseas-app HMAC AK/SK are present, i.e. the message inbox can auth. */
     val overseasReady: Boolean get() = overseasAccessKey.isNotBlank() && overseasSecretKey.isNotBlank()
+
+    /** True once the inbox `Authorization` HS256 token can actually be minted (openId captured
+     *  at login + the baked inbox HS256 secret present). Without both, inbox calls fall back to
+     *  the bearer and the gateway returns 401. */
+    val inboxAuthReady: Boolean get() = accountUuid.isNotBlank() && inboxAuthSecret.isNotBlank()
 
     /**
      * Effective unlock threshold (dBm): the user's [unlockRssi] clamped so it can
@@ -196,6 +222,7 @@ data class SecretsConfig(
             xchangerSignSecret = BuildConfig.SEC_XCHANGER_SIGN_SECRET,
             overseasAccessKey = BuildConfig.SEC_OVERSEAS_ACCESS_KEY,
             overseasSecretKey = BuildConfig.SEC_OVERSEAS_SECRET_KEY,
+            inboxAuthSecret = BuildConfig.SEC_INBOX_AUTH_SECRET,
             // NOTE: email / password / vin / userId are intentionally NOT baked
             // in (see build.gradle.kts). They start blank and are entered on the
             // Settings screen, then persisted only in encrypted on-device prefs.

@@ -35,6 +35,9 @@ android {
         // (getNativeApplicationId / getNativeSecret in libenv.so), Frida-dumped per region/env.
         buildConfigField("String", "SEC_OVERSEAS_ACCESS_KEY", "\"${bakedSecret("OVERSEAS_ACCESS_KEY")}\"")
         buildConfigField("String", "SEC_OVERSEAS_SECRET_KEY", "\"${bakedSecret("OVERSEAS_SECRET_KEY")}\"")
+        // Inbox Authorization HS256 secret — signs the client-minted /overseas-app/* token
+        // (InboxAuthToken). String-obfuscated in the stock APK, so Frida-dumped at runtime.
+        buildConfigField("String", "SEC_INBOX_AUTH_SECRET", "\"${bakedSecret("INBOX_AUTH_SECRET")}\"")
     }
 
     compileOptions {

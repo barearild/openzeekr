@@ -24,6 +24,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,9 +38,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import com.openzeekr.app.Deps
 import com.openzeekr.app.remote.CallResult
 import com.openzeekr.app.remote.Command
+import com.openzeekr.app.net.model.ServiceParameter
 import com.openzeekr.app.ui.theme.Brand
 import kotlinx.coroutines.launch
 
@@ -50,14 +58,43 @@ import kotlinx.coroutines.launch
 @Composable
 fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
-    var sentry by remember { mutableStateOf(true) }
-    var autoArm by remember { mutableStateOf(true) }
+    val cfg by deps.config.config.collectAsState()
+    // Visitor mode + glovebox PIN are owner-only server-side (a shared/Friend account gets 403), so
+    // only surface them when we're logged in as the vehicle owner (vehicle-list `isOwner`).
+    val owner = cfg.isOwner
+    // Seeded below from getVehicleState `vstdModeState` (the sentry/guard armed flag). Starts off
+    // until that first read lands.
+    var sentry by remember { mutableStateOf(false) }
     var visitor by remember { mutableStateOf(false) }
+    // A PIN entry is pending for one of these commands (glovebox / visitor need a code).
+    var pinFor by remember { mutableStateOf<Command?>(null) }
+    // Journey log takes over the whole screen (like the inbox) when opened.
+    var showJourney by remember { mutableStateOf(false) }
 
-    fun fire(label: String, block: suspend () -> CallResult<*>) {
+    // Seed the real on/off state from getVehicleState (captured 2026-09-16): sentry/guard =
+    // `vstdModeState` ("1"=armed), visitor = `visitorModeState`. So the toggles reflect the car,
+    // not just the last in-app action.
+    LaunchedEffect(Unit) {
+        when (val r = deps.control.controlState()) {
+            is CallResult.Ok -> {
+                sentry = r.value["vstdModeState"] == "1"
+                visitor = r.value["visitorModeState"] == "1"
+            }
+            is CallResult.Err -> {}
+        }
+    }
+
+    if (showJourney) {
+        JourneyScreen(deps, onBack = { showJourney = false }, snackbar = snackbar, modifier = modifier)
+        return
+    }
+
+    fun fire(label: String, cmd: Command, extra: List<ServiceParameter> = emptyList()) {
         snackbar("$label…")
         scope.launch {
-            when (val r = block()) { is CallResult.Ok -> snackbar("$label ✓"); is CallResult.Err -> snackbar("$label ✗ ${r.message}") }
+            when (val r = deps.control.send(cmd, extra)) {
+                is CallResult.Ok -> snackbar("$label ✓"); is CallResult.Err -> snackbar("$label ✗ ${r.message}")
+            }
         }
     }
 
@@ -65,37 +102,66 @@ fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
         Label("Security & access")
         Column(Modifier.padding(horizontal = 20.dp)) {
             SecRow(Icons.Filled.Shield, "Sentry guard",
-                if (sentry) "Armed · re-arms after each drive" else "Off") {
+                if (sentry) "Armed" else "Off") {
                 Switch(checked = sentry, onCheckedChange = { on ->
                     sentry = on
-                    fire(if (on) "Sentry on" else "Sentry off") { deps.control.send(if (on) Command.SENTINEL_ON else Command.SENTINEL_OFF) }
+                    fire(if (on) "Sentry on" else "Sentry off", if (on) Command.SENTINEL_ON else Command.SENTINEL_OFF)
                 }, colors = brandSwitchColors(Brand.good))
             }
-            if (sentry) Row(
-                Modifier.fillMaxWidth().padding(start = 46.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Auto-arm every time the car locks", color = Brand.muted, fontSize = 12.5.sp)
-                Switch(checked = autoArm, onCheckedChange = { autoArm = it },
-                    colors = brandSwitchColors(Brand.good))
+            // Owner-only (shared accounts are refused server-side). Both need the user's PIN.
+            if (owner) {
+                SecRow(Icons.Filled.Inventory2, "Glovebox lock", "Lock the glovebox with your PIN",
+                    onClick = { pinFor = Command.GLOVEBOX_LOCK }) { Chevron() }
+                SecRow(Icons.Filled.Person, "Visitor mode", "Restricted access for a guest / valet") {
+                    Switch(checked = visitor, onCheckedChange = { on ->
+                        // Enter PIN first; only flip the toggle once the command is confirmed.
+                        pinFor = if (on) Command.VISITOR_ON else Command.VISITOR_OFF
+                    }, colors = brandSwitchColors(Brand.good))
+                }
             }
-            SecRow(Icons.Filled.Inventory2, "Glovebox PIN", "Lock the glovebox with a code",
-                onClick = { snackbar("Glovebox PIN — coming next") }) { Chevron() }
-            SecRow(Icons.Filled.Person, "Visitor mode", "Restricted access for a guest / valet") {
-                Switch(checked = visitor, onCheckedChange = { on ->
-                    visitor = on; snackbar(if (on) "Visitor mode on" else "Visitor mode off")
-                }, colors = brandSwitchColors(Brand.good))
-            }
-            SecRow(Icons.Filled.LocationOn, "Vehicle location", "Last parked spot on the map",
-                onClick = { snackbar("Opens the parked location in Maps") }) { Chevron() }
             SecRow(Icons.Filled.Timeline, "Journey log", "Trips · distance & energy · export",
-                onClick = { snackbar("Journey log — coming next") }) { Chevron() }
+                onClick = { showJourney = true }) { Chevron() }
+        }
+
+        pinFor?.let { cmd ->
+            val title = when (cmd) {
+                Command.GLOVEBOX_LOCK -> "Glovebox PIN"
+                Command.VISITOR_ON -> "Visitor mode — set PIN"
+                Command.VISITOR_OFF -> "Visitor mode — enter PIN"
+                else -> "Enter PIN"
+            }
+            PinDialog(title, onDismiss = { pinFor = null }, onConfirm = { pin ->
+                fire(title.substringBefore(" —").substringBefore(" PIN"), cmd, listOf(ServiceParameter("code", pin)))
+                if (cmd == Command.VISITOR_ON) visitor = true
+                if (cmd == Command.VISITOR_OFF) visitor = false
+                pinFor = null
+            })
         }
         Text(
             "Send-to-car isn't a button — OpenZeekr registers as a share target, so a pin dropped in Maps goes straight to the car's nav.",
             color = Brand.faint, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
         )
     }
+}
+
+@Composable
+private fun PinDialog(title: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var pin by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = pin,
+                onValueChange = { if (it.length <= 6 && it.all(Char::isDigit)) pin = it },
+                label = { Text("PIN") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            )
+        },
+        confirmButton = { TextButton(enabled = pin.length >= 4, onClick = { onConfirm(pin) }) { Text("Confirm") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable

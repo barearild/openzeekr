@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -44,6 +45,8 @@ import androidx.wear.compose.material.Text
 import androidx.wear.compose.material.TimeText
 import androidx.wear.compose.material.Vignette
 import androidx.wear.compose.material.VignettePosition
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkIdentity
 import com.openzeekr.app.ble.DkLockController
@@ -88,19 +91,32 @@ fun WearApp() {
     // watch is usable and is shown as a status line — also proves the Data Layer works.
     var phoneStatus by remember { mutableStateOf<PhoneLink.Status?>(null) }
 
-    // No sign-in on the watch: it's an extension of the phone app. Whenever we don't hold a
-    // key, silently ask the paired phone to send it over the Data Layer.
-    LaunchedEffect(provisioned) {
-        if (!provisioned) KeySyncClient.requestKey(context)
+    // FOREGROUND-ONLY comms. Both effects are gated on repeatOnLifecycle(RESUMED): a Compose
+    // LaunchedEffect otherwise keeps running while the Activity is merely STOPPED (the composition
+    // isn't disposed until destroy), which had the watch polling the phone every 4s around the
+    // clock — ~5% overnight for an app that wasn't even opened. repeatOnLifecycle cancels the body
+    // the instant we leave the foreground and restarts it when the watch app is shown again, so a
+    // backgrounded/asleep watch does ZERO Data Layer traffic and burns no battery here.
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // No sign-in on the watch: it's an extension of the phone app. Whenever we don't hold a key,
+    // ask the paired phone for it — but only while the app is actually on screen.
+    LaunchedEffect(provisioned, lifecycleOwner) {
+        if (provisioned) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            KeySyncClient.requestKey(context)
+        }
     }
 
-    // While the app is open, keep asking the phone what it's doing so the UI reflects it
-    // (controls stand down while the phone's Lock-on-approach is on). Also continuously proves
-    // the phone comms work. Paused during an action to avoid two queries at once.
-    LaunchedEffect(provisioned) {
-        while (provisioned) {
-            if (!busy) phoneStatus = PhoneLink.queryStatus(context)
-            delay(4000)
+    // While the app is on screen, keep asking the phone what it's doing so the UI reflects it
+    // (controls stand down while the phone's Lock-on-approach is on). Stops dead when backgrounded.
+    LaunchedEffect(provisioned, lifecycleOwner) {
+        if (!provisioned) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                if (!busy) phoneStatus = PhoneLink.queryStatus(context)
+                delay(4000)
+            }
         }
     }
 

@@ -270,8 +270,13 @@ class AccountLogin(private val store: ConfigStore) {
             val jwtUserId = jwtClaim(bearer, "userId")
             Logx.d("login", "userId from JWT=${jwtUserId ?: "(none)"}")
 
-            // persist token+userId BEFORE the vehicle-list call (it needs auth)
-            store.update { it.copy(accessToken = bearer, userId = jwtUserId ?: userId ?: it.userId) }
+            // persist token+userId (+ account openId for the inbox HS256 token, see
+            // InboxAuthToken) BEFORE the vehicle-list call (it needs auth)
+            store.update { it.copy(
+                accessToken = bearer,
+                userId = jwtUserId ?: userId ?: it.userId,
+                accountUuid = accountUuid ?: it.accountUuid,
+            ) }
 
             // 6. vehicle list -> VIN (first vehicle)
             Logx.d("login", "step 6/6 vehicle-list …")

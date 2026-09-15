@@ -266,6 +266,115 @@ object Inbox {
 @Serializable
 data class MarkAllReadRequest(val customTypeId: String? = null, val vin: String? = null)
 
+// -------------------------------------------------------------- journey log / trips
+// POST ms-vehicle-trail/v1.0/journalLog/trip/listForPage  (paged trip history)
+//   body: {"current":1,"pageSize":10,"startTime":<ms>,"endTime":<ms>,"lastId":-1}
+//   data: {current,pageSize,total,pages,lastId,data:[ <trip> ]}
+//   trip: {reportTime, tripId, startTime, endTime, startOdometer, endOdometer,
+//          traveledDistance(km), avgSpeed(km/h), calAvgSpeed, electricConsumption,
+//          electricRegeneration, fuelConsumption, trackPoints:[…], wayPointList:[…]}
+// GET  ms-vehicle-trail/v1.0/journalLog/trackpoint/list?tripReportTime=<ms>&tripId=<n>
+//   data: [ {systemTime, latitude, longitude, altitude, speed, direction, odometer} ]
+// VIN rides in the X-VIN header (added by the interceptors). Verified against the stock
+// capture (big_frida.log). Numeric fields arrive as JSON numbers OR strings depending on
+// the car, so everything is read tolerantly (JsonPrimitive.contentOrNull → toXOrNull).
+
+/** Body for the paged trip list. No defaults — the client Json is encodeDefaults=false. */
+@Serializable
+data class JourneyPageRequest(
+    val current: Int,
+    val pageSize: Int,
+    val startTime: Long,
+    val endTime: Long,
+    val lastId: Long,
+)
+
+/** One trip, flattened for the UI / CSV. Distances are km, speeds km/h (car-native). */
+data class JourneyTrip(
+    val tripId: Int?,
+    /** reportTime — also the key for the per-trip trackpoint lookup. */
+    val reportTime: Long?,
+    val startTime: Long?,
+    val endTime: Long?,
+    val startOdometer: Int?,
+    val endOdometer: Int?,
+    /** Trip distance in km (stock `traveledDistance`). */
+    val distanceKm: Int?,
+    /** Average speed in km/h (stock `avgSpeed`). */
+    val avgSpeedKmh: Int?,
+    /** Average energy consumption; unit is the car's own (assumed kWh/100km). */
+    val electricConsumption: Double?,
+    /** Regenerated energy over the trip; unit is the car's own (assumed Wh). */
+    val electricRegeneration: Double?,
+    val fuelConsumption: Double?,
+) {
+    /** Trip length in ms, or null if either endpoint is missing. */
+    val durationMs: Long? get() = if (startTime != null && endTime != null && endTime >= startTime) endTime - startTime else null
+}
+
+/** One GPS sample of a trip. */
+data class JourneyTrackpoint(
+    val systemTime: Long?,
+    val latitude: Double?,
+    val longitude: Double?,
+    val altitude: Double?,
+    val speed: Int?,
+    val direction: Int?,
+    val odometer: Int?,
+)
+
+object Journey {
+    /** Tolerant parse of the (paged) listForPage `data` → newest-first trip list. */
+    fun parseTrips(data: JsonElement?): List<JourneyTrip> =
+        tripArray(data).mapNotNull { (it as? JsonObject)?.let(::trip) }
+
+    /** Tolerant parse of the trackpoint/list `data` (a bare array) → point list. */
+    fun parseTrackpoints(data: JsonElement?): List<JourneyTrackpoint> = when (data) {
+        is JsonArray -> data.mapNotNull { (it as? JsonObject)?.let(::point) }
+        is JsonObject -> (data.values.firstOrNull { it is JsonArray } as? JsonArray)
+            ?.mapNotNull { (it as? JsonObject)?.let(::point) } ?: emptyList()
+        else -> emptyList()
+    }
+
+    private fun trip(o: JsonObject) = JourneyTrip(
+        tripId = o.intOf("tripId"),
+        reportTime = o.longOf("reportTime"),
+        startTime = o.longOf("startTime"),
+        endTime = o.longOf("endTime"),
+        startOdometer = o.intOf("startOdometer"),
+        endOdometer = o.intOf("endOdometer"),
+        distanceKm = o.intOf("traveledDistance"),
+        avgSpeedKmh = o.intOf("avgSpeed"),
+        electricConsumption = o.dblOf("electricConsumption"),
+        electricRegeneration = o.dblOf("electricRegeneration"),
+        fuelConsumption = o.dblOf("fuelConsumption"),
+    )
+
+    private fun point(o: JsonObject) = JourneyTrackpoint(
+        systemTime = o.longOf("systemTime"),
+        latitude = o.dblOf("latitude"),
+        longitude = o.dblOf("longitude"),
+        altitude = o.dblOf("altitude"),
+        speed = o.intOf("speed"),
+        direction = o.intOf("direction"),
+        odometer = o.intOf("odometer"),
+    )
+
+    /** The trip array lives under `data` in the paged wrapper; fall back to any array. */
+    private fun tripArray(data: JsonElement?): List<JsonElement> = when (data) {
+        is JsonArray -> data
+        is JsonObject -> (data["data"] as? JsonArray ?: data["records"] as? JsonArray
+            ?: data["list"] as? JsonArray ?: data["rows"] as? JsonArray
+            ?: data.values.firstOrNull { it is JsonArray } as? JsonArray) ?: emptyList()
+        else -> emptyList()
+    }
+
+    private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+    private fun JsonObject.intOf(key: String): Int? = str(key)?.let { it.toIntOrNull() ?: it.toDoubleOrNull()?.toInt() }
+    private fun JsonObject.longOf(key: String): Long? = str(key)?.let { it.toLongOrNull() ?: it.toDoubleOrNull()?.toLong() }
+    private fun JsonObject.dblOf(key: String): Double? = str(key)?.toDoubleOrNull()
+}
+
 // ---------------------------------------------------------- ecarx control (System B)
 // Physical-actuation commands (powered tailgate RDU_2/RDL_2, charge lids RDO/RDC) don't
 // execute via the plain POST /ms-remote-control path — stock dispatches them through the
@@ -426,12 +535,34 @@ data class ClimateStatusVo(
     val interiorTemp: String? = null,
     val exteriorTemp: String? = null,
     val preClimateActive: Boolean? = null,
+    /** Windscreen defrost: "1" = on, "0"/blank = off. */
+    val defrost: String? = null,
+    /** Per-seat HEAT level 0–3 (0 = off). driver/passenger/rear-left/rear-right. */
+    val drvHeatSts: String? = null,
+    val passHeatingSts: String? = null,
+    val rlHeatingSts: String? = null,
+    val rrHeatingSts: String? = null,
+    /** Per-seat COOL/vent level 0–3 (0 = off). Same four seats. (Cooling exists on the hardware but
+     *  the stock app doesn't expose it — we drive it via ZAF SV.<pos>.) */
+    val drvVentDetail: String? = null,
+    val passVentDetail: String? = null,
+    val rlVentDetail: String? = null,
+    val rrVentDetail: String? = null,
+    /** A/C target setpoint (°C) if the car reports it. */
+    val crSetTemp: String? = null,
     val winStatusDriver: String? = null,
     val winStatusDriverRear: String? = null,
     val winStatusPassenger: String? = null,
     val winStatusPassengerRear: String? = null,
     val sunroofOpenStatus: String? = null,
-)
+) {
+    /** A/C running — preClimateActive is the authoritative on/off flag. */
+    val acOn: Boolean get() = preClimateActive == true
+    val defrostOn: Boolean get() = defrost == "1"
+    /** Any seat heater on (level > 0 on any seat). */
+    val seatHeatOn: Boolean get() = listOf(drvHeatSts, passHeatingSts, rlHeatingSts, rrHeatingSts)
+        .any { (it?.toIntOrNull() ?: 0) > 0 }
+}
 
 /** Battery SOC / range / charging. */
 @Serializable
@@ -456,7 +587,12 @@ data class ElectricStatusVo(
     val chargeUAct: String? = null,
     /** EV range on battery only. */
     val distanceToEmptyOnBatteryOnly: String? = null,
+    /** Battery temperature regulation / preconditioning active. */
+    val hvBatteryPreHeatingActive: Boolean? = null,
 ) {
+    /** Charge-port (AC or DC flap) open. */
+    val chargePortOpen: Boolean get() = chargeLidAcStatus == "1" || chargeLidDcAcStatus == "1"
+
     /** Real charge power in watts from live current×voltage, or null if unavailable. */
     val chargePowerW: Double?
         get() {
@@ -548,6 +684,16 @@ object VehicleStatus {
                             interiorTemp = c.str("interiorTemp"),
                             exteriorTemp = c.str("exteriorTemp"),
                             preClimateActive = c.boolOf("preClimateActive"),
+                            defrost = c.str("defrost"),
+                            drvHeatSts = c.str("drvHeatSts"),
+                            passHeatingSts = c.str("passHeatingSts"),
+                            rlHeatingSts = c.str("rlHeatingSts"),
+                            rrHeatingSts = c.str("rrHeatingSts"),
+                            drvVentDetail = c.str("drvVentDetail"),
+                            passVentDetail = c.str("passVentDetail"),
+                            rlVentDetail = c.str("rlVentDetail"),
+                            rrVentDetail = c.str("rrVentDetail"),
+                            crSetTemp = c.str("crSetTemp"),
                             winStatusDriver = c.str("winStatusDriver"),
                             winStatusDriverRear = c.str("winStatusDriverRear"),
                             winStatusPassenger = c.str("winStatusPassenger"),
@@ -586,6 +732,7 @@ object VehicleStatus {
                             chargeIAct = e.str("chargeIAct"),
                             chargeUAct = e.str("chargeUAct"),
                             distanceToEmptyOnBatteryOnly = e.str("distanceToEmptyOnBatteryOnly"),
+                            hvBatteryPreHeatingActive = e.boolOf("hvBatteryPreHeatingActive"),
                         )
                     },
                     maintenanceStatus = a.obj("maintenanceStatus")?.let { m ->

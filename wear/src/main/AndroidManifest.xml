@@ -7,9 +7,23 @@
     <!-- BLE — lock/unlock at the car with the cloned digital key. -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <!-- BLUETOOTH_SCAN with neverForLocation: the watch finds the car by name/UUID and never
+         derives location from BLE, so the scan must NOT require ACCESS_FINE_LOCATION. Without this
+         flag, on API 31+ the scan silently returns ZERO results when location isn't granted (the
+         exact symptom: startScan runs, no onScanResult ever fires). tools:node="replace" is
+         required because :core injects a flagless BLUETOOTH_SCAN that would otherwise win the merge
+         (the phone keeps the flagless version — it uses RSSI ranging and does hold location). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s"
+        tools:node="replace" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <!-- The watch never uses location (no proximity/RSSI ranging here); drop the one :core injects
+         so it can't contradict neverForLocation or prompt for a location grant on the watch. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
+    <!-- No wakelock on the watch: it runs only when actively opened (the keep-alive/proximity
+         service is removed below). Drop the one :core injects. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" tools:node="remove" />
 
     <application
         android:allowBackup="false"
@@ -43,5 +57,7 @@
 
         <!-- The watch has no proximity/foreground service; drop the one :core declares. -->
         <service android:name="com.openzeekr.app.ble.ProximityService" tools:node="remove" />
+        <!-- No offloaded presence scan on the watch (nothing arms it); drop the receiver too. -->
+        <receiver android:name="com.openzeekr.app.ble.BleScanReceiver" tools:node="remove" />
     </application>
 </manifest>

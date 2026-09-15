@@ -32,7 +32,7 @@ fun iconFor(cmd: Command): ImageVector = when (cmd) {
     Command.LOCK, Command.TRUNK_LOCK, Command.LOCKER_ON -> Icons.Filled.Lock
     Command.FRONT_TRUNK, Command.TRUNK_OPEN -> Icons.Filled.Inventory2
     Command.CHARGE_LID_OPEN, Command.CHARGE_LID_CLOSE -> Icons.Filled.EvStation
-    Command.AC_ON, Command.AC_OFF, Command.CABIN_ON, Command.CABIN_OFF -> Icons.Filled.Air
+    Command.AC_ON, Command.AC_OFF, Command.CABIN_ON, Command.CABIN_OFF, Command.CLIMATE_ZAF -> Icons.Filled.Air
     Command.DEFROST_ON, Command.DEFROST_OFF -> Icons.Filled.AcUnit
     Command.SEAT_HEAT_ON, Command.SEAT_HEAT_OFF, Command.STEER_WHEEL_ON, Command.STEER_WHEEL_OFF -> Icons.Filled.Thermostat
     Command.FRAGRANCE_ON, Command.FRAGRANCE_OFF -> Icons.Filled.LocalFlorist
@@ -47,6 +47,8 @@ fun iconFor(cmd: Command): ImageVector = when (cmd) {
     Command.HONK -> Icons.Filled.VolumeUp
     Command.FLASH_HORN -> Icons.Filled.Campaign
     Command.SENTINEL_ON, Command.SENTINEL_OFF -> Icons.Filled.Shield
+    Command.GLOVEBOX_LOCK, Command.GLOVEBOX_UNLOCK -> Icons.Filled.Inventory2
+    Command.VISITOR_ON, Command.VISITOR_OFF -> Icons.Filled.DirectionsWalk
 }
 
 fun iconFor(category: Category): ImageVector = when (category) {

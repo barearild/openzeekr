@@ -10,6 +10,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Keep the CPU awake while the keep-alive/proximity loop runs with the screen off; a FGS
+         alone does not prevent CPU suspend, and without it the screen-off BLE scan never flushes
+         (confirmed: with wakelock the phone finds the car screen-off, without it, nothing). Held
+         only while ProximityService is running. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- BLE digital-key / remote-parking channel (no neverForLocation: RSSI ranging
          + MAC read for approach unlock is a location-derived use). -->
@@ -32,5 +37,12 @@
             android:name="com.openzeekr.app.ble.ProximityService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Receives the hardware-offloaded presence scan (PendingIntent from the BLE controller):
+             FIRST_MATCH wakes the app to connect, MATCH_LOST re-idles it. exported=false is fine —
+             the system delivers our own PendingIntent to our own explicit component. -->
+        <receiver
+            android:name="com.openzeekr.app.ble.BleScanReceiver"
+            android:exported="false" />
     </application>
 </manifest>

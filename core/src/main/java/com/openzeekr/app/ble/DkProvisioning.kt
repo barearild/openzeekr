@@ -44,6 +44,12 @@ class DkProvisioning(
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state
 
+    private companion object {
+        // Gateway 429 backoff for create-owner-blu-key (mirrors the stock app's ~5s wait+retry).
+        const val OWNER_CREATE_ATTEMPTS = 4
+        const val OWNER_CREATE_BACKOFF_MS = 5_000L
+    }
+
     // encodeDefaults=true so request bodies include ALL fields the stock app sends (e.g. key-list
     // sends {deviceId, dkType, signature, type} — with defaults dropped we were omitting dkType/type).
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; isLenient = true }
@@ -109,10 +115,12 @@ class DkProvisioning(
             }
             Logx.d("provision", "step 1 cert OK (${cert.length}B)")
 
-            // 2. key-list (owner filters dkType=1 then picks the dkType==2 key; shared uses dkType=2)
+            // 2. key-list — dkType=2 (Bluetooth) for BOTH owner and shared. (dkType is the key
+            //    TECHNOLOGY, not the owner/friend tier — the stock owner app also queries dkType=2,
+            //    not 1; querying dkType=1 just returned an empty list. Confirmed frida 2026-09-15.)
             _state.value = State(Step.KEY_LIST)
-            Logx.d("provision", "step 2 key-list (dkType=${if (owner) 1 else 2}) …")
-            val kl = api.keyList(KeyListReq(deviceId = deviceId, dkType = if (owner) 1 else 2, signature = sig()))
+            Logx.d("provision", "step 2 key-list (dkType=2) …")
+            val kl = api.keyList(KeyListReq(deviceId = deviceId, dkType = 2, signature = sig()))
             Logx.d("provision", "step 2 key-list code=${kl.code} entries=${kl.data?.size ?: 0}")
             if (!ok(kl.code)) error("key-list: ${kl.code} ${kl.msg}" +
                 if (kl.code == "061203") " (signature vs enrolled cert / userId mismatch)" else "")
@@ -128,7 +136,7 @@ class DkProvisioning(
                 // owner with no key yet -> create it
                 _state.value = State(Step.BIND)
                 Logx.d("provision", "step 3 create-owner-blu-key …")
-                val cr = api.createOwnerBluKey(OwnerKeyReq(deviceId = deviceId, proprietary = "", signature = sig()))
+                val cr = createOwnerBluKeyWithRetry(deviceId, sig)
                 val od = cr.data ?: error("create-owner-blu-key: ${cr.code} ${cr.msg}")
                 dkId = od.dkId; bookId = od.bookId
                 Logx.d("provision", "step 3 owner key created dkId=$dkId")
@@ -215,6 +223,33 @@ class DkProvisioning(
             _state.value = State(Step.DONE, "dkId=$dkId" + (shareStatus?.let { " shareStatus=$it" } ?: " (owner)"))
             Unit
         }.onFailure { Logx.e("provision", "=== provision FAILED ===", it); _state.value = State(Step.ERROR, it.message) }
+    }
+
+    /**
+     * create-owner-blu-key, retrying the gateway rate-limit. The APISIX gateway 429s
+     * (`00A29` "Requests are too frequent") the FIRST create-owner-blu-key when it lands right
+     * after the cert/key-list burst — CONFIRMED identical in the stock app (frida capture
+     * 2026-09-15): stock's first call also 429s and it simply waits ~5s and retries → 200. It's a
+     * short sliding window, not an account/daily cap, and no intervening call "clears" it (a
+     * key-list preceded both stock's failed and successful create) — only time. So re-sign (fresh
+     * ECDSA signature, like stock) and retry with a ~5s backoff.
+     */
+    private suspend fun createOwnerBluKeyWithRetry(deviceId: String, sign: () -> String): DkResp<KeyItem> {
+        var last: retrofit2.HttpException? = null
+        for (attempt in 1..OWNER_CREATE_ATTEMPTS) {
+            try {
+                return api.createOwnerBluKey(OwnerKeyReq(deviceId = deviceId, proprietary = "", signature = sign()))
+            } catch (e: retrofit2.HttpException) {
+                if (e.code() == 429) {
+                    last = e
+                    Logx.w("provision", "create-owner-blu-key 429 (gateway rate-limit 00A29) — " +
+                        "backoff ${OWNER_CREATE_BACKOFF_MS}ms, retry $attempt/$OWNER_CREATE_ATTEMPTS …")
+                    if (attempt < OWNER_CREATE_ATTEMPTS) kotlinx.coroutines.delay(OWNER_CREATE_BACKOFF_MS)
+                } else throw e
+            }
+        }
+        throw IllegalStateException(
+            "create-owner-blu-key kept returning 429 (gateway rate-limit). Wait ~10s and try again.", last)
     }
 
     /**

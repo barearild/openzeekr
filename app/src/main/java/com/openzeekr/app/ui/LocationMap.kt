@@ -114,7 +114,7 @@ fun CarLocationSection(deps: Deps, modifier: Modifier = Modifier) {
         Box(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(14.dp))) {
             CarMap(pos?.first, pos?.second, Modifier.matchParentSize())
         }
-        if (pos != null) PrimaryButton("Navigate to car", Modifier.fillMaxWidth()) { navigateToCar(ctx, pos!!.first, pos!!.second) }
+        if (pos != null) PrimaryButton("Navigate to car", Modifier.fillMaxWidth(), tint = Brand.good) { navigateToCar(ctx, pos!!.first, pos!!.second) }
         else GhostButton("Location unavailable", Modifier.fillMaxWidth(), enabled = false, tint = Brand.muted) {}
     }
 }

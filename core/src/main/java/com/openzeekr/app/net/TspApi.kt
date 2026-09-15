@@ -99,6 +99,21 @@ interface TspApi {
     @POST
     suspend fun inboxReadAll(@Url url: String, @Body body: com.openzeekr.app.net.model.MarkAllReadRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
 
+    // ---- journey log / trip history (ms-vehicle-trail) ----
+    // Paged trip list; VIN via X-VIN header. Body is a JourneyPageRequest (date window +
+    // paging). `data` is a paged wrapper mapped tolerantly by Journey.parseTrips.
+    @POST("ms-vehicle-trail/v1.0/journalLog/trip/listForPage")
+    suspend fun journeyTrips(
+        @Body body: com.openzeekr.app.net.model.JourneyPageRequest,
+    ): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    // Per-trip GPS track (optional detail). Keyed by the trip's reportTime + tripId.
+    @GET("ms-vehicle-trail/v1.0/journalLog/trackpoint/list")
+    suspend fun journeyTrackpoints(
+        @Query("tripReportTime") tripReportTime: Long,
+        @Query("tripId") tripId: Int,
+    ): BaseResponse<kotlinx.serialization.json.JsonElement>
+
     // ---- sentry / sentinel-monitoring-service ----
     @GET("/sentinel-monitoring-service/api/v1/alarm/event/query")
     suspend fun sentryEvents(@QueryMap params: Map<String, String>): BaseResponse<SentryVideoResp>

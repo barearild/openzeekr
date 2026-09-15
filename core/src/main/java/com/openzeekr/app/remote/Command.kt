@@ -45,17 +45,30 @@ enum class Command(
     CHARGE_LID_OPEN("Open Charge Lid", Category.DOORS, "RDO", "start", listOf(ServiceParameter("target", "front-charge-lid"))),
     CHARGE_LID_CLOSE("Close Charge Lid", Category.DOORS, "RDC", "stop", listOf(ServiceParameter("target", "front-charge-lid"))),
 
-    // ---- climate ---- (serviceId RCE — NOT RCE_2; rce.conditioner selects the function)
-    AC_ON("A/C On", Category.CLIMATE, "RCE", "start", listOf(ServiceParameter("rce.conditioner", "1"))),
-    AC_OFF("A/C Off", Category.CLIMATE, "RCE", "stop", listOf(ServiceParameter("rce.conditioner", "1"))),
-    CABIN_ON("Cabin Precondition On", Category.CLIMATE, "RCC", "start", listOf(ServiceParameter("rcc.conditioner", "50"), ServiceParameter("rcc.ventilation", "0")), durationSec = 6),
-    CABIN_OFF("Cabin Precondition Off", Category.CLIMATE, "RCC", "stop", listOf(ServiceParameter("rcc.conditioner", "50"), ServiceParameter("rcc.ventilation", "0"))),
-    DEFROST_ON("Defrost On", Category.CLIMATE, "RCE", "start", listOf(ServiceParameter("rce.conditioner", "2")), durationSec = 90),
-    DEFROST_OFF("Defrost Off", Category.CLIMATE, "RCE", "stop", listOf(ServiceParameter("rce.conditioner", "2"))),
-    SEAT_HEAT_ON("Seat Heat On", Category.COMFORT, "RCE", "start", listOf(ServiceParameter("rce.conditioner", "3"))),
-    SEAT_HEAT_OFF("Seat Heat Off", Category.COMFORT, "RCE", "stop", listOf(ServiceParameter("rce.conditioner", "3"))),
-    STEER_WHEEL_ON("Steering Wheel Heat On", Category.COMFORT, "RCE", "start", listOf(ServiceParameter("rce.heat", "steering_wheel"), ServiceParameter("rce.conditioner", "5"))),
-    STEER_WHEEL_OFF("Steering Wheel Heat Off", Category.COMFORT, "RCE", "stop", listOf(ServiceParameter("rce.heat", "steering_wheel"), ServiceParameter("rce.conditioner", "5"))),
+    // ---- climate ---- (UNIFIED serviceId ZAF, captured 2026-09-15 big_frida.log, all 200).
+    // IMPORTANT: ZAF ALWAYS uses command="start"; on/off is the boolean *value*, not the command.
+    // Old RCE mapping never actuated. Temperature/level/duration ride as serviceParameters (NO
+    // operationScheduling for ZAF). AC.temp is overridable from the UI (dedup keeps the last value).
+    AC_ON("A/C On", Category.CLIMATE, "ZAF", "start",
+        listOf(ServiceParameter("AC", "true"), ServiceParameter("AC.temp", "22.0"), ServiceParameter("AC.duration", "15"))),
+    AC_OFF("A/C Off", Category.CLIMATE, "ZAF", "start", listOf(ServiceParameter("AC", "false"))),
+    // "A/C vent" = cabin ventilation, still serviceId RCC (on=start w/ 6-min schedule, off=stop).
+    CABIN_ON("A/C Vent On", Category.CLIMATE, "RCC", "start", listOf(ServiceParameter("rcc.conditioner", "50"), ServiceParameter("rcc.ventilation", "0")), durationSec = 6),
+    CABIN_OFF("A/C Vent Off", Category.CLIMATE, "RCC", "stop", listOf(ServiceParameter("rcc.conditioner", "50"), ServiceParameter("rcc.ventilation", "0"))),
+    DEFROST_ON("Defrost On", Category.CLIMATE, "ZAF", "start",
+        listOf(ServiceParameter("DF", "true"), ServiceParameter("DF.duration", "15"), ServiceParameter("DF.level", "2"))),
+    DEFROST_OFF("Defrost Off", Category.CLIMATE, "ZAF", "start", listOf(ServiceParameter("DF", "false"))),
+    // SH.11 = driver seat (positions: 11=driver, 19=passenger, 21=rear-left, 29=rear-right).
+    SEAT_HEAT_ON("Seat Heat On", Category.COMFORT, "ZAF", "start",
+        listOf(ServiceParameter("SH.11", "true"), ServiceParameter("SH.11.level", "3"), ServiceParameter("SH.11.duration", "15"))),
+    SEAT_HEAT_OFF("Seat Heat Off", Category.COMFORT, "ZAF", "start", listOf(ServiceParameter("SH.11", "false"))),
+    STEER_WHEEL_ON("Steering Wheel Heat On", Category.COMFORT, "ZAF", "start",
+        listOf(ServiceParameter("SW", "true"), ServiceParameter("SW.duration", "8"), ServiceParameter("SW.level", "3"))),
+    STEER_WHEEL_OFF("Steering Wheel Heat Off", Category.COMFORT, "ZAF", "start", listOf(ServiceParameter("SW", "false"))),
+    // Generic ZAF envelope (command="start", no base params) — the caller supplies the whole
+    // serviceParameters set via extraParams. Used by the per-seat heat/cool grid so each seat's
+    // SH.<pos>/SV.<pos> keys are sent alone (no other seat's key tags along).
+    CLIMATE_ZAF("Climate", Category.CLIMATE, "ZAF", "start"),
     FRAGRANCE_ON("Fragrance On", Category.COMFORT, "RFD", "start"),
     FRAGRANCE_OFF("Fragrance Off", Category.COMFORT, "RFD", "stop", listOf(ServiceParameter("channel_id", "0"), ServiceParameter("level", "0"))),
     FRIDGE_ON("Fridge On", Category.COMFORT, "ZAE", "start"),
@@ -88,10 +101,27 @@ enum class Command(
 
     // ---- security ---- (RSM sentry sub-mode via rsm=<n>; private locker via RDL/RDU target=private-lock)
     // Sentry/guard = RSM sub-mode "6" (SentinelOn/OffCommandCreator). Valet would be "123456".
-    SENTINEL_ON("Sentry On", Category.SECURITY, "RSM", "start", listOf(ServiceParameter("RSM", "6"))),
-    SENTINEL_OFF("Sentry Off", Category.SECURITY, "RSM", "stop", listOf(ServiceParameter("RSM", "6"))),
+    // Captured 2026-09-15 from the stock app (master acct): System A works — the key is LOWERCASE
+    // "rsm" nested in setting.serviceParameters. Our old attempts sent uppercase "RSM" (car ignored
+    // the hollow 200) or routed RSM to System B (telematics PUT → 404). Body that returns 200+sessionId:
+    //   {"command":"start","serviceId":"RSM","setting":{"serviceParameters":[{"key":"rsm","value":"6"}]}}
+    SENTINEL_ON("Sentry On", Category.SECURITY, "RSM", "start", listOf(ServiceParameter("rsm", "6"))),
+    SENTINEL_OFF("Sentry Off", Category.SECURITY, "RSM", "stop", listOf(ServiceParameter("rsm", "6"))),
     LOCKER_ON("Private Locker Lock", Category.SECURITY, "RDL", "start", listOf(ServiceParameter("target", "private-lock"), ServiceParameter("password", "1234"))),
     LOCKER_OFF("Private Locker Unlock", Category.SECURITY, "RDU", "stop", listOf(ServiceParameter("target", "private-lock"), ServiceParameter("password", "1234"))),
+
+    // ---- glovebox PIN (serviceId ZAD) & visitor mode (serviceId ZAG) — captured 2026-09-15.
+    // The PIN (`code`) is user-entered: pass it as an extraParam to override the placeholder here.
+    // Glovebox: lock=start / unlock=stop, params code=<pin>, zad.model=1, boxId=3.
+    GLOVEBOX_LOCK("Glovebox Lock", Category.SECURITY, "ZAD", "start",
+        listOf(ServiceParameter("code", "0000"), ServiceParameter("zad.model", "1"), ServiceParameter("boxId", "3"))),
+    GLOVEBOX_UNLOCK("Glovebox Unlock", Category.SECURITY, "ZAD", "stop",
+        listOf(ServiceParameter("code", "0000"), ServiceParameter("zad.model", "1"), ServiceParameter("boxId", "3"))),
+    // Visitor: on=start / off=stop, params code=<pin>, zag.model=1.
+    VISITOR_ON("Visitor Mode On", Category.SECURITY, "ZAG", "start",
+        listOf(ServiceParameter("code", "0000"), ServiceParameter("zag.model", "1"))),
+    VISITOR_OFF("Visitor Mode Off", Category.SECURITY, "ZAG", "stop",
+        listOf(ServiceParameter("code", "0000"), ServiceParameter("zag.model", "1"))),
     ;
 
     private fun allParams(extraParams: List<ServiceParameter>): List<ServiceParameter> = buildList {
@@ -99,6 +129,12 @@ enum class Command(
         addAll(extraParams)
         // engStrtType is a serviceParameter (not a top-level field) in the stock request.
         engStrtType?.let { add(ServiceParameter("engStrtType", it)) }
+    }.let { all ->
+        // Dedup by key, LAST value wins — so a UI override (e.g. AC.temp, glovebox code) passed via
+        // extraParams cleanly replaces the placeholder default instead of emitting the key twice.
+        val seen = LinkedHashMap<String, ServiceParameter>()
+        for (p in all) seen[p.key] = p
+        seen.values.toList()
     }
 
     fun toRequest(extraParams: List<ServiceParameter> = emptyList()): RemoteControlRequest =
@@ -116,10 +152,10 @@ enum class Command(
      * (System B, PUT /remote-control/vehicle/telematics/{vin}) rather than /ms-remote-control.
      * These serviceIds are only wired on the System B route in stock (the stock app builds
      * every ActionControl and sends it via `iovdo` → telematics): System A accepts them with
-     * a hollow HTTP 200 + sessionId but the car never acts. Includes the physical-actuation
-     * ids (powered tailgate RDU_2/RDL_2, charge lids RDO/RDC) and RSM (sentry / sentinel) —
-     * confirmed at-car: RSM via System A returned 200 but surveillance never toggled, while
-     * the SAME shared account toggled it fine from the stock app (which uses System B).
+     * a hollow HTTP 200 + sessionId but the car never acts. Includes only the physical-actuation
+     * ids (powered tailgate RDU_2/RDL_2, charge lids RDO/RDC). NOTE: RSM (sentry) was previously
+     * here, but the 2026-09-15 stock capture proved sentry uses System A with a lowercase "rsm"
+     * key — our earlier "200 but no effect" was the wrong key case, not the wrong transport.
      */
     val usesSystemB: Boolean get() = serviceId in ECARX_SERVICE_IDS
 
@@ -138,7 +174,12 @@ enum class Command(
         )
 
     companion object {
-        /** serviceIds that only actuate through System B (device-api). */
-        val ECARX_SERVICE_IDS = setOf("RDU_2", "RDL_2", "RDO", "RDC", "RSM")
+        /** serviceIds that only actuate through System B (device-api). RSM is NOT here — the stock
+         *  app toggles sentry through System A (ms-remote-control) with a lowercase "rsm" key; only
+         *  the physical-actuation ids below need the telematics PUT. */
+        // RDO/RDC (charge lid) REMOVED 2026-09-15: the stock capture (big_frida.log) sends them via
+        // System A (ms-remote-control) → 200, so our System-B routing was the only reason they 404'd.
+        // RDU_2/RDL_2 (powered tailgate) stay on System B until captured otherwise.
+        val ECARX_SERVICE_IDS = setOf("RDU_2", "RDL_2")
     }
 }

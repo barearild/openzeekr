@@ -13,6 +13,7 @@ import com.openzeekr.app.net.ApiClient
 import com.openzeekr.app.remote.AuthRepository
 import com.openzeekr.app.remote.CapabilityHolder
 import com.openzeekr.app.remote.InboxRepository
+import com.openzeekr.app.remote.JourneyRepository
 import com.openzeekr.app.remote.RemoteControlRepository
 import com.openzeekr.app.remote.SentryRepository
 import com.openzeekr.app.remote.VehicleStatusHolder
@@ -32,6 +33,8 @@ class Deps(context: Context) {
     val auth = AuthRepository(config, apiClient)
     val control = RemoteControlRepository(config, apiClient)
     val sentry = SentryRepository(config, apiClient)
+    /** Journey log: trip history (distance / energy / duration) with CSV export. */
+    val journey = JourneyRepository(config, apiClient)
     /** Member message center (charging done, abnormal parking, alarms, OTA, …). */
     val inbox = InboxRepository(config, apiClient)
     /** Live vehicle status (foreground poll, no push) — observed by the UI. */

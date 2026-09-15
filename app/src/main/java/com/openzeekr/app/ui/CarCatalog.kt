@@ -17,6 +17,14 @@ data class CarModel(
     /** Asset path under assets/, e.g. "cars/car_7gt.webp" (may be absent → no render). */
     val renderAsset: String,
     val colors: List<PaintColor>,
+    /**
+     * Optional two-layer paint render (grayscale metallic body + separate details/trim/wheels).
+     * When both are present the hero tints [bodyAsset] with the selected paint colour via a
+     * MULTIPLY blend (so shadows/highlights survive) and draws [detailsAsset] untouched on top —
+     * a live, per-colour photoreal paint job. Falls back to [renderAsset] when null.
+     */
+    val bodyAsset: String? = null,
+    val detailsAsset: String? = null,
 )
 
 object CarCatalog {
@@ -47,14 +55,19 @@ object CarCatalog {
             PaintColor("Onyx Black", c(0x111111), "Metallic"),
             PaintColor("Tech Grey", c(0x868686), "Metallic"),
             PaintColor("Brookblue", c(0x677FA3), "Two-tone"),
-        )),
+        ), bodyAsset = "cars/7x_body.png", detailsAsset = "cars/7x_details.png"),
+        // 7GT: the six factory finishes with hexes calibrated against the studio renders (see the
+        // luminance-recolour matrices), plus Mystic Lilac (the reference car). The hero generates the
+        // recolour matrix from each hex at draw time.
         CarModel("7GT", "Zeekr 7GT", "cars/car_7gt.webp", listOf(
             PaintColor("Mystic Lilac", c(0xB9A7C4), "Pearl"),
-            PaintColor("Crystal White", c(0xE9ECEF), "Pearl"),
-            PaintColor("Glacier Silver", c(0xC4C8CC), "Metallic"),
-            PaintColor("Tech Grey", c(0x7C7E82), "Metallic"),
-            PaintColor("Onyx Black", c(0x141414), "Metallic"),
-        )),
+            PaintColor("Crystal White", c(0xF0F1F3), "Pearl"),
+            PaintColor("Glacier Silver", c(0xCED3D9), "Metallic"),
+            PaintColor("Tech Grey", c(0x84878B), "Metallic"),
+            PaintColor("Titanium Grey", c(0x524E54), "Metallic"),
+            PaintColor("Onyx Black", c(0x1C1D20), "Metallic"),
+            PaintColor("Forest Green", c(0x2B4437), "Metallic"),
+        ), bodyAsset = "cars/7gt_body.png", detailsAsset = "cars/7gt_details.png"),
         CarModel("9X", "Zeekr 9X", "cars/car_9x.webp", listOf(
             PaintColor("Onyx Black", c(0x1A1A1A), "Metallic"),
             PaintColor("Crystal White", c(0xEDEFF2), "Pearl"),
