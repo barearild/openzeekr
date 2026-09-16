@@ -5,20 +5,16 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Diagonal EV teal -> blue gradient badge -->
+    <!-- Ground: the mark artwork's own dark-green (#1f2825), a hair of top-down depth -->
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:type="linear"
-                android:startX="6" android:startY="10"
-                android:endX="102" android:endY="102">
-                <item android:offset="0" android:color="#FF11C7BE" />
-                <item android:offset="0.55" android:color="#FF0E8FC9" />
-                <item android:offset="1" android:color="#FF0A5CF2" />
+                android:startX="54" android:startY="0"
+                android:endX="54" android:endY="108"
+                android:type="linear">
+                <item android:color="#FF232E2A" android:offset="0.0" />
+                <item android:color="#FF1B231F" android:offset="1.0" />
             </gradient>
         </aapt:attr>
     </path>
-    <!-- Subtle darker corner glow for depth -->
-    <path android:pathData="M0,54 L54,108 L0,108 Z"
-        android:fillColor="#22000000" />
 </vector>

@@ -23,7 +23,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
@@ -52,21 +51,22 @@ fun brandSwitchColors(checkedTrack: Color = Brand.accent): SwitchColors = Switch
     disabledUncheckedTrackColor = Brand.surface2,
 )
 
-/** The gradient app badge with the OpenZeekr mark — used in the top bar. */
+/** The app badge with the OpenZeekr mark — used in the top bar. Dark-green card + green mark,
+ *  matching the launcher icon. */
 @Composable
 fun BrandBadge(size: Int = 30) {
     Box(
         modifier = Modifier
             .size(size.dp)
             .clip(RoundedCornerShape((size / 3.2f).dp))
-            .background(Brush.linearGradient(Brand.gradient)),
+            .background(Color(0xFF1F2825)), // the mark's dark-green card — matches the launcher icon
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             painter = painterResource(R.drawable.ic_logo),
             contentDescription = null,
             tint = Color.Unspecified,
-            modifier = Modifier.size((size * 0.72f).dp),
+            modifier = Modifier.size(size.dp), // ic_logo carries its own padding
         )
     }
 }

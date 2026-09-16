@@ -215,6 +215,71 @@ object Inbox {
     fun parse(data: JsonElement?): List<InboxMessage> =
         listNode(data).mapNotNull { (it as? JsonObject)?.let(::message) }
 
+    /**
+     * Tolerant parse of the `/inbox/home` grouped response (`InBoxHomeBean`). The list query
+     * (`/inbox`) requires a per-category `customTypeId` (400 without it), but `/inbox/home` takes
+     * no params and returns the four groups (VEHICLE/OTA/AFTER_SALES/ZEEKR), each carrying a
+     * `noticeDTO` latest-message preview. We recursively harvest every message-shaped object
+     * (has an id + a title/detail), dedup by id, newest first — so a single call shows the latest
+     * message per category without needing to know any customTypeId. See MESSAGE_CENTER_FINDINGS.md.
+     */
+    fun parseHome(data: JsonElement?): List<InboxMessage> {
+        val out = LinkedHashMap<String, InboxMessage>()
+        fun walk(node: JsonElement?) {
+            when (node) {
+                is JsonArray -> node.forEach(::walk)
+                is JsonObject -> {
+                    val hasId = node["id"] is JsonPrimitive
+                    val looksLikeMsg = hasId && (node["title"] is JsonPrimitive || node["detail"] is JsonPrimitive)
+                    if (looksLikeMsg) {
+                        val m = message(node)
+                        (m.id ?: "${m.title}:${m.timeMs}").let { key -> out.putIfAbsent(key, m) }
+                    }
+                    node.values.forEach(::walk) // still descend (a group object also holds noticeDTO)
+                }
+                else -> {}
+            }
+        }
+        walk(data)
+        return out.values.sortedByDescending { it.timeMs ?: 0L }
+    }
+
+    /** Distinct category ids (`customTypeId`) found in the `/home` groups. The paged `/inbox` list
+     *  is filtered by one of these — one per group (VEHICLE/OTA/AFTER_SALES/ZEEKR). */
+    fun homeCategories(data: JsonElement?): List<String> {
+        val ids = LinkedHashSet<String>()
+        fun walk(n: JsonElement?) {
+            when (n) {
+                is JsonArray -> n.forEach(::walk)
+                is JsonObject -> {
+                    (n["customTypeId"] as? JsonPrimitive)?.contentOrNull
+                        ?.takeIf { it.isNotBlank() && it != "null" }?.let { ids += it }
+                    n.values.forEach(::walk)
+                }
+                else -> {}
+            }
+        }
+        walk(data)
+        return ids.toList()
+    }
+
+    /** Total unread = Σ each `/home` group's `sum`. (There is no working `/unread` GET — it 500s.) */
+    fun homeUnread(data: JsonElement?): Int {
+        var total = 0
+        fun walk(n: JsonElement?) {
+            when (n) {
+                is JsonArray -> n.forEach(::walk)
+                is JsonObject -> {
+                    (n["sum"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.let { total += it }
+                    n.values.forEach(::walk)
+                }
+                else -> {}
+            }
+        }
+        walk(data)
+        return total
+    }
+
     /** Tolerant parse of the unread-count `data` — either { unreadNum } or a bare number. */
     fun parseUnread(data: JsonElement?): Int = when (data) {
         is JsonPrimitive -> data.contentOrNull?.toIntOrNull() ?: 0
@@ -246,7 +311,7 @@ object Inbox {
     private fun listNode(data: JsonElement?): List<JsonElement> = when (data) {
         is JsonArray -> data
         is JsonObject -> {
-            val direct = (data["records"] ?: data["list"] ?: data["rows"]
+            val direct = (data["objects"] ?: data["records"] ?: data["list"] ?: data["rows"]
                 ?: data["items"] ?: data["content"]) as? JsonArray
             when {
                 direct != null -> direct
@@ -289,6 +354,25 @@ data class JourneyPageRequest(
     val lastId: Long,
 )
 
+/**
+ * Send-to-car POI push body (POST ms-lbs-service/api/v2.0/sendToCar). Coordinates are raw
+ * WGS-84 (no GCJ02 conversion on the client — the server converts for the car); VIN rides in
+ * the X-VIN header, NOT the body. NO field defaults: the client Json is encodeDefaults=false,
+ * so `csys`/`source`/`content` must be passed explicitly or they'd be dropped from the wire.
+ * Captured field order/shape: SEND_TO_CAR_NAV_FINDINGS.md.
+ */
+@Serializable
+data class SendToCarRequest(
+    val address: String,
+    val city: String,
+    val content: String,
+    val csys: String,
+    val longitude: Double,
+    val latitude: Double,
+    val name: String,
+    val source: String,
+)
+
 /** One trip, flattened for the UI / CSV. Distances are km, speeds km/h (car-native). */
 data class JourneyTrip(
     val tripId: Int?,
@@ -307,9 +391,20 @@ data class JourneyTrip(
     /** Regenerated energy over the trip; unit is the car's own (assumed Wh). */
     val electricRegeneration: Double?,
     val fuelConsumption: Double?,
+    /** Start/end GPS — first/last of the trip's inline `trackPoints` (WGS-84, marsCoordinates=false).
+     *  There are no address fields in the list; the UI reverse-geocodes these for a place label. */
+    val startLat: Double? = null,
+    val startLon: Double? = null,
+    val endLat: Double? = null,
+    val endLon: Double? = null,
 ) {
     /** Trip length in ms, or null if either endpoint is missing. */
     val durationMs: Long? get() = if (startTime != null && endTime != null && endTime >= startTime) endTime - startTime else null
+}
+
+/** One page of the trip list + whether more pages exist (for "Load more"). */
+data class JourneyPage(val trips: List<JourneyTrip>, val current: Int, val pages: Int) {
+    val hasMore: Boolean get() = current < pages && trips.isNotEmpty()
 }
 
 /** One GPS sample of a trip. */
@@ -328,6 +423,17 @@ object Journey {
     fun parseTrips(data: JsonElement?): List<JourneyTrip> =
         tripArray(data).mapNotNull { (it as? JsonObject)?.let(::trip) }
 
+    /** Like [parseTrips] but keeps the paging cursor (`current`/`pages`) so the UI can "Load more". */
+    fun parseTripsPage(data: JsonElement?): JourneyPage {
+        val trips = parseTrips(data)
+        val obj = data as? JsonObject
+        val current = obj?.intOf("current") ?: 1
+        // `pages` = total page count. If the server omits it we can't know there's more, so treat
+        // this as the last page (pages == current) — better than offering an endless "Load more".
+        val pages = obj?.intOf("pages") ?: current
+        return JourneyPage(trips, current, pages)
+    }
+
     /** Tolerant parse of the trackpoint/list `data` (a bare array) → point list. */
     fun parseTrackpoints(data: JsonElement?): List<JourneyTrackpoint> = when (data) {
         is JsonArray -> data.mapNotNull { (it as? JsonObject)?.let(::point) }
@@ -336,19 +442,27 @@ object Journey {
         else -> emptyList()
     }
 
-    private fun trip(o: JsonObject) = JourneyTrip(
-        tripId = o.intOf("tripId"),
-        reportTime = o.longOf("reportTime"),
-        startTime = o.longOf("startTime"),
-        endTime = o.longOf("endTime"),
-        startOdometer = o.intOf("startOdometer"),
-        endOdometer = o.intOf("endOdometer"),
-        distanceKm = o.intOf("traveledDistance"),
-        avgSpeedKmh = o.intOf("avgSpeed"),
-        electricConsumption = o.dblOf("electricConsumption"),
-        electricRegeneration = o.dblOf("electricRegeneration"),
-        fuelConsumption = o.dblOf("fuelConsumption"),
-    )
+    private fun trip(o: JsonObject): JourneyTrip {
+        // Start/end coords come from the inline trackPoints (first = start, last = end).
+        val pts = o["trackPoints"] as? JsonArray
+        val first = pts?.firstOrNull() as? JsonObject
+        val last = pts?.lastOrNull() as? JsonObject
+        return JourneyTrip(
+            tripId = o.intOf("tripId"),
+            reportTime = o.longOf("reportTime"),
+            startTime = o.longOf("startTime"),
+            endTime = o.longOf("endTime"),
+            startOdometer = o.intOf("startOdometer"),
+            endOdometer = o.intOf("endOdometer"),
+            distanceKm = o.intOf("traveledDistance"),
+            avgSpeedKmh = o.intOf("avgSpeed"),
+            electricConsumption = o.dblOf("electricConsumption"),
+            electricRegeneration = o.dblOf("electricRegeneration"),
+            fuelConsumption = o.dblOf("fuelConsumption"),
+            startLat = first?.dblOf("latitude"), startLon = first?.dblOf("longitude"),
+            endLat = last?.dblOf("latitude"), endLon = last?.dblOf("longitude"),
+        )
+    }
 
     private fun point(o: JsonObject) = JourneyTrackpoint(
         systemTime = o.longOf("systemTime"),

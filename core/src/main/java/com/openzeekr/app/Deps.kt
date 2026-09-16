@@ -14,6 +14,7 @@ import com.openzeekr.app.remote.AuthRepository
 import com.openzeekr.app.remote.CapabilityHolder
 import com.openzeekr.app.remote.InboxRepository
 import com.openzeekr.app.remote.JourneyRepository
+import com.openzeekr.app.remote.NavRepository
 import com.openzeekr.app.remote.RemoteControlRepository
 import com.openzeekr.app.remote.SentryRepository
 import com.openzeekr.app.remote.VehicleStatusHolder
@@ -37,6 +38,8 @@ class Deps(context: Context) {
     val journey = JourneyRepository(config, apiClient)
     /** Member message center (charging done, abnormal parking, alarms, OTA, …). */
     val inbox = InboxRepository(config, apiClient)
+    /** Send-to-car: push a navigation POI to the car (also drives the geo:/nav intent handler). */
+    val nav = NavRepository(config, apiClient)
     /** Live vehicle status (foreground poll, no push) — observed by the UI. */
     val vehicleState = VehicleStatusHolder(control, appScope)
     /** Per-VIN supported functions — drives which controls the UI shows. */

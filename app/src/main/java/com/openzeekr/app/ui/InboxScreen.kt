@@ -2,8 +2,11 @@ package com.openzeekr.app.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -65,6 +69,13 @@ fun InboxScreen(deps: Deps, onBack: () -> Unit, snackbar: (String) -> Unit, modi
     var messages by remember { mutableStateOf<List<InboxMessage>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    // Tapping a message opens it IN-APP (below) instead of firing an implicit ACTION_VIEW, which
+    // was de-linking to the stock Zeekr app / a browser.
+    var selected by remember { mutableStateOf<InboxMessage?>(null) }
+
+    // System back: close the open message first, else close this screen (returns to the app, not exit).
+    BackHandler(enabled = selected != null) { selected = null }
+    BackHandler(enabled = selected == null) { onBack() }
 
     suspend fun load() {
         loading = true; error = null
@@ -124,22 +135,67 @@ fun InboxScreen(deps: Deps, onBack: () -> Unit, snackbar: (String) -> Unit, modi
             ) {
                 items(messages, key = { it.id ?: it.hashCode().toString() }) { m ->
                     MessageRow(m) {
-                        // mark read + follow the deep-link if any
+                        // Mark read + open the message IN-APP (no implicit ACTION_VIEW → no jump to
+                        // the stock Zeekr app). Any http(s) link is offered as an explicit button.
                         if (!m.read) {
                             messages = messages.map { if (it.id == m.id) it.copy(read = true) else it }
                             m.id?.let { id -> scope.launch { deps.inbox.markRead(id) } }
                         }
-                        val url = m.redirectUrl
-                        if (!url.isNullOrBlank()) {
-                            runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                                .onFailure { snackbar("Can't open this message's link") }
-                        }
+                        selected = m
                     }
                 }
             }
         }
     }
+
+    selected?.let { msg ->
+        MessageDetailDialog(
+            msg,
+            onDismiss = { selected = null },
+            onOpenLink = { url ->
+                // Only http(s) links reach here (see the dialog) — an explicit user tap, opened in
+                // the browser. zeekr:// deeplinks are never auto-followed.
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    .onFailure { snackbar("Couldn't open the link") }
+                selected = null
+            },
+        )
+    }
 }
+
+@Composable
+private fun MessageDetailDialog(m: InboxMessage, onDismiss: () -> Unit, onOpenLink: (String) -> Unit) {
+    // Offer "Open link" only for real web links — never for a zeekr:// deeplink (that would jump to
+    // the stock app, the very thing we're avoiding).
+    val webLink = m.redirectUrl?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(m.title?.takeIf { it.isNotBlank() } ?: "Message", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(Modifier.verticalScrollDetail()) {
+                Text(
+                    m.body?.takeIf { it.isNotBlank() } ?: "No details.",
+                    color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp,
+                )
+            }
+        },
+        confirmButton = {
+            if (webLink != null) {
+                androidx.compose.material3.TextButton(onClick = { onOpenLink(webLink) }) { Text("Open link") }
+            } else {
+                androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        },
+        dismissButton = if (webLink != null) {
+            { androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Close") } }
+        } else null,
+    )
+}
+
+/** A body long enough to scroll stays contained instead of pushing the dialog off-screen. */
+@Composable
+private fun Modifier.verticalScrollDetail(): Modifier =
+    this.then(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()))
 
 @Composable
 private fun MessageRow(m: InboxMessage, onClick: () -> Unit) {

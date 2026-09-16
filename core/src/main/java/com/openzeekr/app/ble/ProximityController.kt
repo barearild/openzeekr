@@ -189,7 +189,7 @@ class ProximityController(
         if (!armedUnlocked && smoothed >= unlockThresh && (approaching || prevZone == Zone.FAR)) {
             armedUnlocked = true
             Logx.d("prox", "approach-unlock (rssi=$smoothed ~${"%.1f".format(dist)}m)")
-            trigger("approach-unlock") { lock.unlock() }
+            trigger("approach-unlock") { approachUnlock() }
             return
         }
         // LOCK: far enough AND receding, and currently unlocked-by-us.
@@ -198,6 +198,40 @@ class ProximityController(
             Logx.d("prox", "walk-away-lock (rssi=$smoothed ~${"%.1f".format(dist)}m)")
             trigger("walk-away-lock") { lock.lock() }
         }
+    }
+
+    /**
+     * Approach-unlock with a ONE-SHOT BT-reset retry. The car's GATT link occasionally wedges — a
+     * stale session that completed the handshake but then rejects the control frame (the "took the
+     * phone out, unlock errored, had to toggle Bluetooth" symptom). A full teardown + fresh connect
+     * clears it. This retry is intentionally scoped to the AUTOMATIC approach flow only; a manual
+     * button press (VehicleScreen/ControlsScreen/watch) stays a single attempt so the user isn't
+     * left waiting on a silent reconnect and can just tap again.
+     */
+    private suspend fun approachUnlock(): Boolean {
+        if (runCatching { lock.unlock() }.getOrDefault(false)) return true
+        Logx.w("prox", "approach-unlock failed — resetting the BLE link and retrying once")
+        ble.disconnect()
+        // connect() is a no-op unless the manager is IDLE/ERROR, so let the teardown settle first.
+        awaitState(setOf(DkBleManager.State.IDLE, DkBleManager.State.ERROR), RESET_SETTLE_MS)
+        ble.connect(null) // scan-based reconnect (the car uses a resolvable private address)
+        if (!awaitState(setOf(DkBleManager.State.SESSION_READY), RESET_RECONNECT_MS)) {
+            Logx.w("prox", "reset: session not ready in ${RESET_RECONNECT_MS}ms — giving up retry")
+            return false
+        }
+        return runCatching { lock.unlock() }.getOrDefault(false).also {
+            Logx.d("prox", "approach-unlock retry after BT reset -> ${if (it) "ok" else "still failed"}")
+        }
+    }
+
+    /** Suspend until [ble] state is one of [targets] or [timeoutMs] elapses; true if it reached one. */
+    private suspend fun awaitState(targets: Set<DkBleManager.State>, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (ble.state.value in targets) return true
+            delay(120)
+        }
+        return ble.state.value in targets
     }
 
     /** Log-distance path loss: d = 10^((txPower@1m − rssi)/(10·n)). Display/log only — calibrate. */
@@ -232,6 +266,10 @@ class ProximityController(
         private const val ALPHA_FAST = 0.6
         private const val ALPHA_SLOW = 0.35
         private const val LINK_LOSS_LOCK_DELAY_MS = 5_000L
+        // Approach-unlock BT-reset retry: time to let a teardown settle to IDLE, and to wait for
+        // the fresh session to come up before the second (final) unlock attempt.
+        private const val RESET_SETTLE_MS = 1_500L
+        private const val RESET_RECONNECT_MS = 15_000L
 
         // Nominal RSSI-at-1m and path-loss exponent for the metre estimate (DISPLAY ONLY).
         private const val TX_POWER_1M = -59

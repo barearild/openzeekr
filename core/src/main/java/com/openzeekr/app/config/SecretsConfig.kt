@@ -64,6 +64,11 @@ data class SecretsConfig(
     val accountUuid: String = "",
     /** A pre-captured bearer/access token, if you already have one (skips login). */
     val accessToken: String = "",
+    /** Azure/overseas `Authorization` token — the `tokenValue` RETURNED by the user-center
+     *  loginByEmailEncrypt (server-issued HS256, NOT client-minted; captured 2026-09-16). This is
+     *  what every gateway-pub-azure.zeekr.eu call (inbox/notifications) authenticates with — the TSP
+     *  bearer is rejected there (401). Persisted at login; sent verbatim (no "Bearer" prefix). */
+    val azureToken: String = "",
     /** xchanger/ECARX DK-backend session (from login step 4b) — DK stack authenticates with these. */
     val xchangerToken: String = "",
     val xchangerClientId: String = "",
@@ -145,6 +150,12 @@ data class SecretsConfig(
     val tempUnit: String = "c",
     /** Distance / range unit: "km" | "mi". */
     val distanceUnit: String = "km",
+
+    // ---- remembered set-points (UI note, like stock) ----
+    /** Last charge-limit target the user set (%). The car exposes no reliable limit-read
+     *  endpoint (getChargingPlan.target is schedule-only), so — like the stock app — we cache
+     *  the set value locally and seed the charge slider from it instead of a fixed 80%. */
+    val chargeLimitPct: Int = 80,
 ) {
     /** True when the mandatory app-global secrets (non-account) are present and valid. */
     val secretsValid: Boolean get() {

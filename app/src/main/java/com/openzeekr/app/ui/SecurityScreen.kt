@@ -66,6 +66,7 @@ fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
     // until that first read lands.
     var sentry by remember { mutableStateOf(false) }
     var visitor by remember { mutableStateOf(false) }
+    var gloveboxLocked by remember { mutableStateOf(false) }
     // A PIN entry is pending for one of these commands (glovebox / visitor need a code).
     var pinFor by remember { mutableStateOf<Command?>(null) }
     // Journey log takes over the whole screen (like the inbox) when opened.
@@ -79,6 +80,7 @@ fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
             is CallResult.Ok -> {
                 sentry = r.value["vstdModeState"] == "1"
                 visitor = r.value["visitorModeState"] == "1"
+                gloveboxLocked = r.value["gloveboxLocked"] == "1"
             }
             is CallResult.Err -> {}
         }
@@ -110,30 +112,43 @@ fun SecurityScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
             }
             // Owner-only (shared accounts are refused server-side). Both need the user's PIN.
             if (owner) {
-                SecRow(Icons.Filled.Inventory2, "Glovebox lock", "Lock the glovebox with your PIN",
-                    onClick = { pinFor = Command.GLOVEBOX_LOCK }) { Chevron() }
+                SecRow(Icons.Filled.Inventory2, "Glovebox lock",
+                    if (gloveboxLocked) "Locked · tap to unlock" else "Unlocked · tap to lock") {
+                    Switch(checked = gloveboxLocked, onCheckedChange = { lock ->
+                        // Enter PIN first; only flip once the command is confirmed.
+                        pinFor = if (lock) Command.GLOVEBOX_LOCK else Command.GLOVEBOX_UNLOCK
+                    }, colors = brandSwitchColors(Brand.good))
+                }
                 SecRow(Icons.Filled.Person, "Visitor mode", "Restricted access for a guest / valet") {
                     Switch(checked = visitor, onCheckedChange = { on ->
                         // Enter PIN first; only flip the toggle once the command is confirmed.
                         pinFor = if (on) Command.VISITOR_ON else Command.VISITOR_OFF
                     }, colors = brandSwitchColors(Brand.good))
                 }
+                // Journey log is also owner-only server-side (a shared/Friend account is refused —
+                // confirmed 2026-09-16 against the stock app), so it lives inside the owner gate.
+                SecRow(Icons.Filled.Timeline, "Journey log", "Trips · distance & energy · export",
+                    onClick = { showJourney = true }) { Chevron() }
             }
-            SecRow(Icons.Filled.Timeline, "Journey log", "Trips · distance & energy · export",
-                onClick = { showJourney = true }) { Chevron() }
         }
 
         pinFor?.let { cmd ->
             val title = when (cmd) {
-                Command.GLOVEBOX_LOCK -> "Glovebox PIN"
+                Command.GLOVEBOX_LOCK -> "Glovebox — lock with PIN"
+                Command.GLOVEBOX_UNLOCK -> "Glovebox — unlock with PIN"
                 Command.VISITOR_ON -> "Visitor mode — set PIN"
                 Command.VISITOR_OFF -> "Visitor mode — enter PIN"
                 else -> "Enter PIN"
             }
             PinDialog(title, onDismiss = { pinFor = null }, onConfirm = { pin ->
-                fire(title.substringBefore(" —").substringBefore(" PIN"), cmd, listOf(ServiceParameter("code", pin)))
-                if (cmd == Command.VISITOR_ON) visitor = true
-                if (cmd == Command.VISITOR_OFF) visitor = false
+                fire(title.substringBefore(" —"), cmd, listOf(ServiceParameter("code", pin)))
+                when (cmd) {
+                    Command.VISITOR_ON -> visitor = true
+                    Command.VISITOR_OFF -> visitor = false
+                    Command.GLOVEBOX_LOCK -> gloveboxLocked = true
+                    Command.GLOVEBOX_UNLOCK -> gloveboxLocked = false
+                    else -> {}
+                }
                 pinFor = null
             })
         }

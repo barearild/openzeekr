@@ -115,6 +115,9 @@ class AccountLogin(private val store: ConfigStore) {
             val tokenValue = loginData?.get("tokenValue")?.jsonPrimitive?.contentOrNull
             require(tokenName == "Authorization" && !tokenValue.isNullOrBlank()) { "login token missing ($tokenName)" }
             ucToken = tokenValue
+            // Persist it: this server-issued token IS the Authorization for every azure/overseas
+            // call (inbox/notifications). Not the TSP bearer, not client-minted. (Confirmed 2026-09-16.)
+            store.update { it.copy(azureToken = tokenValue) }
             Logx.d("login", "step 2/6 login OK, ucToken=${Logx.preview(tokenValue)}")
 
             // 3. user info -> numeric userId

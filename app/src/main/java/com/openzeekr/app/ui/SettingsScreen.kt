@@ -72,10 +72,13 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
     val liveCfg by store.config.collectAsState()
     var cfg by remember { mutableStateOf(store.current()) }
     var status by remember { mutableStateOf("") }
+    var showHeroLab by remember { mutableStateOf(false) }
 
     fun set(update: (SecretsConfig) -> SecretsConfig) { cfg = update(cfg) }
     val loggedIn = liveCfg.accessToken.isNotBlank()
     val baked = SecretsConfig.SECRETS_BAKED
+
+    if (showHeroLab) { HeroLabScreen(modifier, onBack = { showHeroLab = false }); return }
 
     Column(
         modifier = modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -162,6 +165,9 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                 )
             }
             if (liveCfg.debugLogging) LogViewer()
+            OutlinedButton(onClick = { showHeroLab = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Hero lab (graphics test)")
+            }
         }
 
         if (!baked) {

@@ -172,17 +172,12 @@ class OverseasAppAuthInterceptor(private val store: ConfigStore) : Interceptor {
             .header("msgAppId", OVERSEAS_MSG_APP_ID)
             .header("Device-Type", "app")
             .header("Call-Source", "android")
-        // Authorization for /overseas-app is NOT the TSP bearer — it is the client-minted
-        // HS256 token (see InboxAuthToken): payload uuid = account openId, Client-Id const,
-        // timeMillis = now, signed with the baked inbox HS256 secret. Fall back to the bearer
-        // only when we can't mint yet (no openId captured, or no inbox secret configured).
-        val inboxAuth = InboxAuthToken.mint(
-            openId = cfg.accountUuid,
-            clientId = OVERSEAS_CLIENT_ID,
-            secret = cfg.inboxAuthSecret,
-        )
+        // Authorization for /overseas-app is the SERVER-ISSUED azure token (the loginByEmailEncrypt
+        // `tokenValue`), sent verbatim with NO "Bearer" prefix — NOT the TSP bearer (rejected 401
+        // here) and NOT a client-minted token (that whole approach was wrong; the server signs it).
+        // Confirmed 2026-09-16 (full_trace.log). Fall back to the bearer only before azure login.
         when {
-            inboxAuth != null -> b.header("Authorization", inboxAuth)
+            cfg.azureToken.isNotBlank() -> b.header("Authorization", cfg.azureToken)
             cfg.accessToken.isNotBlank() -> b.header("Authorization", cfg.accessToken)
         }
         return chain.proceed(b.build())

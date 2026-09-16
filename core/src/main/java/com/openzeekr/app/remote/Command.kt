@@ -90,7 +90,13 @@ enum class Command(
     // ---- charging ---- (RCS; rcs.restart/terminate=1, SOC via rcs.setting)
     CHARGING_ON("Start Charging", Category.CHARGING, "RCS", "start", listOf(ServiceParameter("rcs.restart", "1"))),
     CHARGING_OFF("Stop Charging", Category.CHARGING, "RCS", "stop", listOf(ServiceParameter("rcs.terminate", "1"))),
-    SET_CHARGE_SOC("Set Charge Limit", Category.CHARGING, "RCS", "start", listOf(ServiceParameter("rcs.setting", "1"), ServiceParameter("altCurrent", "1"))),
+    // Param ORDER matters here: the RCS handler parses serviceParameters positionally and wants
+    // `soc` FIRST — sending it last (as an appended extraParam) returns 037000 "parameter is
+    // incorrect" (captured 2026-09-16). `soc` is a placeholder here so the UI's value override
+    // (dedup by key) lands in this first slot instead of being appended. Stock 200 body:
+    //   [{"key":"soc","value":"949"},{"key":"rcs.setting","value":"1"},{"key":"altCurrent","value":"1"}]
+    SET_CHARGE_SOC("Set Charge Limit", Category.CHARGING, "RCS", "start",
+        listOf(ServiceParameter("soc", "800"), ServiceParameter("rcs.setting", "1"), ServiceParameter("altCurrent", "1"))),
     BATTERY_PREHEAT_ON("Battery Preheat On", Category.CHARGING, "ZAN", "start"),
     BATTERY_PREHEAT_OFF("Battery Preheat Off", Category.CHARGING, "ZAN", "stop"),
 

@@ -23,6 +23,38 @@
             </intent-filter>
         </activity>
 
+        <!-- Send-to-car: register as a navigation / location target. Picking OpenZeekr from a
+             map pin's share, a geo: link, or a "navigate with" chooser pushes that POI to the
+             car's built-in nav (cloud sendToCar). Transparent, no UI — fires and finishes. -->
+        <activity
+            android:name=".SendToCarActivity"
+            android:exported="true"
+            android:label="@string/send_to_car_label"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:noHistory="true">
+            <!-- geo: pins (open a geo link / share a place as geo:) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="geo" />
+            </intent-filter>
+            <!-- "navigate with" chooser (google.navigation:) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="google.navigation" />
+            </intent-filter>
+            <!-- a shared place (Google Maps "Share" sends the place as text/plain) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
         <!-- Shares the exported journey-log CSV out via the system share sheet. -->
         <provider
             android:name="androidx.core.content.FileProvider"

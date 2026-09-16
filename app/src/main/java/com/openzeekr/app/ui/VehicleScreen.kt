@@ -7,6 +7,13 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.filled.Air
+import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Whatshot
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -29,7 +36,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Campaign
-import androidx.compose.material.icons.filled.EventSeat
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
@@ -42,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -60,8 +67,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.ImageBitmap
@@ -85,6 +90,7 @@ import com.openzeekr.app.net.model.VehicleStatusBean
 import com.openzeekr.app.remote.CallResult
 import com.openzeekr.app.remote.Command
 import com.openzeekr.app.ui.theme.Brand
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -153,6 +159,14 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
             when (val r = block()) { is CallResult.Ok -> snackbar("$label ✓"); is CallResult.Err -> snackbar("$label ✗ ${r.message}") }
         }
     }
+    // Quiet variant for rapid in-modal adjustments (climate cabin: each seat/temp tweak is its own
+    // command). No "…"/"✓" spam — success is silent; only a failure surfaces. Avoids the stray
+    // "Climate ✓" toasts that landed after the sheet was already closed (debounced/late responses).
+    fun fireQuiet(label: String, block: suspend () -> CallResult<*>) {
+        scope.launch {
+            (block() as? CallResult.Err)?.let { snackbar("$label ✗ ${it.message}") }
+        }
+    }
     fun door(lockIt: Boolean) {
         val n = if (lockIt) "Lock" else "Unlock"
         if (bleReady) {
@@ -165,13 +179,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     }
 
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
-        // Local paint preview (visual only — does not change the real car colour). Lets you see the
-        // two-layer recolour across the palette; resets when the model changes.
-        var previewColor by remember(model) { mutableStateOf<PaintColor?>(null) }
-        val shownPaint = previewColor ?: paint
-        Hero(model, shownPaint, charging, soc, powerKw)
-        if (model.bodyAsset != null && model.colors.size > 1)
-            ColorSwatches(model.colors, shownPaint) { previewColor = it }
+        Hero(model, paint, charging, soc, powerKw)
 
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             StatItem("Central lock", if (locked) "Locked" else "Unlocked", if (locked) Brand.good else Brand.energy, Modifier.weight(1f))
@@ -211,48 +219,31 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     }
 
     if (showCharge) ChargeSheet(status, soc, powerKw, charging, plugged, elec,
-        onCmd = { c, extra -> fire("Charge") { deps.control.send(c, extra) } }, onDismiss = { showCharge = false })
+        initialLimitPct = cfg.chargeLimitPct,
+        onCmd = { c, extra -> fire("Charge") { deps.control.send(c, extra) } },
+        onLimitSet = { pct -> deps.config.update { it.copy(chargeLimitPct = pct) } },
+        onDismiss = { showCharge = false })
     if (showClimate) ClimateSheet(status?.additionalVehicleStatus?.climateStatus,
-        onCmd = { c, extra -> fire("Climate") { deps.control.send(c, extra) } }, onDismiss = { showClimate = false })
+        onCmd = { c, extra -> fireQuiet("Climate") { deps.control.send(c, extra) } }, onDismiss = { showClimate = false })
 }
 
 @Composable
 private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Float?, powerKw: Double?) {
     val trans = rememberInfiniteTransition(label = "charge")
     val breathe by trans.animateFloat(0.04f, 0.24f, infiniteRepeatable(tween(2400), RepeatMode.Reverse), label = "breathe")
-    // Intelligent backdrop: a soft studio "spotlight" whose brightness CONTRASTS the paint, so a
-    // dark car (Onyx/Titanium) sits on a light card and a bright car (Crystal White/Silver) sits on
-    // a dimmer one — no more black-on-black. Driven by the paint's luminance.
-    // 7GT test: flat white studio card. Others use the luminance-contrast backdrop.
-    val (spot, edge) = heroBackdrop(paint.color)
-    val heroBg: Brush = if (model.key == "7GT") androidx.compose.ui.graphics.SolidColor(Color.White)
-        else Brush.radialGradient(listOf(spot, edge))
     Box(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
-            .height(196.dp).clip(RoundedCornerShape(22.dp))
-            .background(heroBg),
+            .height(196.dp).clip(RoundedCornerShape(22.dp)).background(Brand.paintCard(paint.color)),
     ) {
         if (charging) Box(Modifier.matchParentSize().background(Brand.energy.copy(alpha = breathe)))
-        // Two-layer paint (isolated mask): recolour the grayscale metallic body with a
-        // LUMINANCE-PRESERVING matrix (out_ch = target_ch · (0.2126R+0.7152G+0.0722B)) — strips any
-        // base tint while keeping reflections/curvature shading — then draw the details/trim/wheels
-        // untouched on top. Both layers share the exact same box so they register pixel-for-pixel.
-        // Falls back to the flat white render for models without layer art.
-        val body = model.bodyAsset?.let { rememberAssetBitmap(it) }
-        val details = model.detailsAsset?.let { rememberAssetBitmap(it) }
-        val carMod = Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 4.dp).aspectRatio(16f / 8f)
-        if (body != null && details != null) {
-            Image(bitmap = body, contentDescription = model.displayName, modifier = carMod,
-                colorFilter = ColorFilter.colorMatrix(luminanceRecolor(paint.color)))
-            Image(bitmap = details, contentDescription = null, modifier = carMod)
-        } else {
-            val bmp = rememberAssetBitmap(model.renderAsset)
-            if (bmp != null) Image(bitmap = bmp, contentDescription = model.displayName, modifier = carMod)
-        }
+        // Stock press render (white car) on the paint-tinted card.
+        val bmp = rememberAssetBitmap(model.renderAsset)
+        if (bmp != null) Image(bitmap = bmp, contentDescription = model.displayName,
+            modifier = Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 4.dp).aspectRatio(16f / 8f))
         Row(Modifier.align(Alignment.BottomStart).padding(14.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             Box(Modifier.size(13.dp).clip(CircleShape).background(paint.color))
-            Text(paint.name, color = Brand.muted, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+            Text(paint.name, color = Color.White.copy(alpha = .92f), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
         }
         if (charging && soc != null) {
             val phase by trans.animateFloat(0f, 1f, infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart), label = "soc")
@@ -262,54 +253,6 @@ private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Flo
             Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(4.dp).background(Color.White.copy(alpha = .10f))) {
                 Box(Modifier.fillMaxWidth(soc / 100f).height(4.dp).background(shimmer))
             }
-        }
-    }
-}
-
-/**
- * Luminance-preserving recolour matrix for an isolated paint mask: each output channel =
- * target channel × Rec.709 luma (0.2126R + 0.7152G + 0.0722B), alpha untouched. Generated from the
- * paint hex, so it reproduces the per-finish calibrated matrices while also covering colours (e.g.
- * Mystic Lilac) that aren't in the six-swatch reference set.
- */
-private fun luminanceRecolor(c: Color): ColorMatrix {
-    val r = c.red; val g = c.green; val b = c.blue
-    return ColorMatrix(
-        floatArrayOf(
-            0.2126f * r, 0.7152f * r, 0.0722f * r, 0f, 0f,
-            0.2126f * g, 0.7152f * g, 0.0722f * g, 0f, 0f,
-            0.2126f * b, 0.7152f * b, 0.0722f * b, 0f, 0f,
-            0f, 0f, 0f, 1f, 0f,
-        )
-    )
-}
-
-/** Studio backdrop (spot, edge) chosen to CONTRAST the paint luminance, so every finish stays
- *  legible — a dark car gets a bright card, a bright car gets a dim one. */
-private fun heroBackdrop(paint: Color): Pair<Color, Color> {
-    val lum = 0.2126f * paint.red + 0.7152f * paint.green + 0.0722f * paint.blue
-    val spot = when {
-        lum < 0.30f -> Color(0xFFECEDF0)   // dark car → bright card
-        lum > 0.72f -> Color(0xFFAAADB4)   // bright car → dim card
-        else -> Color(0xFFCED1D6)
-    }
-    val edge = Color(red = spot.red * 0.80f, green = spot.green * 0.80f, blue = spot.blue * 0.80f, alpha = 1f)
-    return spot to edge
-}
-
-@Composable
-private fun ColorSwatches(colors: List<PaintColor>, selected: PaintColor, onPick: (PaintColor) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically,
-    ) {
-        colors.forEach { pc ->
-            val sel = pc.name == selected.name
-            Box(
-                Modifier.size(if (sel) 30.dp else 26.dp).clip(CircleShape).background(pc.color)
-                    .border(if (sel) 2.dp else 1.dp, if (sel) MaterialTheme.colorScheme.onSurface else Brand.line, CircleShape)
-                    .clickable { onPick(pc) },
-            )
         }
     }
 }
@@ -378,11 +321,14 @@ private fun Tyre(pos: String, kpa: String?, unit: String, modifier: Modifier = M
 private fun ChargeSheet(
     status: VehicleStatusBean?, soc: Float?, powerKw: Double?,
     charging: Boolean, plugged: Boolean, elec: ElectricStatusVo?,
-    onCmd: (Command, List<ServiceParameter>) -> Unit, onDismiss: () -> Unit,
+    initialLimitPct: Int = 80,
+    onCmd: (Command, List<ServiceParameter>) -> Unit,
+    onLimitSet: (Int) -> Unit = {}, onDismiss: () -> Unit,
 ) {
     val sheet = rememberModalBottomSheetState()
     val portOpen = elec?.chargePortOpen == true
-    var limit by remember { mutableStateOf(80f) }
+    // Seed from the last-set value (the car has no reliable limit-read endpoint — see config).
+    var limit by remember { mutableStateOf(initialLimitPct.toFloat().coerceIn(50f, 100f)) }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surface) {
         Column(Modifier.padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Charging", fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -397,9 +343,28 @@ private fun ChargeSheet(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("Charge limit (target)", fontWeight = FontWeight.SemiBold); Text("${limit.toInt()}%", color = Brand.muted, fontWeight = FontWeight.SemiBold)
             }
-            Slider(value = limit, onValueChange = { limit = it }, valueRange = 50f..100f, steps = 9,
+            // Full 0–100 scale so the fill reads as the ACTUAL target % (an 80% limit fills 80% of
+            // the bar), but dragging is clamped to ≥50 — the 0–50 region is a fixed floor you can't
+            // set below, marked with a tick at 50%. steps=19 → 5% snapping across the whole range.
+            Slider(value = limit, onValueChange = { limit = it.coerceAtLeast(50f) }, valueRange = 0f..100f, steps = 19,
                 // soc is TENTHS of a percent (stock: 90.3% = "903", 94.9% = "949"). Send pct×10.
-                onValueChangeFinished = { onCmd(Command.SET_CHARGE_SOC, listOf(ServiceParameter("soc", (limit.toInt() * 10).toString()))) })
+                onValueChangeFinished = {
+                    onCmd(Command.SET_CHARGE_SOC, listOf(ServiceParameter("soc", (limit.toInt() * 10).toString())))
+                    onLimitSet(limit.toInt()) // remember it so the slider shows this next open
+                },
+                colors = SliderDefaults.colors(thumbColor = Brand.good, activeTrackColor = Brand.good),
+                // Slim, green track. Fill fraction = limit/100 (absolute %), so thumb (positioned by
+                // the 0–100 value) and fill edge coincide. The tick at 50% shows the min floor.
+                thumb = { Box(Modifier.size(15.dp).clip(CircleShape).background(Brand.good)) },
+                track = {
+                    Box(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape).background(Brand.line)) {
+                        Box(Modifier.fillMaxWidth((limit / 100f).coerceIn(0f, 1f)).height(4.dp).clip(CircleShape).background(Brand.good))
+                        // Min-floor marker at 50% — a dark tick that pokes through the fill.
+                        Box(Modifier.fillMaxWidth(0.5f), contentAlignment = Alignment.CenterEnd) {
+                            Box(Modifier.size(width = 2.dp, height = 10.dp).background(MaterialTheme.colorScheme.surface))
+                        }
+                    }
+                })
             SheetToggleRow("Battery temp regulation", "Precondition the pack — run before charging",
                 checked = elec?.hvBatteryPreHeatingActive == true) { on ->
                 onCmd(if (on) Command.BATTERY_PREHEAT_ON else Command.BATTERY_PREHEAT_OFF, emptyList())
@@ -421,7 +386,9 @@ private fun ChargeSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ClimateSheet(climate: ClimateStatusVo?, onCmd: (Command, List<ServiceParameter>) -> Unit, onDismiss: () -> Unit) {
-    val sheet = rememberModalBottomSheetState()
+    // skipPartiallyExpanded → the sheet opens FULL height, so the whole cabin + the temperature bar
+    // are visible at once (no half-height stop that hides the controls behind a swipe).
+    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // Target A/C temperature (°C): the car doesn't report the setpoint (only interiorTemp), so seed
     // to 22.0 and keep the user's choice for the session.
     var temp by remember { mutableStateOf(22.0) }
@@ -433,32 +400,82 @@ private fun ClimateSheet(climate: ClimateStatusVo?, onCmd: (Command, List<Servic
         ServiceParameter("AC.temp", String.format(java.util.Locale.US, "%.1f", temp)),
         ServiceParameter("AC.duration", "15"),
     )
-    val cabin = climate?.interiorTemp?.takeIf { it.isNotBlank() }
+    // Debounce the setpoint: −/+ update `temp` instantly for the readout but only send ONE ZAF
+    // command ~600 ms after the last tap, so stepping 22→26 doesn't fire five requests at the car.
+    // `tempDirty` gates the initial seed (22.0) from sending on first composition.
+    var tempDirty by remember { mutableStateOf(false) }
+    LaunchedEffect(temp) {
+        if (!tempDirty) return@LaunchedEffect
+        delay(600)
+        onCmd(Command.CLIMATE_ZAF, acOnParams())
+    }
+    val cabinTemp = climate?.interiorTemp?.takeIf { it.isNotBlank() }
+    val outsideTemp = climate?.exteriorTemp?.takeIf { it.isNotBlank() }
+    val acOn = climate?.acOn == true
+    // Steering-wheel heat + A/C vent have no reliable on/off readback (all-off capture reports "2"),
+    // so they stay session-local toggles.
+    var steerOn by remember { mutableStateOf(false) }
+    var ventOn by remember { mutableStateOf(false) }
+
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surface) {
-        Column(Modifier.padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                Text("Climate", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                if (cabin != null) Text("Cabin $cabin °C", color = Brand.muted, fontSize = 12.5.sp)
-            }
-            SheetToggleRow("Air conditioning", "Precondition the cabin", checked = climate?.acOn == true) { on ->
-                if (on) onCmd(Command.CLIMATE_ZAF, acOnParams())
-                else onCmd(Command.CLIMATE_ZAF, listOf(ServiceParameter("AC", "false")))
-            }
-            // Target temperature stepper — fires A/C on with the new setpoint so it applies live.
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Target temperature", fontWeight = FontWeight.SemiBold)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    StepBtn("−") { if (temp > 15.5) { temp -= 0.5; onCmd(Command.CLIMATE_ZAF, acOnParams()) } }
-                    Text("${fmt1(temp)} °C", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    StepBtn("+") { if (temp < 28.5) { temp += 0.5; onCmd(Command.CLIMATE_ZAF, acOnParams()) } }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 22.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            // ---- top-down cabin: wheel + climate readout + defrost, then front & rear seats ----
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp))
+                    .background(Brush.verticalGradient(listOf(Color(0xFF141A1E), Color(0xFF0C1013))))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.SpaceBetween) {
+                    WheelHeatButton(steerOn) {
+                        steerOn = !steerOn
+                        onCmd(if (steerOn) Command.STEER_WHEEL_ON else Command.STEER_WHEEL_OFF, emptyList())
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Cabin", color = Brand.faint, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold)
+                        Text(cabinTemp?.let { "$it°C" } ?: "—", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                        Text(outsideTemp?.let { "Outside $it°C" } ?: "", color = Brand.muted, fontSize = 11.sp)
+                    }
+                    DefrostPill(climate?.defrostOn == true) { on -> onCmd(if (on) Command.DEFROST_ON else Command.DEFROST_OFF, emptyList()) }
+                }
+                // front row — copper-trimmed console between the seats
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SeatCabinTile("Driver", "11", climate?.drvHeatSts, climate?.drvVentDetail, Modifier.weight(1f), onCmd)
+                    Box(Modifier.width(20.dp).height(104.dp).clip(RoundedCornerShape(8.dp))
+                        .background(Brush.verticalGradient(listOf(ZCopper.copy(alpha = .5f), ZConsole))))
+                    SeatCabinTile("Passenger", "19", climate?.passHeatingSts, climate?.passVentDetail, Modifier.weight(1f), onCmd)
+                }
+                // rear row
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SeatCabinTile("Rear L", "21", climate?.rlHeatingSts, climate?.rlVentDetail, Modifier.weight(1f), onCmd)
+                    Spacer(Modifier.width(20.dp))
+                    SeatCabinTile("Rear R", "29", climate?.rrHeatingSts, climate?.rrVentDetail, Modifier.weight(1f), onCmd)
                 }
             }
-            SheetToggleRow("Defrost", "Windscreen", checked = climate?.defrostOn == true) { on -> onCmd(if (on) Command.DEFROST_ON else Command.DEFROST_OFF, emptyList()) }
-            SeatClimateGrid(climate, onCmd)
-            // A/C vent + steering: state fields are ambiguous in the all-off capture (report "2"), so
-            // these stay session-local until an on-state capture pins their on/off values.
-            SheetToggleRow("A/C vent", "Fresh-air ventilation (no cooling)") { on -> onCmd(if (on) Command.CABIN_ON else Command.CABIN_OFF, emptyList()) }
-            SheetToggleRow("Steering wheel heat", "") { on -> onCmd(if (on) Command.STEER_WHEEL_ON else Command.STEER_WHEEL_OFF, emptyList()) }
+
+            // ---- bottom bar: temperature stepper · Ventilate · Climate power ----
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Set the temperature", color = Brand.muted, fontSize = 12.sp)
+                    Row(
+                        Modifier.padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        StepBtn("−") { if (temp > 15.5) { temp -= 0.5; tempDirty = true } }
+                        Text("${fmt1(temp)}°C", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        StepBtn("+") { if (temp < 28.5) { temp += 0.5; tempDirty = true } }
+                    }
+                }
+                CabinActionButton(Icons.Filled.Air, "Ventilate", ventOn, Brand.accent) {
+                    ventOn = !ventOn
+                    onCmd(if (ventOn) Command.CABIN_ON else Command.CABIN_OFF, emptyList())
+                }
+                Spacer(Modifier.width(12.dp))
+                CabinActionButton(Icons.Filled.PowerSettingsNew, "Climate", acOn, Brand.good) {
+                    if (acOn) onCmd(Command.CLIMATE_ZAF, listOf(ServiceParameter("AC", "false")))
+                    else onCmd(Command.CLIMATE_ZAF, acOnParams())
+                }
+            }
         }
     }
 }
@@ -471,88 +488,171 @@ private fun StepBtn(label: String, onClick: () -> Unit) {
     ) { Text(label, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) }
 }
 
+// Zeekr interior palette (from the cabin reference shots): light warm-grey seats, a copper accent
+// stripe down the seat centre, dark charcoal console/floor.
+private val ZSeatTop = Color(0xFFC7CBC4)
+private val ZSeatBottom = Color(0xFF7C817B)
+private val ZBolster = Color(0xFFD4D8D1)   // raised side wings (lighter than the cushion)
+private val ZQuilt = Color(0x1A0B0E10)     // faint quilt seams
+private val ZCopper = Color(0xFFB0895B)
+private val ZConsole = Color(0xFF2C322E)
+
 /**
- * Per-seat heating grid (captured 2026-09-16). Each seat = serviceId ZAF `SH.<pos>` where
- * pos 11=driver, 19=passenger, 21=rear-left, 29=rear-right; level 1–3 (+`.duration`), off=false.
- * Live level reads back from climateStatus `*HeatSts` (0–3). Tap a seat to cycle 0→1→2→3→0.
+ * One seat in the cabin view — drawn Zeekr-style (light-grey back + headrest + copper centre
+ * stripe) with two controls: heat (SH.<pos>) and vent/cool (SV.<pos>). Heat and cool are mutually
+ * exclusive on a seat, so activating one zeroes the other. Each cycles 0→1→2→3→0; every step sends
+ * ONE ZAF command. pos: 11=driver, 19=passenger, 21=rear-left, 29=rear-right. Levels seed from
+ * climateStatus `*HeatSts` / `*VentDetail`.
  */
 @Composable
-private fun SeatClimateGrid(climate: ClimateStatusVo?, onCmd: (Command, List<ServiceParameter>) -> Unit) {
-    // Unified per-seat control: heat AND cool on the same seat, laid out like the cabin (front row,
-    // then rear). One combined level per seat: + = heat 1..3, − = cool 1..3, 0 = off (read back from
-    // *HeatSts / *VentDetail). Tapping cycles 0→H1→H2→H3→C1→C2→C3→0; each step sends ONE ZAF command
-    // that sets heat + cool together (they're mutually exclusive on a seat).
-    fun combined(heat: String?, cool: String?): Int {
-        val h = heat?.toIntOrNull() ?: 0; val c = cool?.toIntOrNull() ?: 0
-        return if (h > 0) h else if (c > 0) -c else 0
-    }
-    val seats = listOf(
-        SeatSpec("Driver", "11", combined(climate?.drvHeatSts, climate?.drvVentDetail)),
-        SeatSpec("Passenger", "19", combined(climate?.passHeatingSts, climate?.passVentDetail)),
-        SeatSpec("Rear L", "21", combined(climate?.rlHeatingSts, climate?.rlVentDetail)),
-        SeatSpec("Rear R", "29", combined(climate?.rrHeatingSts, climate?.rrVentDetail)),
+private fun SeatCabinTile(
+    label: String, pos: String, seedHeat: String?, seedCool: String?,
+    modifier: Modifier = Modifier, onCmd: (Command, List<ServiceParameter>) -> Unit,
+) {
+    var heat by remember(seedHeat) { mutableStateOf(seedHeat?.toIntOrNull() ?: 0) }
+    var cool by remember(seedCool) { mutableStateOf(seedCool?.toIntOrNull() ?: 0) }
+
+    fun sendHeat(n: Int) = onCmd(
+        Command.CLIMATE_ZAF,
+        if (n == 0) listOf(ServiceParameter("SH.$pos", "false"))
+        else listOf(
+            ServiceParameter("SH.$pos", "true"), ServiceParameter("SH.$pos.level", n.toString()),
+            ServiceParameter("SH.$pos.duration", "15"), ServiceParameter("SV.$pos", "false"),
+        ),
     )
-    Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Seat climate", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-            Text("tap: heat → cool → off", color = Brand.faint, fontSize = 11.sp)
-        }
-        seats.chunked(2).forEach { row ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                row.forEach { s ->
-                    SeatClimateTile(s.label, s.level, Modifier.weight(1f)) { next ->
-                        val pos = s.pos
-                        val params = when {
-                            next == 0 -> listOf(ServiceParameter("SH.$pos", "false"), ServiceParameter("SV.$pos", "false"))
-                            next > 0 -> listOf(
-                                ServiceParameter("SH.$pos", "true"), ServiceParameter("SH.$pos.level", next.toString()),
-                                ServiceParameter("SH.$pos.duration", "15"), ServiceParameter("SV.$pos", "false"))
-                            else -> listOf(
-                                ServiceParameter("SV.$pos", "true"), ServiceParameter("SV.$pos.level", (-next).toString()),
-                                ServiceParameter("SV.$pos.duration", "15"), ServiceParameter("SH.$pos", "false"))
-                        }
-                        onCmd(Command.CLIMATE_ZAF, params)
-                    }
+    fun sendCool(n: Int) = onCmd(
+        Command.CLIMATE_ZAF,
+        if (n == 0) listOf(ServiceParameter("SV.$pos", "false"))
+        else listOf(
+            ServiceParameter("SV.$pos", "true"), ServiceParameter("SV.$pos.level", n.toString()),
+            ServiceParameter("SV.$pos.duration", "15"), ServiceParameter("SH.$pos", "false"),
+        ),
+    )
+
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(Modifier.fillMaxWidth().height(124.dp), contentAlignment = Alignment.BottomCenter) {
+            // Top-down bucket seat: headrest, two raised side bolsters, an inset cushion with quilt
+            // seams and a copper "T" accent (the Zeekr trim). Drawn, so it scales cleanly.
+            Canvas(Modifier.fillMaxSize()) {
+                val w = size.width; val h = size.height
+                val bolsterW = w * 0.18f
+                val bodyTop = h * 0.20f
+                val corner = CornerRadius(w * 0.11f, w * 0.11f)
+                // headrest
+                drawRoundRect(ZBolster, topLeft = Offset(w * 0.34f, 0f),
+                    size = Size(w * 0.32f, h * 0.14f), cornerRadius = CornerRadius(w * 0.07f, w * 0.07f))
+                // side bolsters (wings)
+                val bolsterBrush = Brush.verticalGradient(listOf(ZBolster, ZSeatBottom))
+                drawRoundRect(bolsterBrush, topLeft = Offset(0f, bodyTop), size = Size(bolsterW, h - bodyTop), cornerRadius = corner)
+                drawRoundRect(bolsterBrush, topLeft = Offset(w - bolsterW, bodyTop), size = Size(bolsterW, h - bodyTop), cornerRadius = corner)
+                // centre cushion, slightly recessed between the bolsters
+                val cxL = bolsterW - w * 0.02f
+                val cushionTop = bodyTop - h * 0.02f
+                drawRoundRect(Brush.verticalGradient(listOf(ZSeatTop, ZSeatBottom)),
+                    topLeft = Offset(cxL, cushionTop), size = Size(w - cxL * 2, h - cushionTop), cornerRadius = corner)
+                // quilt seams
+                val qx0 = cxL + w * 0.04f; val qx1 = w - cxL - w * 0.04f
+                listOf(0.42f, 0.62f, 0.82f).forEach { fy ->
+                    drawLine(ZQuilt, Offset(qx0, h * fy), Offset(qx1, h * fy), 1.5.dp.toPx())
                 }
+                // copper "T" trim
+                val cxMid = w * 0.5f
+                drawLine(ZCopper, Offset(cxMid, bodyTop + h * 0.05f), Offset(cxMid, h * 0.90f), 2.2.dp.toPx())
+                drawLine(ZCopper, Offset(cxMid - w * 0.06f, bodyTop + h * 0.07f), Offset(cxMid + w * 0.06f, bodyTop + h * 0.07f), 2.2.dp.toPx())
+            }
+            // Controls sit at the seat base on a soft scrim for legibility over the light cushion.
+            Row(
+                Modifier.padding(bottom = 8.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Color(0x4D06090B)).padding(horizontal = 7.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                SeatMiniBtn(Icons.Filled.Whatshot, heat, Brand.energy) {
+                    val n = (heat + 1) % 4; heat = n; if (n > 0) cool = 0; sendHeat(n)
+                }
+                SeatMiniBtn(Icons.Filled.Air, cool, Brand.accent) {
+                    val n = (cool + 1) % 4; cool = n; if (n > 0) heat = 0; sendCool(n)
+                }
+            }
+        }
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Brand.muted)
+    }
+}
+
+/** Flat seat control chip: rounded-square icon (filled with [tint] when on) over a compact 3-bar
+ *  level meter. Deliberately small and technical rather than a big bubble. */
+@Composable
+private fun SeatMiniBtn(icon: ImageVector, level: Int, tint: Color, onClick: () -> Unit) {
+    val active = level > 0
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(
+            Modifier.size(30.dp).clip(RoundedCornerShape(9.dp))
+                .background(if (active) tint else Color.White.copy(alpha = .10f))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, null, tint = if (active) Color(0xFF10141A) else Color.White.copy(alpha = .82f), modifier = Modifier.size(16.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(2.5.dp)) {
+            repeat(3) { i ->
+                Box(Modifier.size(width = 5.dp, height = 3.dp).clip(RoundedCornerShape(1.5.dp))
+                    .background(if (i < level) tint else Color.White.copy(alpha = .18f)))
             }
         }
     }
 }
 
-private data class SeatSpec(val label: String, val pos: String, val level: Int)
-
+/** Steering-wheel glyph that doubles as the wheel-heat toggle (amber when on). */
 @Composable
-private fun SeatClimateTile(label: String, carLevel: Int, modifier: Modifier = Modifier, onSet: (Int) -> Unit) {
-    var level by remember(carLevel) { mutableStateOf(carLevel) }
-    val heat = level > 0; val cool = level < 0
-    val color = if (heat) Brand.energy else if (cool) Brand.accent else Brand.muted
-    val mag = if (level < 0) -level else level
-    // 0 → 1 → 2 → 3 → −1 → −2 → −3 → 0
-    fun nextLevel(cur: Int) = when {
-        cur in 0..2 -> cur + 1
-        cur == 3 -> -1
-        cur in -2..-1 -> cur - 1
-        else -> 0
-    }
-    Column(
-        modifier.clip(RoundedCornerShape(14.dp))
-            .background(if (level != 0) color.copy(alpha = 0.16f) else Brand.surface2)
-            .clickable { val n = nextLevel(level); level = n; onSet(n) }
-            .padding(vertical = 12.dp, horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+private fun WheelHeatButton(active: Boolean, onToggle: () -> Unit) {
+    val tint = if (active) Brand.energy else Color(0xFFB8C0C6)
+    Box(
+        Modifier.size(54.dp).clip(RoundedCornerShape(16.dp))
+            .background(if (active) Brand.energy.copy(alpha = .16f) else Color.White.copy(alpha = .05f))
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(Icons.Filled.EventSeat, label, tint = if (level != 0) color else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
-        Text(label, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold,
-            color = if (level != 0) color else MaterialTheme.colorScheme.onSurface)
-        Text(if (heat) "Heat $mag" else if (cool) "Cool $mag" else "Off", fontSize = 11.sp,
-            color = if (level != 0) color else Brand.muted, fontWeight = FontWeight.SemiBold)
-        Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            repeat(3) { i ->
-                Box(Modifier.size(width = 11.dp, height = 3.dp).clip(RoundedCornerShape(2.dp))
-                    .background(if (i < mag) color else Brand.surface3))
-            }
+        Canvas(Modifier.size(34.dp)) {
+            val sw = 3.dp.toPx()
+            val r = size.minDimension / 2 - sw
+            drawCircle(tint, radius = r, style = Stroke(sw))
+            drawCircle(tint, radius = r * 0.34f, center = center)
+            drawLine(tint, Offset(center.x - r, center.y), Offset(center.x - r * 0.34f, center.y), sw)
+            drawLine(tint, Offset(center.x + r * 0.34f, center.y), Offset(center.x + r, center.y), sw)
+            drawLine(tint, Offset(center.x, center.y + r * 0.34f), Offset(center.x, center.y + r), sw)
         }
+    }
+}
+
+/** Small windscreen-defrost pill (top-right of the cabin). Seeds from the car's defrost state. */
+@Composable
+private fun DefrostPill(active: Boolean, onToggle: (Boolean) -> Unit) {
+    var on by remember(active) { mutableStateOf(active) }
+    Row(
+        Modifier.clip(RoundedCornerShape(14.dp))
+            .background(if (on) Brand.accent.copy(alpha = .18f) else Color.White.copy(alpha = .05f))
+            .clickable { on = !on; onToggle(on) }
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Icon(Icons.Filled.AcUnit, "Defrost", tint = if (on) Brand.accent else Brand.muted, modifier = Modifier.size(15.dp))
+        Text("Defrost", color = if (on) Brand.accent else Brand.muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** A labelled round action (Ventilate / Climate power) for the bottom bar. */
+@Composable
+private fun CabinActionButton(icon: ImageVector, label: String, active: Boolean, tint: Color, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.clip(RoundedCornerShape(14.dp)).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Box(
+            Modifier.size(46.dp).clip(CircleShape).background(if (active) tint.copy(alpha = .18f) else Brand.surface2),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, label, tint = if (active) tint else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
+        }
+        Text(label, fontSize = 11.sp, color = if (active) tint else Brand.muted, fontWeight = FontWeight.SemiBold)
     }
 }
 

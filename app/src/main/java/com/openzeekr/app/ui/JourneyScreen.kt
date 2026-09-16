@@ -1,6 +1,9 @@
 package com.openzeekr.app.ui
 
 import android.content.Intent
+import android.location.Geocoder
+import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material3.CircularProgressIndicator
@@ -48,6 +52,9 @@ import com.openzeekr.app.config.Units
 import com.openzeekr.app.net.model.JourneyTrip
 import com.openzeekr.app.remote.CallResult
 import com.openzeekr.app.ui.theme.Brand
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -62,20 +69,36 @@ import java.util.Locale
 @Composable
 fun JourneyScreen(deps: Deps, onBack: () -> Unit, snackbar: (String) -> Unit, modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    // System back closes this screen (returns to Security), not the whole app.
+    BackHandler { onBack() }
     val cfg by deps.config.config.collectAsState()
     var trips by remember { mutableStateOf<List<JourneyTrip>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
+    var page by remember { mutableStateOf(0) }
+    var hasMore by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(true) }   // initial / reload spinner
+    var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    suspend fun load() {
-        loading = true; error = null
-        when (val r = deps.journey.trips()) {
-            is CallResult.Ok -> { trips = r.value; error = null }
-            is CallResult.Err -> error = r.message
+    // The trail service 504s intermittently; the repo auto-retries a page ~20× before failing, and
+    // the UI adds a manual Reload (fresh page 1) + Load more (next page) — mirroring the stock app,
+    // where you keep tapping reload until it returns.
+    suspend fun load(reset: Boolean) {
+        if (reset) { loading = true; error = null } else loadingMore = true
+        val next = if (reset) 1 else page + 1
+        when (val r = deps.journey.trips(page = next)) {
+            is CallResult.Ok -> {
+                val pg = r.value
+                trips = if (reset) pg.trips else (trips + pg.trips).distinctBy { "${it.reportTime}-${it.tripId}" }
+                page = next // trust the page we actually requested, not the echoed `current`
+                hasMore = pg.hasMore
+                error = null
+            }
+            is CallResult.Err -> if (reset) error = r.message else snackbar("Couldn't load more — tap to retry")
         }
-        loading = false
+        loading = false; loadingMore = false
     }
-    LaunchedEffect(Unit) { load() }
+    LaunchedEffect(Unit) { load(reset = true) }
 
     fun export() {
         if (trips.isEmpty()) { snackbar("No trips to export"); return }
@@ -124,19 +147,33 @@ fun JourneyScreen(deps: Deps, onBack: () -> Unit, snackbar: (String) -> Unit, mo
             loading && trips.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                 CircularProgressIndicator(color = Brand.accent)
             }
-            error != null && trips.isEmpty() -> JourneyEmpty(
-                Icons.Filled.Timeline, "Couldn't load trips", error ?: "Unknown error",
-            )
-            trips.isEmpty() -> JourneyEmpty(
-                Icons.Filled.Route, "No trips yet",
-                "Your recent drives — distance, energy and duration — will show up here.",
-            )
+            error != null && trips.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
+                    JourneyEmptyInner(Icons.Filled.Timeline, "Couldn't load trips", error ?: "Unknown error")
+                    Spacer(Modifier.size(16.dp))
+                    PrimaryButton("Reload", modifier = Modifier.fillMaxWidth()) { scope.launch { load(reset = true) } }
+                }
+            }
+            trips.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
+                    JourneyEmptyInner(Icons.Filled.Route, "No trips yet",
+                        "Your recent drives — distance, energy and duration — will show up here.")
+                    Spacer(Modifier.size(16.dp))
+                    PrimaryButton("Reload", modifier = Modifier.fillMaxWidth()) { scope.launch { load(reset = true) } }
+                }
+            }
             else -> LazyColumn(
                 Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(trips, key = { "${it.reportTime}-${it.tripId}" }) { t -> TripCard(t, cfg.distanceUnit) }
+                if (hasMore) item("load-more") {
+                    Box(Modifier.fillMaxWidth().padding(top = 6.dp), Alignment.Center) {
+                        if (loadingMore) CircularProgressIndicator(color = Brand.accent, modifier = Modifier.size(26.dp))
+                        else GhostButton("Load more", Modifier.fillMaxWidth()) { scope.launch { load(reset = false) } }
+                    }
+                }
             }
         }
     }
@@ -144,7 +181,12 @@ fun JourneyScreen(deps: Deps, onBack: () -> Unit, snackbar: (String) -> Unit, mo
 
 @Composable
 private fun TripCard(t: JourneyTrip, distanceUnit: String) {
-    CockpitCard {
+    val ctx = LocalContext.current
+    val route = routeUrl(t)
+    val cardMod = if (route != null) Modifier.clickable {
+        runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(route))) }
+    } else Modifier
+    CockpitCard(modifier = cardMod) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(Brand.accent.copy(alpha = 0.16f)),
@@ -158,6 +200,19 @@ private fun TripCard(t: JourneyTrip, distanceUnit: String) {
             }
             Text(distanceLabel(t.distanceKm, distanceUnit), fontWeight = FontWeight.Bold,
                 fontSize = 16.sp, color = Brand.accent)
+        }
+        // Start → end location, reverse-geocoded from the trip's first/last GPS point. Tapping the
+        // card opens Google Maps with this route (directions icon signals it's tappable).
+        if (t.startLat != null || t.endLat != null) {
+            val startLabel = rememberAddress(t.startLat, t.startLon)
+            val endLabel = rememberAddress(t.endLat, t.endLon)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (route != null) Icon(Icons.Filled.Directions, "Open route", tint = Brand.accent, modifier = Modifier.size(15.dp))
+                Text(
+                    "${startLabel ?: "…"}  →  ${endLabel ?: "…"}",
+                    color = Brand.muted, fontSize = 12.sp, maxLines = 2, modifier = Modifier.weight(1f),
+                )
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
             Stat("Duration", fmtDuration(t.durationMs))
@@ -179,17 +234,56 @@ private fun Stat(label: String, value: String) {
     }
 }
 
+/** The icon + title + subtitle block, meant to sit inside a centered Column (with a Reload below). */
 @Composable
-private fun JourneyEmpty(icon: ImageVector, title: String, subtitle: String) {
-    Box(Modifier.fillMaxSize().padding(32.dp), Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(icon, null, tint = Brand.faint, modifier = Modifier.size(54.dp))
-            Spacer(Modifier.size(14.dp))
-            Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Spacer(Modifier.size(6.dp))
-            Text(subtitle, color = Brand.muted, fontSize = 13.sp, textAlign = TextAlign.Center)
-        }
+private fun JourneyEmptyInner(icon: ImageVector, title: String, subtitle: String) {
+    Icon(icon, null, tint = Brand.faint, modifier = Modifier.size(54.dp))
+    Spacer(Modifier.size(14.dp))
+    Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+    Spacer(Modifier.size(6.dp))
+    Text(subtitle, color = Brand.muted, fontSize = 13.sp, textAlign = TextAlign.Center)
+}
+
+// ---- location helpers ----
+
+/** Reverse-geocode cache (rounded lat,lon → short place label), shared across cards. */
+private val geocodeCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+/** Reverse-geocode ([lat],[lon]) to a short place label (street/area), cached; falls back to
+ *  the coordinates while resolving / if the geocoder is unavailable. */
+@Composable
+private fun rememberAddress(lat: Double?, lon: Double?): String? {
+    if (lat == null || lon == null) return null
+    val ctx = LocalContext.current
+    val key = "%.4f,%.4f".format(Locale.US, lat, lon)
+    var label by remember(key) { mutableStateOf(geocodeCache[key]) }
+    LaunchedEffect(key) {
+        if (label != null || !Geocoder.isPresent()) return@LaunchedEffect
+        val resolved = withContext(Dispatchers.IO) {
+            runCatching {
+                @Suppress("DEPRECATION")
+                Geocoder(ctx, Locale.getDefault()).getFromLocation(lat, lon, 1)?.firstOrNull()?.let { a ->
+                    a.thoroughfare ?: a.featureName ?: a.subLocality ?: a.locality ?: a.subAdminArea
+                }
+            }.getOrNull()
+        } ?: key
+        geocodeCache[key] = resolved
+        label = resolved
     }
+    return label
+}
+
+/** A dot-decimal "lat, lon" cell for the CSV (empty when missing). */
+private fun coordCell(lat: Double?, lon: Double?): String =
+    if (lat != null && lon != null) "%.5f, %.5f".format(Locale.US, lat, lon) else ""
+
+/** Google Maps directions link (start → end) for a trip; null if either endpoint is missing.
+ *  Opens the route in the Maps app (or browser); the same URL goes in the CSV so a click reloads it.
+ *  Double.toString() is locale-independent (dot decimals), so this is URL-safe everywhere. */
+private fun routeUrl(t: JourneyTrip): String? {
+    val sLat = t.startLat ?: return null; val sLon = t.startLon ?: return null
+    val eLat = t.endLat ?: return null; val eLon = t.endLon ?: return null
+    return "https://www.google.com/maps/dir/?api=1&origin=$sLat,$sLon&destination=$eLat,$eLon&travelmode=driving"
 }
 
 // ---- formatting helpers (shared by the UI and the CSV export) ----
@@ -226,18 +320,21 @@ private fun fmtDuration(ms: Long?): String {
 private fun buildCsv(trips: List<JourneyTrip>, distanceUnit: String): String {
     val distHeader = "Distance (${Units.distanceSuffix(distanceUnit)})"
     val sb = StringBuilder()
-    sb.append(row("Date", "Start", "End", distHeader, "Avg consumption", "Energy regen", "Duration", "Odometer (km)"))
+    sb.append(row("Date", "Start", "End", "From", "To", distHeader, "Avg consumption", "Energy regen", "Duration", "Odometer (km)", "Route"))
     for (t in trips) {
         sb.append(
             row(
                 fmtDate(t.startTime),
                 fmtClock(t.startTime),
                 fmtClock(t.endTime),
+                coordCell(t.startLat, t.startLon),
+                coordCell(t.endLat, t.endLon),
                 distanceValue(t.distanceKm, distanceUnit),
                 t.electricConsumption?.let { trimNum(it) } ?: "",
                 t.electricRegeneration?.let { trimNum(it) } ?: "",
                 fmtDuration(t.durationMs),
                 t.endOdometer?.toString() ?: "",
+                routeUrl(t) ?: "",
             ),
         )
     }

@@ -9,7 +9,18 @@ import androidx.compose.ui.graphics.Color
  * assets/cars/ (gitignored — those are Zeekr press renders; supply your own locally).
  * The app keys this off the vehicle-list `modelName`/`innerCode` + `colorName`.
  */
-data class PaintColor(val name: String, val color: Color, val finish: String)
+data class PaintColor(
+    val name: String,
+    val color: Color,
+    val finish: String,
+    /**
+     * Optional per-channel diagonal recolour scale [rScale, gScale, bScale], sampled to match the
+     * rendered body on the white studio card. When set, the hero applies this exact diagonal
+     * ColorMatrix to the grayscale body mask (white → this colour, shadows preserved) instead of
+     * deriving a luminance matrix from [color].
+     */
+    val recolor: FloatArray? = null,
+)
 
 data class CarModel(
     val key: String,
@@ -60,13 +71,13 @@ object CarCatalog {
         // luminance-recolour matrices), plus Mystic Lilac (the reference car). The hero generates the
         // recolour matrix from each hex at draw time.
         CarModel("7GT", "Zeekr 7GT", "cars/car_7gt.webp", listOf(
-            PaintColor("Mystic Lilac", c(0xB9A7C4), "Pearl"),
-            PaintColor("Crystal White", c(0xF0F1F3), "Pearl"),
-            PaintColor("Glacier Silver", c(0xCED3D9), "Metallic"),
-            PaintColor("Tech Grey", c(0x84878B), "Metallic"),
-            PaintColor("Titanium Grey", c(0x524E54), "Metallic"),
-            PaintColor("Onyx Black", c(0x1C1D20), "Metallic"),
-            PaintColor("Forest Green", c(0x2B4437), "Metallic"),
+            PaintColor("Mystic Lilac", c(0xB9A7C4), "Pearl", recolor = floatArrayOf(0.801f, 0.731f, 0.844f)),
+            PaintColor("Crystal White", c(0xF0F1F3), "Pearl", recolor = floatArrayOf(0.94f, 0.95f, 0.96f)),
+            PaintColor("Glacier Silver", c(0xCED3D9), "Metallic", recolor = floatArrayOf(0.81f, 0.83f, 0.86f)),
+            PaintColor("Tech Grey", c(0x84878B), "Metallic", recolor = floatArrayOf(0.585f, 0.596f, 0.613f)),
+            PaintColor("Titanium Grey", c(0x524E54), "Metallic", recolor = floatArrayOf(0.377f, 0.361f, 0.387f)),
+            PaintColor("Onyx Black", c(0x1C1D20), "Metallic", recolor = floatArrayOf(0.140f, 0.145f, 0.162f)),
+            PaintColor("Forest Green", c(0x2B4437), "Metallic", recolor = floatArrayOf(0.210f, 0.317f, 0.258f)),
         ), bodyAsset = "cars/7gt_body.png", detailsAsset = "cars/7gt_details.png"),
         CarModel("9X", "Zeekr 9X", "cars/car_9x.webp", listOf(
             PaintColor("Onyx Black", c(0x1A1A1A), "Metallic"),

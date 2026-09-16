@@ -40,6 +40,15 @@ interface TspApi {
         @Body body: RemoteControlRequest,
     ): BaseResponse<RemoteControlResponse>
 
+    // ---- charging control (serviceId RCS) — a SEPARATE service from ms-remote-control ----
+    // Captured 2026-09-16 (stock, 200): charge limit / start / stop go here, NOT to
+    // remoteControl/control. Identical body shape ({command,serviceId:"RCS",setting{...}}); only the
+    // path differs. Sending charge to ms-remote-control was the "charge setting returns error".
+    @POST("ms-charge-manage/api/v1.0/charge/control")
+    suspend fun sendChargeControl(
+        @Body body: RemoteControlRequest,
+    ): BaseResponse<RemoteControlResponse>
+
     // ---- vehicle status (VIN via X-VIN header) ----
     // Stock always sends latest=false & target=new; the gateway may 4xx without them.
     // `data` is returned as a raw JsonObject and mapped tolerantly (see
@@ -64,8 +73,20 @@ interface TspApi {
     suspend fun vehicleCapability(): BaseResponse<kotlinx.serialization.json.JsonElement>
 
     // ---- remote-control live state (VIN via X-VIN header) ----
+    // `data` is a flat-ish object BUT some values are arrays/objects (e.g. storageBoxStatus is
+    // a JSON array), so it must NOT bind to Map<String,String> — that throws on the array and the
+    // whole state read fails (sentry + visitor toggles then never seed). Parsed tolerantly in
+    // RemoteControlRepository.controlState().
     @GET("ms-app-bff/api/v1.0/remoteControl/getVehicleState")
-    suspend fun remoteControlState(): BaseResponse<Map<String, String>>
+    suspend fun remoteControlState(): BaseResponse<JsonObject>
+
+    // ---- send-to-car / navigation POI push (ms-lbs-service) ----
+    // Pushes a destination to the car's built-in nav. Cloud/TSP (no BLE path). VIN via X-VIN
+    // header, coords raw WGS-84. Response carries data.msgId on success. (SEND_TO_CAR_NAV_FINDINGS.md)
+    @POST("ms-lbs-service/api/v2.0/sendToCar")
+    suspend fun sendToCar(
+        @Body body: com.openzeekr.app.net.model.SendToCarRequest,
+    ): BaseResponse<JsonObject>
 
     // ---- garage: model / colour / render / nickname per VIN ----
     // Raw JsonObject (shape varies: object-with-list or array); mapped by VehicleInfo.parse.
@@ -89,6 +110,11 @@ interface TspApi {
         @Query("customTypeId") customTypeId: String? = null,
         @Query("vin") vin: String? = null,
     ): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    // Grouped landing (VEHICLE/OTA/AFTER_SALES/ZEEKR, latest preview each). Takes NO params —
+    // unlike the paged /inbox list, which 400s without a per-category customTypeId.
+    @GET
+    suspend fun inboxHome(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
 
     @GET
     suspend fun inboxUnread(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
