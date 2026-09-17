@@ -39,7 +39,12 @@ import java.util.UUID
  * Implements [DkTransport]: writes are GATT-fragmented (see [DkFragmenter]) and
  * notifications are reassembled + CRC-checked ([DkReassembler]) into DK frames.
  */
-class DkBleManager(private val appContext: Context) : DkTransport {
+class DkBleManager(base: Context) : DkTransport {
+
+    // Attributed context (API 30+) so BLE scan/GATT ops carry the manifest-declared "proximity" tag and
+    // AppOps stops logging "attributionTag not declared". Below R it's the plain context (no attribution).
+    private val appContext: Context =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) base.createAttributionContext(ATTRIBUTION_TAG) else base
 
     enum class State { IDLE, SCANNING, CONNECTING, CONNECTED, SESSION_READY, ERROR }
 
@@ -79,6 +84,16 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     // ---- live RSSI of the connected car (for the RPA proximity gate) ----
     @Volatile private var lastRemoteRssi: Int? = null
 
+    /** Epoch-ms of the last inbound DK frame from the car. The car pushes status (0x121 VSTATUS_SYNC
+     *  etc.) when the vehicle state CHANGES (movement/doors) — bursts with long silent gaps while
+     *  parked-still — so a fresh frame after silence means "activity" (e.g. you're getting out). */
+    @Volatile var lastInboundMs: Long = 0L
+        private set
+
+    /** Fired on EVERY inbound frame from the car, on the BLE callback thread. The proximity
+     *  controller uses it to wake instantly from its unlocked idle-wait the moment the car speaks. */
+    @Volatile var onInboundActivity: (() -> Unit)? = null
+
     /** Trigger a remote-RSSI read on the live GATT and return the most recent value. */
     @SuppressLint("MissingPermission")
     fun pollRemoteRssi(): Int? {
@@ -99,6 +114,17 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     private var writeAck: CompletableDeferred<Boolean>? = null
     private var notifyStep: CompletableDeferred<Boolean>? = null
 
+    // The notify-enable + handshake coroutine kicked off in onServicesDiscovered. Tracked so a
+    // mid-setup disconnect can CANCEL it — otherwise it blocks ~4 s on the notify-enable timeout and
+    // then runs the DK handshake on an already-dead GATT ("write failed for 0x0101").
+    private var setupJob: Job? = null
+
+    // Unexpected mid-setup drops (status 19 — car/BLE-stack contention) are retried FAST via
+    // reconnectLast rather than falling to the slow offloaded presence scan (~20 s). `deliberate`
+    // marks a teardown WE initiated (forceReconnect/watch handover) so we don't fight the caller.
+    @Volatile private var deliberate = false
+    private var setupRetries = 0
+
     // ---- scan state ----
     private var scanCb: ScanCallback? = null
     private var scanJob: Job? = null
@@ -108,6 +134,11 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     /** Per-MAC broadcast-random seen during this scan (the DK mfr-data advert is separate from
      *  the name advert and can arrive in a different PDU / be dropped at low RSSI). */
     private val rndByMac = mutableMapOf<String, ByteArray>()
+
+    // Last successfully-matched device + its broadcast-random, cached so a forced reconnect can go
+    // straight back to the car we just dropped (see [reconnectLast]) instead of re-scanning.
+    private var lastDevice: BluetoothDevice? = null
+    private var lastRnd: ByteArray? = null
 
     // ---------------- connect ----------------
 
@@ -148,6 +179,34 @@ class DkBleManager(private val appContext: Context) : DkTransport {
         } catch (e: SecurityException) {
             fail("missing Bluetooth permission (grant BLUETOOTH_SCAN/CONNECT): ${e.message}")
         }
+    }
+
+    /**
+     * Reconnect straight to the LAST matched car — no scan. For a forced reconnect where we already
+     * know exactly what we dropped: reuse the cached [BluetoothDevice] (it keeps the correct RANDOM
+     * address type, unlike getRemoteDevice(mac)) and its broadcast-random (stable across the car's
+     * RPA lifetime, so the DK connect-confirm key still derives). Returns false — so the caller can
+     * fall back to [connect] with a scan — if there's no cached device, BT is off, or we're not at
+     * rest. If the cached RPA has since rotated the direct connect just errors and the normal
+     * error -> keep-alive scan path recovers.
+     */
+    @SuppressLint("MissingPermission")
+    fun reconnectLast(): Boolean {
+        val dev = lastDevice ?: return false
+        when (_state.value) {
+            State.SCANNING, State.CONNECTING, State.CONNECTED, State.SESSION_READY -> {
+                Logx.d("ble", "reconnectLast ignored — already ${_state.value}"); return false
+            }
+            else -> {}
+        }
+        val a = adapter ?: return false
+        if (!a.isEnabled) return false
+        lastError = null
+        advBroadcastRnd = lastRnd
+        Logx.d("ble", "reconnectLast -> ${dev.address} (no scan, rnd=${lastRnd?.joinToString("") { "%02x".format(it) } ?: "?"})")
+        _state.value = State.CONNECTING
+        connectDevice(dev)
+        return true
     }
 
     @SuppressLint("MissingPermission")
@@ -209,6 +268,7 @@ class DkBleManager(private val appContext: Context) : DkTransport {
                     return false
                 }
                 advBroadcastRnd = rnd
+                lastDevice = dev; lastRnd = rnd   // cache for a scan-free forced reconnect
                 Logx.d("ble", "match ${if (matchesName) "by name '$name'" else "by service uuid"} " +
                     "rnd=${rnd.joinToString("") { "%02x".format(it) }} -> connecting $addr")
                 stopScanInternal(scanner)
@@ -369,13 +429,24 @@ class DkBleManager(private val appContext: Context) : DkTransport {
             Logx.d("ble", "connectDevice ignored — a GATT client is already active (${device.address})")
             return
         }
+        deliberate = false // a fresh connect attempt; a drop from here is unexpected → eligible for retry
         Logx.d("ble", "connectGatt ${device.address}")
         gatt = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
+    /** Abort any in-flight notify-enable/handshake setup: cancel the coroutine and unblock its
+     *  pending GATT waits immediately (so a dropped link doesn't stall ~4 s on a notify timeout and
+     *  then run the handshake on a dead GATT). */
+    private fun abortSetup() {
+        setupJob?.cancel(); setupJob = null
+        notifyStep?.complete(false); writeAck?.complete(false)
+    }
+
     @SuppressLint("MissingPermission")
     fun disconnect() {
+        deliberate = true // WE tore it down — the DISCONNECTED callback must not auto-retry
         adapter?.bluetoothLeScanner?.let { runCatching { stopScanInternal(it) } }
+        abortSetup()
         // reset() (not close()) so the transport's inbound handler stays wired and a later
         // connect() on this reused session can re-handshake. close() would unwire it.
         (session as? RealDkSession)?.reset()
@@ -401,13 +472,25 @@ class DkBleManager(private val appContext: Context) : DkTransport {
                 // clears them while keeping the transport's inbound handler wired, so the
                 // NEXT connect runs a fresh handshake instead of the stale isEstablished
                 // path — the root cause of "must force-stop the app to reconnect".
+                abortSetup() // stop any notify/handshake coroutine dead — don't let it run on a dead GATT
                 (session as? RealDkSession)?.reset()
                 chWrite1 = null; chWrite2 = null; chNotify1 = null; chNotify2 = null
                 reasm1.reset(); reasm2.reset()
                 val wasReady = _state.value == State.SESSION_READY
                 runCatching { g.close() }
                 gatt = null
-                if (wasReady) _state.value = State.IDLE else fail("disconnected (status=$status)")
+                when {
+                    wasReady -> _state.value = State.IDLE   // ready-link drop: liveness/keep-alive decides
+                    // Unexpected mid-setup drop (status 19, car/stack contention) with a known device:
+                    // retry FAST via reconnectLast instead of the ~20 s offloaded presence scan.
+                    !deliberate && lastDevice != null && setupRetries < MAX_SETUP_RETRIES -> {
+                        setupRetries++
+                        _state.value = State.IDLE // reconnectLast requires a resting state
+                        Logx.w("ble", "setup drop (status=$status) — fast reconnectLast retry #$setupRetries/$MAX_SETUP_RETRIES")
+                        scope.launch { delay(SETUP_RETRY_DELAY_MS); reconnectLast() }
+                    }
+                    else -> { setupRetries = 0; fail("disconnected (status=$status)") }
+                }
             }
         }
 
@@ -428,7 +511,7 @@ class DkBleManager(private val appContext: Context) : DkTransport {
             Logx.d("ble", "services discovered: ch1w=${chWrite1 != null} ch1n=${chNotify1 != null} " +
                 "ch2w=${chWrite2 != null} ch2n=${chNotify2 != null}")
             if (chWrite1 == null || chNotify1 == null) { fail("DK characteristics missing"); return }
-            scope.launch { setupNotificationsAndEstablish(g) }
+            setupJob = scope.launch { setupNotificationsAndEstablish(g) }
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
@@ -458,6 +541,11 @@ class DkBleManager(private val appContext: Context) : DkTransport {
     private suspend fun setupNotificationsAndEstablish(g: BluetoothGatt) {
         if (!enableNotify(g, chNotify1!!)) { fail("enable notify 2A11 failed"); return }
         chNotify2?.let { if (!enableNotify(g, it)) Log.w(TAG, "enable notify 2A13 failed (continuing)") }
+        // Bail if the link dropped during notify setup — never run the handshake on a dead GATT
+        // (this is the "write failed for 0x0101" after a mid-setup status-19 drop).
+        if (gatt !== g || _state.value != State.CONNECTED) {
+            Logx.d("ble", "setup aborted — link no longer the active CONNECTED gatt (${_state.value})"); return
+        }
         val cred = credential
         if (cred == null) {
             Logx.w("ble", "connected but no credential — provision a key first (session not established)")
@@ -467,6 +555,7 @@ class DkBleManager(private val appContext: Context) : DkTransport {
             Logx.d("ble", "starting DK handshake …")
             (session as RealDkSession).establish()
             Logx.d("ble", "DK session READY")
+            setupRetries = 0 // clean session — clear the fast-retry budget
             _state.value = State.SESSION_READY
         } catch (e: Exception) {
             fail("DK handshake: ${e.message}")
@@ -492,6 +581,8 @@ class DkBleManager(private val appContext: Context) : DkTransport {
         val frameBytes = reasm.feed(bytes) ?: return
         try {
             val f = DkFrame.decode(frameBytes)
+            lastInboundMs = System.currentTimeMillis() // the car is talking = activity
+            runCatching { onInboundActivity?.invoke() }
             Logx.d("ble", "<- frame cmd=0x${f.cmdId.toString(16)} body=${f.body.size}B " +
                 "hex=${f.body.take(64).joinToString("") { "%02x".format(it) }}")
             inboundHandler?.invoke(f.cmdId, f.body)
@@ -534,6 +625,8 @@ class DkBleManager(private val appContext: Context) : DkTransport {
 
     companion object {
         private const val TAG = "DkBleManager"
+        // Must match the <attribution android:tag> declared in the manifest.
+        private const val ATTRIBUTION_TAG = "proximity"
         /** The 16-bit service UUID the car ADVERTISES (0xFDFD) — used to filter the scan so it's
          *  allowed to run screen-off, and to match without the scan-response name. NOT the DK GATT
          *  service ([DkProtocol.SERVICE_UUID] 0x02362A…), which the car does not advertise. */
@@ -548,6 +641,11 @@ class DkBleManager(private val appContext: Context) : DkTransport {
         /** Batch window for foreground scan results — groups adverts so the framework doesn't
          *  log (and wake us for) every single advertisement packet. Sub-second, still snappy. */
         private const val REPORT_DELAY_MS = 500L
+        // Fast recovery from an unexpected mid-setup drop (status 19): retry reconnectLast this many
+        // times, waiting this long between (long enough for the car to release its side, short enough
+        // to beat the ~20 s offloaded presence scan). Exhausted → fall back to the scan path.
+        private const val MAX_SETUP_RETRIES = 3
+        private const val SETUP_RETRY_DELAY_MS = 900L
         @Volatile private var INSTANCE: DkBleManager? = null
         fun get(context: Context): DkBleManager =
             INSTANCE ?: synchronized(this) {

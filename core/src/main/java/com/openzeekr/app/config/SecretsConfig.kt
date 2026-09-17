@@ -137,6 +137,8 @@ data class SecretsConfig(
     // ---- app-local UI state (not part of zeekr_secrets.json) ----
     /** First-run onboarding wizard completed (login → key provisioning). */
     val onboardingDone: Boolean = false,
+    /** One-time "support this passion project" note has been shown/dismissed. */
+    val supportNoteShown: Boolean = false,
     /** Collect + show the on-device debug log. Off hides the log viewer entirely. */
     val debugLogging: Boolean = false,
     /** User-set display name for the car (shown in the top bar). Blank = use the model

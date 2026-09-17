@@ -273,6 +273,34 @@ class DkProvisioning(
         }
         Logx.w("provision", "loop-key-status timed out (last dkStatus=$last) — vehicle may not be synced; BLE may 0x0105")
     }
+
+    /**
+     * Revoke + fully remove the digital key. Tells the cloud to delete it (the car then forgets it
+     * too), drops the BLE session, and wipes ALL local key material — including the keypair and
+     * deviceId — so nothing reusable stays on the phone. The cloud step is best-effort (it needs an
+     * account + a known dkId); the local wipe ALWAYS runs. The watch copy is purged by the caller
+     * (which has a Context). Fixes "Remove key didn't actually revoke".
+     */
+    suspend fun removeKey(): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cfg = store.current()
+            val deviceId = identity.deviceId
+            val dkId = identity.credential()?.cloudDkId?.takeIf { it.isNotBlank() }
+            if (dkId != null && cfg.userId.isNotBlank() && cfg.vin.isNotBlank()) {
+                runCatching {
+                    val sig = identity.signDkMessage(cfg.userId, cfg.vin)
+                    val r = api.removeOneKey(RemoveKeyReq(deviceId = deviceId, dkId = dkId, signature = sig))
+                    Logx.d("provision", "remove-one-key -> ${r.code}")
+                }.onFailure { Logx.w("provision", "remove-one-key failed (revoking locally anyway): ${it.message}") }
+            } else {
+                Logx.w("provision", "remove-one-key skipped (no dkId/account) — local wipe only")
+            }
+            runCatching { ble.disconnect() }
+            identity.wipeAll()
+            _state.value = State(Step.IDLE, "key removed")
+            Logx.d("provision", "=== key removed (cloud best-effort, local fully wiped) ===")
+        }
+    }
 }
 
 // ---------------- DK cloud API (relative to baseUrl) ----------------
@@ -310,6 +338,11 @@ interface DkApi {
     @POST("$DKC/repush-key-to-vechile")
     suspend fun repushKeyToVehicle(@Body body: RepushReq): DkResp<kotlinx.serialization.json.JsonElement>
 
+    /** Revoke this device's key cloud-side; the vehicle then forgets it too. Body
+     *  {deviceId, dkId, signature} (captured stock flow, OWNER_KEY_429_FINDINGS.md §6). */
+    @POST("$DKC/remove-one-key")
+    suspend fun removeOneKey(@Body body: RemoveKeyReq): DkResp<kotlinx.serialization.json.JsonElement>
+
     /** Tell the cloud to (re)sync the whole key list down to the VEHICLE. This is the call the
      *  stock app makes from its BLE connect flow (ZeekrBleClient.getDksOfCem) and, unlike
      *  repush-key-to-vechile, it is NOT rejected when the key is already "activated" (036809).
@@ -344,6 +377,7 @@ interface DkApi {
 @Serializable data class DkStatusData(val dkStatus: Int? = null)
 
 @Serializable data class RepushReq(val deviceId: String, val dkId: String, val signature: String)
+@Serializable data class RemoveKeyReq(val deviceId: String, val dkId: String, val signature: String)
 
 @Serializable data class DkResp<T>(val code: String? = null, val msg: String? = null, val data: T? = null)
 @Serializable data class CreateCertReq(val deviceId: String, val csr: String)

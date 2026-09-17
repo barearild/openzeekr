@@ -26,6 +26,33 @@ interface DkSession {
     suspend fun sendFrame(cmd: Int, payload: ByteArray): Boolean
 
     /**
+     * Send a `0x0110 CMD_A2V_CONTROL` sub-command and READ THE CAR'S ANSWER (unlike [sendFrame],
+     * which only reports whether the GATT write left the phone). The car replies `0x0111` (received)
+     * and may follow with `0x0112` (result). Maps to:
+     *  - [ControlResult.WRITE_FAILED] — the frame couldn't even be written (dead/wedged GATT),
+     *  - [ControlResult.NO_RESPONSE]  — written but no `0x0111` within [timeoutMs] (car didn't get it),
+     *  - [ControlResult.REJECTED]     — `0x0112` came back with a non-zero error code,
+     *  - [ControlResult.CONFIRMED]    — the car acknowledged the command.
+     */
+    suspend fun control(ctrl: Byte, timeoutMs: Long): ControlResult = ControlResult.WRITE_FAILED
+
+    /**
+     * Non-actuating liveness probe: send a `0x0120 CMD_A2V_TRANS` ("generic trans data") and wait
+     * up to [timeoutMs] for ANY frame back from the car. A proper `0x0121` reply, an unsolicited
+     * status push, or even a NAK all prove the app-layer link is alive — only total silence means
+     * it's wedged. Returns true if any frame arrived. Never actuates anything on the car.
+     */
+    suspend fun ping(timeoutMs: Long): Boolean
+
+    /**
+     * DEBUG probe: send a single `0x0110 CMD_A2V_CONTROL` frame carrying an arbitrary sub-opcode
+     * [ctrl] and collect every frame the car sends back over [windowMs], decrypted, into a
+     * human-readable summary. Diagnostic only — used to see how the car answers an opcode we don't
+     * normally send (e.g. `CTRL_RPA_START = 0x0A`). Default no-op for placeholder sessions.
+     */
+    suspend fun probeControl(ctrl: Byte, windowMs: Long): String = "probe unsupported (no real session)"
+
+    /**
      * Compute the RPA challenge answer. The car sends CMD_V2A_RPA_CHALLENGE with
      * (randX, randY); the app must reply via a fixed grid lookup
      * (RpaCtrlCmd.getAnswer/checkX/checkY), CMAC-signed. The lookup table is not
@@ -38,6 +65,9 @@ interface DkSession {
 
     fun close()
 }
+
+/** Outcome of a [DkSession.control] call, reading the car's actual answer (not just the GATT write). */
+enum class ControlResult { CONFIRMED, REJECTED, NO_RESPONSE, WRITE_FAILED }
 
 class NotYetReversedException(what: String) :
     UnsupportedOperationException("$what is not reverse-engineered yet — placeholder")
@@ -63,6 +93,8 @@ class PlaceholderDkSession(private val transport: DkTransport) : DkSession {
         val framed = payload // <-- placeholder: real impl encrypts + signs here
         return transport.write(cmd, framed)
     }
+
+    override suspend fun ping(timeoutMs: Long): Boolean = false
 
     override fun answerChallenge(randX: Int, randY: Int): ByteArray {
         // TODO(dk): reproduce RpaCtrlCmd.getAnswer(x,y) grid table (not yet extracted),

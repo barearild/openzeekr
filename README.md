@@ -1,13 +1,15 @@
 # OpenZeekr
 
-> 🚧 **Not usable yet — work in progress, no support.** This is an experimental,
-> incomplete research project, provided **as-is with no warranty and no support**
-> (no issues, no help, no guarantees it works or is safe to use). Nothing here is
-> confirmed working end-to-end; expect breakage and changes without notice. Use
-> entirely at your own risk.
+**Version 0.1.1** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
-A clean-room Android companion app for a **Zeekr (overseas / EU) vehicle** — remote
-control over the Geely/ECARX TSP cloud, and a working **offline BLE digital key**
+> 🧪 **Early beta — testing in progress.** This is an experimental research project
+> under active development. It's usable and being tested by early users, but expect
+> rough edges and changes without notice. **Support is best-effort** — this is not a
+> commercial product (at least not for now), so there are no warranties, guarantees or
+> SLAs. Use at your own risk.
+
+A reverse-engineered Android companion app for a **Zeekr (overseas / EU) vehicle** —
+remote control over the Geely/ECARX TSP cloud, and a working **offline BLE digital key**
 (lock/unlock at the car), with proximity unlock and remote-parking research on the
 same digital-key channel.
 
@@ -22,6 +24,21 @@ for interoperability and research.
 > the **EU** TSP server with an **EU** vehicle and account. Other regions are
 > unlikely to work as-is: **some endpoints, hosts, region and project-id values are
 > currently hardcoded for EU inside the app.** Non-EU support is not implemented.
+
+## ⚠️ Read this before you start
+
+> 🔐 **You can only be signed in on one app at a time.** The Zeekr cloud allows **one
+> active session per account** — signing into OpenZeekr signs you out of the official
+> Zeekr app, and vice-versa. **Strongly recommended:** create a **secondary account**,
+> **share your car to that second email** from your owner account, and use the secondary
+> account in OpenZeekr. That way the official app stays logged in on your main account and
+> the two don't keep kicking each other out.
+
+> ⌚ **The Wear OS companion copies the digital key onto your watch.** That means
+> **anyone with access to your watch has a working key to your car** — it can unlock and
+> use the car. If you're not comfortable with that, **don't install the watch companion.**
+> If your watch is lost or stolen, you can **revoke the key from the phone app**, which
+> kills it with the car and renders the watch useless.
 
 ## Credits & thanks 🙏
 
@@ -44,6 +61,18 @@ token of appreciation is genuinely welcome (never expected):
 
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
 
+## Changelog
+
+### 0.1.1
+- **Prevented log leakage when logging is off.** Debug logging is now truly silent unless
+  you turn it on — and enabling it shows a clear warning first, because the log can contain
+  key material, session tokens and your VIN.
+- **Fixed a security concern around blindly trusting the car.** The app now authenticates
+  the vehicle's certificate against the Geely/Zeekr CA chain **before** releasing the
+  digital key, instead of accepting whatever certificate the car presents.
+- **Rewrote the approach logic.** It now uses more sensors to decide when you're
+  approaching the car, while letting the phone sleep so it doesn't drain the battery.
+
 ## What it does
 
 Legend: ✅ working & verified · 🟡 built but **unverified** (may or may not work) · 🔴 not working yet.
@@ -51,7 +80,7 @@ Legend: ✅ working & verified · 🟡 built but **unverified** (may or may not 
 | Area | Status |
 |------|--------|
 | **Account login** (idaas → TSP bearer) | ✅ Working (EU) — logs in and obtains the TSP bearer token |
-| **DK BLE digital key — pair + lock/unlock** | ✅ **Working & verified at the car.** Clean-room handshake (cert exchange → ECDH → AES-128-GCM session) + control opcodes `0x110`/`0x111`; locks and unlocks over BLE, no native libs |
+| **DK BLE digital key — pair + lock/unlock** | ✅ **Working & verified at the car.** Reverse-engineered handshake (cert exchange → ECDH → AES-128-GCM session) + control opcodes `0x110`/`0x111`; locks and unlocks over BLE, no native libs |
 | **DK cloud provisioning** (enrol our own keypair → key-info) | ✅ Working — provisions OpenZeekr's own digital key and pairs to the car |
 | **Cloud remote control** (lock/unlock, climate, engine, charge, windows, flash/horn, sentry, …) | ✅ **Core verified** — commands accepted (`000000`) via the stock body shape + `X-SIGNATURE`; some commands are vehicle-state gated (e.g. refused at low battery SOC) so remain effectively unverified |
 | **Unified quick action** (BLE if a DK session is connected, else cloud) | ✅ Working |
@@ -59,12 +88,14 @@ Legend: ✅ working & verified · 🟡 built but **unverified** (may or may not 
 | **Proximity unlock / walk-away lock (RSSI)** | ✅ **Working at the car.** Rides the keep-alive session's connected-GATT RSSI with adaptive cadence (2 s idle → 250 ms burst near the threshold) + EMA smoothing; unlocks on approach and locks on walk-away (zone crossings + a link-loss walk-away lock when the session drops as you leave). Auto-retries a failed unlock by resetting the BLE link |
 | **Vehicle status** | ✅ **Working (EU)** — single GET (`vehicle/status/latest?latest=false&target=new`), tolerant JSON map (lock/doors/SOC/range/climate/odometer/tyres/location). Handles this platform's quirks: SOC lives in `chargeLevel` (not blank `stateOfCharge`); charging derived from live `chargeIAct×chargeUAct` kW (the `isCharging` flag is wrong) |
 | **Sentry footage / live view** | 🔴 **CN-only — not available on EU (or any overseas) gateway.** `sentinel-monitoring-service` is unrouted (gateway 404 `00A01`); our request is byte-identical to stock, so it's a server-side regional gap, not a client bug. **Hidden in the app for now; back-burner** — see below |
-| **Remote parking (RPA/RSPA)** | 🟡 Fully wired — flow, opcodes, 500 ms dead-man heartbeat, challenge auto-answer, RSSI stream, **and the AES-CMAC frame trailer + ECIES `cmacKey` unwrap** (reversed from the native lib, offline unit-tested). At the car the request is still NAK'd (`0x100a` cmdMatchErr → sequencing / must be armed in-car) — **pending at-car** |
+| **Remote parking (RPA/RSPA)** | 🔴 **Not working — gated by the car.** The full schema is reverse-engineered and implemented (flow, opcodes, 500 ms dead-man heartbeat, challenge auto-answer, RSSI stream, AES-CMAC frame trailer + ECIES `cmacKey` unwrap). But at the car every request is NAK'd (`0x100a`) even with an owner key, armed on the head unit — the car only authorizes RPA for a **DK 3.0 / Secure-Element key**, which a software key can't be. Schema is available; actuation is not reachable |
 | **Wear OS companion** (standalone watch app) | ✅ **Working at the car.** Pulls the phone's DK key over the Wear Data Layer (no separate sign-in — same `applicationId` + signing key), then locks/unlocks the car **directly over BLE from the watch**. Arbitrates the car's single BLE peer slot with the phone: stands down while phone Lock-on-approach is on, otherwise runs a pause → act → resume handover so the two never fight for the radio. Hero-style watch face (car render + one-tap lock/unlock) |
 
-The digital-key handshake and lock/unlock are real and verified; RPA rides the same
-`DkSession` and is byte-complete pending an at-car session where remote parking is
-armed. See `CMAC_FINDINGS.md` (local) for the RPA crypto derivation.
+The digital-key handshake and lock/unlock are real and verified. RPA rides the same
+`DkSession` and is byte-complete — flow, opcodes and CMAC crypto are all
+reverse-engineered — but the car **refuses remote parking for a software key** (it
+requires a DK 3.0 / Secure-Element key), so it doesn't actuate. See `CMAC_FINDINGS.md`
+(local) for the RPA crypto derivation and schema.
 
 ## How OpenZeekr differs from the official app
 
@@ -72,9 +103,8 @@ OpenZeekr isn't just a re-skin — a few things work here that the stock Zeekr a
 either restricts or doesn't offer at all:
 
 1. **Digital Key works on any BLE-capable phone.** The official app's offline key is
-   gated to a whitelist of Zeekr-approved phone models; OpenZeekr's clean-room key
-   pairs and locks/unlocks from **any** Android phone with Bluetooth LE — no model
-   allow-list.
+   gated to a whitelist of Zeekr-approved phone models; OpenZeekr's key pairs and
+   locks/unlocks from **any** Android phone with Bluetooth LE — no model allow-list.
 2. **Proximity unlock *and* walk-away lock actually work — without DK 3.0.** Hands-free
    approach unlock / walk-away lock run off the standard digital-key BLE session, so
    you don't need the newer DK 3.0 / UWB hardware the stock flow depends on.
@@ -211,11 +241,14 @@ first-run onboarding · ✅ two-stage low-power proximity policy.
 
 Next:
 
-1. **Remote parking at the car** — confirm the arming/sequencing (the request is
-   currently NAK'd `0x100a` cmdMatchErr — likely must be armed on the head unit) and
-   capture a live golden vector to close the CMAC loop end-to-end.
-2. **Proximity at the car** — tune the connect band / actuation thresholds on real
+1. **Proximity at the car** — tune the connect band / actuation thresholds on real
    approach/walk-away runs.
+
+**Remote parking** is considered **closed** for this project: the schema is fully
+reverse-engineered, but the car gates actuation behind a DK 3.0 / Secure-Element key
+(every request is NAK'd `0x100a` even as owner, armed on the head unit), which a
+software key structurally can't be. The reversed flow/crypto stays in the tree and in
+`CMAC_FINDINGS.md` for reference, but it won't actuate without hardware we can't mint.
 
 ### Back-burner: Sentry / Sentinel (footage + live view) — CN-only
 

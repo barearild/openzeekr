@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Label for the privacy attribution tag used by the BLE proximity/scan + motion-sensor code
+         paths, so AppOps doesn't log "attributionTag not declared" for our continuous BLE/sensor ops. -->
+    <string name="attribution_proximity">Digital key proximity &amp; BLE</string>
+</resources>

@@ -3,7 +3,7 @@ package com.openzeekr.app.ble
 import com.openzeekr.app.util.Logx
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.security.KeyPair
 import java.security.cert.CertificateFactory
@@ -40,6 +40,17 @@ class RealDkSession(
     private var appHandler: ((Int, ByteArray) -> Unit)? = null
 
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
+
+    // One-shot waiter for [ping]: completed with the opcode of the NEXT inbound frame (before decrypt),
+    // so ANY reply — proper 0x0121, an unsolicited push, or a NAK — resolves the liveness probe.
+    @Volatile private var pingWaiter: CompletableDeferred<Int>? = null
+
+    // How long [control] waits for the optional 0x0112 result after the 0x0111 receipt ack.
+    private val RESULT_WINDOW_MS = 600L
+
+    // DEBUG: when set (during [probeControl]), every decrypted inbound frame is also handed here so
+    // the probe can log exactly what the car sends back (opcode + body). Null in normal operation.
+    @Volatile private var probeSink: ((Int, ByteArray) -> Unit)? = null
 
     /** 16-byte AES-CMAC key for RPA frames (ECIES-unwrapped once from the credential). */
     @Volatile private var cmacKeyCache: ByteArray? = null
@@ -122,6 +133,10 @@ class RealDkSession(
             DkProtocol.CMD_V2A_SEND_VEHICLE_CERT)
         val carCert = parseCert(afterHeader(carCertBody))
         Logx.d("dk", "handshake 1/5 vehicle cert: ${carCert.subjectX500Principal.name.take(64)}")
+        // Authenticate the CAR before we ever release our digital key (0x010b): the vehicle cert
+        // must be signed by a real Geely CA. Stops a fake car (that knows the VIN) from completing
+        // the session and harvesting the key. Throws → handshake aborts before any key material.
+        DkTrust.requireGeelyVehicleCert(carCert)
 
         // 2) ephemeral factor + signature  (sign over nSeq||ts||factor; cleartext)
         Logx.d("dk", "handshake 2/5 send factor+sig …")
@@ -228,6 +243,83 @@ class RealDkSession(
         return send(cmd, payload)
     }
 
+    override suspend fun ping(timeoutMs: Long): Boolean {
+        if (!isEstablished || !cryptoReady) return false
+        val waiter = CompletableDeferred<Int>()
+        pingWaiter = waiter
+        return try {
+            // Liveness via a CONTROL frame the car ALWAYS acks but never acts on: 0x0110 carrying the
+            // RPA-start sub-opcode (0x0A). The car replies 0x0111 (received)/0x0112 (result) and
+            // REJECTS it (RPA gated behind DK3.0, EEC 0x100a) — nothing actuates. A bare 0x0120 gets NO
+            // reply at all (car ignores it), so 0x0110 is the working probe. ANY frame back = the
+            // app-layer link (the exact path unlock uses) is alive.
+            val ok = send(DkProtocol.CMD_A2V_CONTROL, byteArrayOf(DkProtocol.CTRL_RPA_START))
+            if (!ok) { Logx.w("dk", "ping: 0x0110 write failed"); return false }
+            val reply = withTimeoutOrNull(timeoutMs) { waiter.await() }
+            Logx.d("dk", "ping 0x0110/0x0a -> ${reply?.let { hex(it) } ?: "no reply in ${timeoutMs}ms"}")
+            reply != null
+        } catch (e: Exception) {
+            Logx.w("dk", "ping error: ${e.message}"); false
+        } finally {
+            pingWaiter = null
+        }
+    }
+
+    override suspend fun control(ctrl: Byte, timeoutMs: Long): ControlResult {
+        if (!isEstablished || !cryptoReady) return ControlResult.WRITE_FAILED
+        val recv = CompletableDeferred<ByteArray>()
+        val result = CompletableDeferred<ByteArray>()
+        pending[DkProtocol.CMD_V2A_CMD_RECEIVED] = recv   // 0x0111
+        pending[DkProtocol.CMD_V2A_RESULT] = result       // 0x0112
+        return try {
+            if (!send(DkProtocol.CMD_A2V_CONTROL, byteArrayOf(ctrl))) {
+                Logx.w("dk", "control 0x%02x: write failed".format(ctrl)); return ControlResult.WRITE_FAILED
+            }
+            // The car acks receipt with 0x0111; no 0x0111 => it never got the frame (wedged link).
+            if (withTimeoutOrNull(timeoutMs) { recv.await() } == null) {
+                Logx.w("dk", "control 0x%02x: no 0x0111 within ${timeoutMs}ms -> NO_RESPONSE".format(ctrl))
+                return ControlResult.NO_RESPONSE
+            }
+            // A 0x0112 result may follow; a non-zero errCode = the car rejected it. (Observed
+            // successful unlocks send only 0x0111, so absence of 0x0112 counts as CONFIRMED.)
+            val resBody = withTimeoutOrNull(RESULT_WINDOW_MS) { result.await() }
+            if (resBody != null) {
+                val err = if (resBody.size >= 8) ((resBody[6].toInt() and 0xFF) shl 8) or (resBody[7].toInt() and 0xFF) else 0
+                Logx.d("dk", "control 0x%02x: 0x0111 ok, 0x0112 err=0x%04x tail=%s".format(ctrl, err, hexOf(afterHeader(resBody))))
+                if (err != 0) ControlResult.REJECTED else ControlResult.CONFIRMED
+            } else {
+                Logx.d("dk", "control 0x%02x: 0x0111 received (no 0x0112) -> CONFIRMED".format(ctrl))
+                ControlResult.CONFIRMED
+            }
+        } catch (e: Exception) {
+            Logx.w("dk", "control error: ${e.message}"); ControlResult.WRITE_FAILED
+        } finally {
+            pending.remove(DkProtocol.CMD_V2A_CMD_RECEIVED); pending.remove(DkProtocol.CMD_V2A_RESULT)
+        }
+    }
+
+    override suspend fun probeControl(ctrl: Byte, windowMs: Long): String {
+        if (!isEstablished || !cryptoReady) return "session not ready"
+        val seen = java.util.Collections.synchronizedList(mutableListOf<String>())
+        probeSink = { cmd, body ->
+            // body is nSeq(2)||ts(4)||tail — show the tail, which for a 0x0112 RESULT carries the errCode.
+            val tail = if (body.size >= 6) body.copyOfRange(6, body.size) else body
+            seen.add("${hex(cmd)}[${hexOf(tail).take(64)}]")
+        }
+        return try {
+            val ok = send(DkProtocol.CMD_A2V_CONTROL, byteArrayOf(ctrl))
+            Logx.d("dk", "probe: sent 0x0110 ctrl=0x%02x write=$ok — listening ${windowMs}ms".format(ctrl))
+            delay(windowMs)
+            val summary = if (seen.isEmpty()) "no reply in ${windowMs}ms" else seen.joinToString(" ")
+            Logx.d("dk", "probe 0x0110/0x%02x -> %s".format(ctrl, summary))
+            summary
+        } catch (e: Exception) {
+            Logx.w("dk", "probe error: ${e.message}"); "probe error: ${e.message}"
+        } finally {
+            probeSink = null
+        }
+    }
+
     override fun answerChallenge(randX: Int, randY: Int): ByteArray {
         val ans = RpaGrid.getAnswer(randX, randY)
         return byteArrayOf(((ans.toInt() ushr 8) and 0xFF).toByte(), (ans.toInt() and 0xFF).toByte())
@@ -312,7 +404,10 @@ class RealDkSession(
             val body = if (encrypt) DkCrypto.gcmEncrypt(sKey, iv, plainBody) else plainBody
             val frame = DkFrame(cmdId, DkProtocol.INST_REQ, body).encode()
             if (!transport.write(cmdId, frame)) throw IllegalStateException("write failed for cmd ${hex(cmdId)}")
-            return withTimeout(timeoutMs) { def.await() }
+            // Name the stalled step in the error so a tester's screenshot alone tells us WHERE the
+            // handshake died (e.g. "sent 0x103, no 0x104" = cert exchange never came back).
+            return withTimeoutOrNull(timeoutMs) { def.await() }
+                ?: error("DK handshake stalled — sent ${hex(cmdId)}, no ${hex(expect)} reply within ${timeoutMs}ms")
         } finally {
             pending.remove(expect)
         }
@@ -320,11 +415,15 @@ class RealDkSession(
 
     /** Called by the transport for each reassembled+CRC-checked inbound frame. */
     private fun onRawInbound(cmdId: Int, rawBody: ByteArray) {
+        // Liveness: ANY frame (even one we can't decrypt, e.g. a NAK) proves the car is talking.
+        pingWaiter?.let { it.complete(cmdId); pingWaiter = null }
         val body = try {
             if (cryptoReady && DkProtocol.isEncrypted(cmdId)) DkCrypto.gcmDecrypt(sKey, iv, rawBody) else rawBody
         } catch (e: Exception) {
             Logx.w("dk", "decrypt ${hex(cmdId)} failed: ${e.message} rawBody(${rawBody.size}B)=${hexOf(rawBody)}"); return
         }
+        // Diagnostic tap (active only during a probeControl window): see every frame the car returns.
+        probeSink?.invoke(cmdId, body)
         pending[cmdId]?.let { it.complete(body); return }
         // Known handshake failures: fail the awaited step immediately (don't wait for timeout).
         val failFor = when (cmdId) {

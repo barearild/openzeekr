@@ -1,7 +1,15 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// Same untracked keystore.properties as the phone app — the watch AAB MUST be signed with the
+// same key (same applicationId ⇒ same Play app).
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply { if (keystorePropsFile.exists()) load(FileInputStream(keystorePropsFile)) }
 
 android {
     namespace = "com.openzeekr.wear"
@@ -16,14 +24,27 @@ android {
         // Wear OS 3+ (the DK BLE stack + Wear Compose both need modern APIs).
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // The phone + watch AABs go into ONE Play release (shared applicationId), so each artifact
+        // needs a DISTINCT versionCode. Convention here: watch = phone + 1 (bump both each release).
+        versionCode = 4
+        versionName = "0.1.1"
+    }
+
+    signingConfigs {
+        if (keystorePropsFile.exists()) create("release") {
+            storeFile = file(keystoreProps.getProperty("storeFile"))
+            storePassword = keystoreProps.getProperty("storePassword")
+            keyAlias = keystoreProps.getProperty("keyAlias")
+            keyPassword = keystoreProps.getProperty("keyPassword")
+            keystoreProps.getProperty("storeType")?.let { storeType = it } // e.g. PKCS12 for a .p12
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (keystorePropsFile.exists()) signingConfig = signingConfigs.getByName("release")
         }
     }
 

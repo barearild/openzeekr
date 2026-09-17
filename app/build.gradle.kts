@@ -1,7 +1,16 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// Release signing is read from an UNTRACKED keystore.properties at the repo root (see
+// keystore.properties.example). If it's absent, `release` builds unsigned — Studio's
+// "Generate Signed Bundle" still works independently.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply { if (keystorePropsFile.exists()) load(FileInputStream(keystorePropsFile)) }
 
 android {
     namespace = "com.openzeekr.app"
@@ -11,15 +20,26 @@ android {
         applicationId = "com.openzeekr.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.1.1"
         // App-global secrets are baked in :core (SecretsConfig + BuildConfig live there).
+    }
+
+    signingConfigs {
+        if (keystorePropsFile.exists()) create("release") {
+            storeFile = file(keystoreProps.getProperty("storeFile"))
+            storePassword = keystoreProps.getProperty("storePassword")
+            keyAlias = keystoreProps.getProperty("keyAlias")
+            keyPassword = keystoreProps.getProperty("keyPassword")
+            keystoreProps.getProperty("storeType")?.let { storeType = it } // e.g. PKCS12 for a .p12
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (keystorePropsFile.exists()) signingConfig = signingConfigs.getByName("release")
         }
     }
 

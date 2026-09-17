@@ -9,12 +9,18 @@
 /captures/
 .externalNativeBuild/
 .cxx/
+# Signed release build outputs (APK is *.apk; also ignore the metadata + baseline profiles).
+/app/release/
+/wear/release/
 *.apk
 *.keystore
+*.jks
 # Never commit real secrets:
 secrets.json
 zeekr_secrets.json
 secrets.properties
+# Release-signing config (passwords + keystore path) — keep local only.
+keystore.properties
 
 # Zeekr press renders are copyrighted — bundle locally, never publish.
 # Drop your own per-model white PNG/WebP here (see README): car_{001,x,7x,7gt,9x}.webp

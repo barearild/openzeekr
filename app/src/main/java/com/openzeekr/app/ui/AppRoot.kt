@@ -54,6 +54,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Intent
+import android.net.Uri
 import com.openzeekr.app.Deps
 import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkProvisioning
@@ -226,8 +228,11 @@ fun AppRoot(deps: Deps) {
                     isProvisioned = { deps.dkIdentity.isProvisioned },
                     dkId = remember(provisioned) { runCatching { deps.dkIdentity.credential()?.dkId }.getOrNull() },
                     onRemoveKey = {
-                        deps.dkIdentity.clearProvisioned()
-                        runCatching { deps.ble.disconnect() }
+                        // Revoke cloud-side (car forgets it) + wipe ALL local material + purge the watch.
+                        scope.launch {
+                            deps.provisioning.removeKey()
+                            com.openzeekr.app.wear.PhoneKeyPush.purgeWatches(pushCtx)
+                        }
                     },
                     snackbar = snackbar,
                 )
@@ -257,4 +262,39 @@ fun AppRoot(deps: Deps) {
             dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
         )
     }
+
+    // One-time "this is a passion project" note. Shown once after onboarding; dismissing it (either
+    // button) sets the persisted flag so it never appears again.
+    if (!cfg.supportNoteShown) {
+        val dismiss = { deps.config.update { it.copy(supportNoteShown = true) } }
+        AlertDialog(
+            onDismissRequest = dismiss,
+            title = { Text("A quick hello 👋") },
+            text = {
+                Text(
+                    "OpenZeekr is a free, non-commercial passion project — not affiliated with Zeekr. " +
+                        "Yes, a lot of it is vibe-coded, but it also took a solid week of sleepless nights " +
+                        "to make your key connect and unlock cleanly.\n\n" +
+                        "If it's useful to you, a small tip keeps development going. Totally optional — " +
+                        "either way, enjoy the app. 💚",
+                    fontSize = 14.sp,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching {
+                        pushCtx.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(REVOLUT_URL))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    }.onFailure { snackbar("Couldn't open the link") }
+                    dismiss()
+                }) { Text("Support ❤️") }
+            },
+            dismissButton = { TextButton(onClick = dismiss) { Text("Maybe later") } },
+        )
+    }
 }
+
+// Revolut tip link shown in the one-time support note. Replace with the real revolut.me handle.
+private const val REVOLUT_URL = "https://revolut.me/REPLACE_ME"

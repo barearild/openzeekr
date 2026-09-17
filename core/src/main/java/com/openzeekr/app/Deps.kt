@@ -57,7 +57,13 @@ class Deps(context: Context) {
     val lock = DkLockController(ble.session)
     val phoneStatus = PhoneStatusProvider(appCtx)
     val rpa = RpaController(ble.session, appScope, phoneStatus::stateByte, rssi = ble::pollRemoteRssi)
-    val proximity = ProximityController(appCtx, config, lock, ble, appScope)
+    /** Wakelock-free motion state (still vs moving) for proximity cadence gating. */
+    val motion = com.openzeekr.app.ble.MotionMonitor(appCtx)
+    val proximity = ProximityController(
+        appCtx, config, lock, ble, motion, appScope,
+        // Cloud lock fallback for the walk-away lock when BLE won't confirm — never leave the car open.
+        cloudLock = { control.send(com.openzeekr.app.remote.Command.LOCK) is com.openzeekr.app.remote.CallResult.Ok },
+    )
 
     /** Call after the base URL / sign algo changes so the HTTP client rebuilds. */
     fun onEndpointChanged() = apiClient.rebuild()

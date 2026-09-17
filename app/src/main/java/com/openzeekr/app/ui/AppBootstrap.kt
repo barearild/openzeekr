@@ -77,6 +77,11 @@ private fun foregroundPerms(): List<String> = buildList {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         add(Manifest.permission.POST_NOTIFICATIONS)
     }
+    // Activity Recognition (Q+ runtime perm) — the proximity motion fallback when the phone has no
+    // hardware MOTION/STATIONARY_DETECT trigger sensors, so we still notice you start walking to the car.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        add(Manifest.permission.ACTIVITY_RECOGNITION)
+    }
 }
 
 private fun hasAll(context: Context, perms: List<String>): Boolean = perms.all {

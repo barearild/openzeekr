@@ -62,6 +62,21 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
         )
     }
 
+    /**
+     * Sign out = wipe everything that identifies or authenticates the user from this device: the
+     * account (email/password), every session token, the VIN, the car nickname, and the device
+     * identifiers (so a re-login mints a fresh device slot). Keeps only the region-static extracted
+     * app keys (so the app stays configured and can log in again) — NOT the account. The digital key
+     * is wiped separately via Remove key (which also revokes it cloud-side).
+     */
+    fun signOut() = update {
+        it.copy(
+            email = "", password = "", accessToken = "", userId = "", accountUuid = "",
+            vin = "", carNickname = "",
+            deviceIdentifier = "", appInstanceId = "",
+        )
+    }
+
     /** Re-apply the baked build defaults (secrets.properties), keeping device id. */
     fun resetToBuildDefaults() =
         persist(ensureDeviceId(SecretsConfig.fromBuildDefaults().copy(deviceIdentifier = _config.value.deviceIdentifier)))

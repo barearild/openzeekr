@@ -128,6 +128,10 @@ class DkIdentity private constructor(private val prefs: android.content.SharedPr
             .remove(K_DIGKEY).remove(K_CMAC).remove(K_COEF).apply()
     }
 
+    /** Full wipe — removes EVERYTHING, including the keypair + deviceId, so the phone holds NO key
+     *  material afterwards (a true "remove key", not a re-provision). */
+    fun wipeAll() = prefs.edit().clear().apply()
+
     /**
      * Export the full provisioned identity (keypair + deviceId + cloud material) as a flat
      * string map, to CLONE onto a companion device (the Wear app). Includes the PRIVATE key,

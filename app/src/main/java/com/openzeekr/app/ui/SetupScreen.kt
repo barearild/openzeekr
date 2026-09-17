@@ -81,6 +81,7 @@ fun SetupScreen(
     // Owner vs shared is known from the vehicle-list (`isOwner`) captured at login — no manual pick.
     val owner = cfg.isOwner
     var confirmRemove by remember { mutableStateOf(false) }
+    var probing by remember { mutableStateOf(false) }
 
     val ready = isProvisioned() || prov.step == DkProvisioning.Step.DONE
     val sessionReady = bleState == DkBleManager.State.SESSION_READY
@@ -180,6 +181,23 @@ fun SetupScreen(
                         if (connected) "Disconnect" else "Connect",
                         tint = if (connected) Brand.good else Brand.accent, modifier = Modifier.size(22.dp),
                     )
+                }
+            }
+            // DEBUG probe: fire 0x0110 / CTRL_RPA_START (0x0A) once and surface the car's reply.
+            // Only meaningful with a live session; never sent in normal operation.
+            if (sessionReady) {
+                GhostButton(
+                    if (probing) "Probing…" else "Probe RPA start (0x0A)",
+                    Modifier.fillMaxWidth(), tint = Brand.muted,
+                ) {
+                    if (!probing) {
+                        probing = true
+                        scope.launch {
+                            val reply = runCatching { lock.probeRpaStart() }.getOrElse { "error: ${it.message}" }
+                            probing = false
+                            snackbar("Car reply: $reply")
+                        }
+                    }
                 }
             }
         }

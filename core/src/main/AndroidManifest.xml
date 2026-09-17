@@ -28,7 +28,17 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
+    <!-- Activity Recognition: proximity motion fallback (Play Services) when the phone has no
+         hardware MOTION/STATIONARY_DETECT sensors. Runtime perm on Q+, the GMS perm covers pre-Q. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <!-- Privacy attribution tag for our continuous BLE (scan/GATT) and motion-sensor access. The BLE
+         manager and MotionMonitor route their context through createAttributionContext("proximity") so
+         AppOps stops logging "attributionTag not declared" for those ops (API 31+; ignored below). -->
+    <attribution android:tag="proximity" android:label="@string/attribution_proximity" />
 
     <application>
         <!-- Fully-qualified: this manifest's package is the core namespace, but the
@@ -43,6 +53,12 @@
              the system delivers our own PendingIntent to our own explicit component. -->
         <receiver
             android:name="com.openzeekr.app.ble.BleScanReceiver"
+            android:exported="false" />
+
+        <!-- Receives Activity Recognition transition updates (our own PendingIntent) → feeds the
+             MotionMonitor still/moving state when there's no hardware motion sensor. -->
+        <receiver
+            android:name="com.openzeekr.app.ble.ActivityRecognitionReceiver"
             android:exported="false" />
     </application>
 </manifest>

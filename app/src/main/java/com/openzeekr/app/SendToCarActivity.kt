@@ -29,21 +29,36 @@ class SendToCarActivity : Activity() {
         super.onCreate(savedInstanceState)
         val deps = (application as App).deps
 
-        // Everything (geocode + the network POST) is application-scoped so it outlives finish().
+        // Parse first, then ALWAYS ask for confirmation before pushing anything to the car — this
+        // activity is exported, so without a prompt any app could fire a POI at the car silently.
         deps.appScope.launch {
             val dest = withContext(Dispatchers.IO) { parseDestination(intent) }
-            if (dest == null) {
-                val preview = (intent.getStringExtra(Intent.EXTRA_TEXT) ?: intent.dataString ?: "").take(48)
-                toast(if (preview.isBlank()) "Couldn't read a location to send" else "Couldn't read location from: $preview")
-                return@launch
-            }
-            toast("Sending “${dest.name}” to Zeekr…")
-            when (val r = deps.nav.sendToCar(dest.lat, dest.lon, dest.name, dest.address, dest.city)) {
-                is CallResult.Ok -> toast("Sent to Zeekr ✓")
-                is CallResult.Err -> toast("Send failed: ${r.message}")
+            withContext(Dispatchers.Main) {
+                if (dest == null) {
+                    val preview = (intent.getStringExtra(Intent.EXTRA_TEXT) ?: intent.dataString ?: "").take(48)
+                    Toast.makeText(applicationContext,
+                        if (preview.isBlank()) "Couldn't read a location to send" else "Couldn't read location from: $preview",
+                        Toast.LENGTH_SHORT).show()
+                    finish(); return@withContext
+                }
+                if (isFinishing || isDestroyed) return@withContext
+                android.app.AlertDialog.Builder(this@SendToCarActivity)
+                    .setTitle("Send to your Zeekr?")
+                    .setMessage("Send “${dest.name}” to the car's navigation?")
+                    .setPositiveButton("Send") { _, _ ->
+                        deps.appScope.launch {
+                            when (val r = deps.nav.sendToCar(dest.lat, dest.lon, dest.name, dest.address, dest.city)) {
+                                is CallResult.Ok -> toast("Sent to Zeekr ✓")
+                                is CallResult.Err -> toast("Send failed: ${r.message}")
+                            }
+                        }
+                        finish()
+                    }
+                    .setNegativeButton("Cancel") { _, _ -> finish() }
+                    .setOnCancelListener { finish() }
+                    .show()
             }
         }
-        finish() // fire-and-forget; the toasts fire from the app scope after we're gone
     }
 
     private suspend fun toast(msg: String) = withContext(Dispatchers.Main) {

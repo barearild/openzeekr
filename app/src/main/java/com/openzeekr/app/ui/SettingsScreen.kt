@@ -73,6 +73,8 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
     var cfg by remember { mutableStateOf(store.current()) }
     var status by remember { mutableStateOf("") }
     var showHeroLab by remember { mutableStateOf(false) }
+    var confirmSignOut by remember { mutableStateOf(false) }
+    var confirmLogging by remember { mutableStateOf(false) }
 
     fun set(update: (SecretsConfig) -> SecretsConfig) { cfg = update(cfg) }
     val loggedIn = liveCfg.accessToken.isNotBlank()
@@ -133,10 +135,7 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                 }
             } else {
                 OutlinedButton(
-                    onClick = {
-                        store.update { it.copy(accessToken = "", userId = "") }
-                        cfg = store.current(); deps.onEndpointChanged(); status = "Signed out."
-                    },
+                    onClick = { confirmSignOut = true },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Sign out") }
             }
@@ -156,11 +155,16 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Debug logging", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                    Text("Record and show the on-device log.", color = Brand.muted, fontSize = 12.sp)
+                    Text("Records the on-device log. Exposes keys, tokens & VIN — keep off unless debugging.",
+                        color = Brand.muted, fontSize = 12.sp)
                 }
                 Switch(
                     checked = liveCfg.debugLogging,
-                    onCheckedChange = { on -> store.update { it.copy(debugLogging = on) }; Logx.setEnabled(on) },
+                    // Turning OFF is immediate; turning ON first shows the sensitive-data warning.
+                    onCheckedChange = { on ->
+                        if (on) confirmLogging = true
+                        else { store.update { it.copy(debugLogging = false) }; Logx.setEnabled(false) }
+                    },
                     colors = brandSwitchColors(),
                 )
             }
@@ -203,6 +207,62 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             }
         }
         Spacer(Modifier.height(16.dp))
+    }
+
+    if (confirmSignOut) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmSignOut = false },
+            title = { Text("Sign out?") },
+            text = {
+                Text(
+                    "This wipes your account (email, password, tokens, VIN) AND your digital key " +
+                        "from this phone, and revokes the key with the car. You'll need to log in and " +
+                        "re-provision to use it again.",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    confirmSignOut = false
+                    scope.launch {
+                        // Revoke + wipe the DK (cloud remove + local wipe + purge watch), then the account.
+                        runCatching { deps.provisioning.removeKey() }
+                        runCatching { com.openzeekr.app.wear.PhoneKeyPush.purgeWatches(ctx) }
+                        store.signOut()
+                        cfg = store.current(); deps.onEndpointChanged(); status = "Signed out."
+                    }
+                }) { Text("Sign out", color = Brand.crit) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (confirmLogging) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmLogging = false },
+            title = { Text("⚠️ Enable debug logging?") },
+            text = {
+                Text(
+                    "Debug logging writes detailed diagnostics to the on-device log — and that log " +
+                        "will contain SENSITIVE DATA: your digital-key material, session tokens, VIN, " +
+                        "device IDs and location. Anything with access to the app's logs could read it " +
+                        "and potentially unlock or track your car. (Your account password is NOT logged.)\n\n" +
+                        "Only turn this on if you're helping debug an issue, and turn it back off — and " +
+                        "clear the log — when you're done. Are you sure you want to continue?",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    confirmLogging = false
+                    store.update { it.copy(debugLogging = true) }
+                    Logx.setEnabled(true)
+                }) { Text("Enable logging", color = Brand.crit) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { confirmLogging = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

@@ -20,6 +20,21 @@ import kotlinx.serialization.json.Json
 object PhoneKeyPush {
     private const val TAG = "OZWearKey"
 
+    /** Tell any paired watch to purge its cached key (on Remove key / sign-out). Best-effort. */
+    fun purgeWatches(context: Context) {
+        val ctx = context.applicationContext
+        Wearable.getNodeClient(ctx).connectedNodes
+            .addOnSuccessListener { nodes ->
+                val mc = Wearable.getMessageClient(ctx)
+                nodes.forEach { node ->
+                    mc.sendMessage(node.id, WearKeyProtocol.PATH_PURGE, ByteArray(0))
+                        .addOnSuccessListener { Log.i(TAG, "purge sent to ${node.displayName}") }
+                        .addOnFailureListener { e -> Log.w(TAG, "purge to ${node.displayName} failed", e) }
+                }
+            }
+            .addOnFailureListener { e -> Log.w(TAG, "purge: connectedNodes failed", e) }
+    }
+
     fun pushToWatches(context: Context) {
         val ctx = context.applicationContext
         val blob = DkIdentity.get(ctx).exportCredentialBlob() ?: run {

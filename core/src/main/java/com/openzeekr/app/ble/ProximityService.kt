@@ -22,6 +22,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -41,19 +43,21 @@ class ProximityService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var loops: Job? = null
 
-    // Held ONLY while engaged (connecting / connected / session live). A FGS keeps the PROCESS alive
-    // but does NOT keep the CPU awake, and screen-off BLE work (RSSI polling, GATT callbacks) needs
-    // the CPU up — so we hold this during a live session. When idle we DON'T hold it: the
-    // hardware-offloaded presence scan (DkBleManager.armPresenceScan) watches for the car with the
-    // CPU asleep and wakes us via BleScanReceiver. That removes the always-on wakelock that drained
-    // the battery while parked at home. (Legacy path, presenceOffloadEnabled=false: held whenever we
-    // want a connection, i.e. continuously.)
+    // A FGS keeps the PROCESS alive but does NOT keep the CPU awake, and screen-off BLE work (RSSI
+    // polling, GATT callbacks, the handshake) needs the CPU up. Ownership is centralised in
+    // [manageWakeLock]: we hold it while BRINGING A SESSION UP (scanning/connecting/handshaking) and
+    // while the proximity controller says it needs the CPU (NEAR, or a FAR approach burst). We RELEASE
+    // it when parked-idle (offloaded presence scan wakes us CPU-asleep) and — crucially — while the car
+    // is connected but FAR + still, where the step detector wakes us the instant you start walking.
     private var wakeLock: android.os.PowerManager.WakeLock? = null
 
     // One-shot probe for the "app started right next to the car" case: FIRST_MATCH is edge-triggered
     // and may not fire for a car already in range when the offload scan is armed, so we do a single
     // foreground connect attempt the first time we go idle-with-offload.
     private var didInitialProbe = false
+    // When we last held a live/engaged link. Used to keep reconnecting aggressively (foreground) for a
+    // short window after a drop while you're moving — the walk-up case — vs. the slow offloaded scan.
+    private var lastEngagedMs = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -72,18 +76,12 @@ class ProximityService : Service() {
                 // which takes the BluetoothDevice from the live ScanResult (correct address type).
                 Logx.d("svc", "presence: car in range (saw $mac) — engaging via scan-connect")
                 deps.ble.disarmPresenceScan()
-                acquireWakeLock()
-                runCatching { deps.ble.connect(null) }
+                runCatching { deps.ble.connect(null) } // wakelock follows state via manageWakeLock
             }
             ACTION_ABSENT -> {
-                // MATCH_LOST. If we're not in a live session there's nothing to hold power for;
-                // the loop keeps the offload armed. A live session's walk-away lock is driven by the
-                // connected-RSSI controller / link-loss, not this coarse signal.
-                if (deps.ble.state.value == DkBleManager.State.IDLE ||
-                    deps.ble.state.value == DkBleManager.State.ERROR) {
-                    Logx.d("svc", "presence: car out of range and no session — releasing wakelock")
-                    releaseWakeLock()
-                }
+                // MATCH_LOST — the offloaded scan lost the car. Nothing to do: manageWakeLock releases
+                // the wakelock once we're IDLE, and keepConnected keeps the offload armed. A live
+                // session's walk-away lock is driven by the connected-RSSI controller, not this signal.
             }
         }
 
@@ -91,9 +89,29 @@ class ProximityService : Service() {
             loops = scope.launch {
                 launch { keepConnected(deps) }
                 launch { runApproach(deps) }
+                launch { onMotionEscalate(deps) }
+                launch { manageWakeLock(deps) }
             }
         }
         return START_STICKY
+    }
+
+    /**
+     * Single owner of the keep-alive wakelock. Hold it while BRINGING A SESSION UP (scan → connect →
+     * handshake all need the CPU) OR while the proximity controller needs it (NEAR, or a FAR approach
+     * burst). Release it otherwise — parked-idle (offload scan wakes us) and, importantly, connected but
+     * FAR + still, where the wake-up step detector is what breaks the sleep. [distinctUntilChanged] keeps
+     * us from re-acquiring/re-releasing on every tick.
+     */
+    private suspend fun manageWakeLock(deps: Deps) {
+        combine(deps.ble.state, deps.proximity.wakeLockNeeded) { st, controllerNeeds ->
+            val establishing = st == DkBleManager.State.SCANNING ||
+                st == DkBleManager.State.CONNECTING ||
+                st == DkBleManager.State.CONNECTED   // not yet SESSION_READY: still handshaking
+            establishing || controllerNeeds
+        }.distinctUntilChanged().collect { hold ->
+            if (hold) acquireWakeLock() else releaseWakeLock()
+        }
     }
 
     override fun onDestroy() {
@@ -152,36 +170,42 @@ class ProximityService : Service() {
                 val offload = deps.config.config.value.presenceOffloadEnabled
                 when (deps.ble.state.value) {
                     DkBleManager.State.IDLE, DkBleManager.State.ERROR -> {
-                        if (offload) {
-                            // Zero-CPU idle: let the controller watch for the car and wake us via
-                            // BleScanReceiver. Release the wakelock so a parked phone can sleep.
+                        // "Actively approaching" = moving AND we held a live link recently (the drop just
+                        // happened at range while you walked up). The LOW_POWER/STICKY offloaded scan is
+                        // meant for parked-still and is too slow to reconnect + handshake before you reach
+                        // the door — so here we do a fast FOREGROUND scan-connect instead. Bounded to
+                        // AGGRESSIVE_RECONNECT_MS since the last session so walking AWAY falls back to the
+                        // low-power scan once you're clearly gone.
+                        val moving = deps.motion.state.value == MotionMonitor.Motion.MOVING
+                        val recentlyEngaged = System.currentTimeMillis() - lastEngagedMs < AGGRESSIVE_RECONNECT_MS
+                        val aggressive = moving && recentlyEngaged
+                        if (offload && !aggressive) {
+                            // Zero-CPU idle: the offloaded scan watches for the car and wakes us via
+                            // BleScanReceiver. manageWakeLock releases the wakelock (nothing to hold for).
                             if (!didInitialProbe) {
                                 // First idle tick: the car may already be in range (app launched next
                                 // to it), where FIRST_MATCH won't fire — do one foreground probe.
                                 didInitialProbe = true
                                 Logx.d("svc", "keep-alive: initial presence probe (already-at-car case)")
-                                acquireWakeLock()
                                 runCatching { deps.ble.connect(null) }
                             } else {
                                 deps.ble.armPresenceScan()
-                                releaseWakeLock()
                             }
                         } else {
-                            // Legacy: keep a session up continuously (instant lock/unlock, stable RPA
-                            // link) at the cost of a permanently-held wakelock + foreground scan.
-                            acquireWakeLock()
-                            Logx.d("svc", "keep-alive: (re)connecting DK session")
+                            // Legacy (offload off), OR aggressive reconnect while walking up: foreground
+                            // scan-connect. manageWakeLock holds the wakelock across the connect + session.
+                            if (aggressive) Logx.d("svc", "keep-alive: moving + recent link — aggressive scan-connect (skip low-power offload)")
+                            else Logx.d("svc", "keep-alive: (re)connecting DK session")
                             runCatching { deps.ble.connect(null) }
                         }
                     }
-                    // Engaged (scanning/connecting/connected/session): CPU must stay up; the offload
-                    // scan is redundant while we hold a link, so drop it.
+                    // Engaged (scanning/connecting/connected/session): the offload scan is redundant while
+                    // we hold a link, so drop it. The wakelock is owned by manageWakeLock (held while
+                    // establishing, then handed to the proximity controller's need). We do NOT proactively
+                    // cycle the link — a genuine stall is caught reactively by the controller's liveness.
                     else -> {
-                        acquireWakeLock()
+                        lastEngagedMs = System.currentTimeMillis()
                         if (deps.ble.presenceArmed) deps.ble.disarmPresenceScan()
-                        // Re-probe on the next return to idle only if we actually had a session that
-                        // then dropped — a genuine walk-away leaves the car gone, so stay armed; but
-                        // reset the probe flag so a later fresh start still checks the at-car case.
                     }
                 }
             }
@@ -195,6 +219,32 @@ class ProximityService : Service() {
             val running = deps.proximity.state.value.running
             if (cfg.proximityEnabled && !running) runCatching { deps.proximity.start() }
             else if (!cfg.proximityEnabled && running) runCatching { deps.proximity.stop() }
+        }
+    }
+
+    /**
+     * Motion-triggered escalation (wakelock-free until it fires). The phone was still and just
+     * started moving ([MotionMonitor] hardware trigger) — a brisk approach can beat the offloaded
+     * FIRST_MATCH, so if we're idle (no live session) and Bluetooth is usable, briefly wake and run
+     * the proven scan-connect probe. If the car isn't in range the scan times out and [keepConnected]
+     * re-arms the offload scan + releases the wakelock on its next tick; if we're already engaged the
+     * controller handles cadence, so we do nothing. Only the still→moving EDGE fires, so a continuous
+     * walk is a single probe, not a storm.
+     */
+    private suspend fun onMotionEscalate(deps: Deps) {
+        var last = MotionMonitor.Motion.UNKNOWN
+        deps.motion.state.collect { m ->
+            val became = m == MotionMonitor.Motion.MOVING && last != MotionMonitor.Motion.MOVING
+            last = m
+            if (!became || !deps.ble.hasCredential || !deps.ble.bluetoothAvailable) return@collect
+            if (com.openzeekr.app.wear.WearLinkArbiter.linkSuspended.value) return@collect
+            when (deps.ble.state.value) {
+                DkBleManager.State.IDLE, DkBleManager.State.ERROR -> {
+                    Logx.d("svc", "motion: phone started moving — proactive scan-connect probe")
+                    runCatching { deps.ble.connect(null) } // wakelock follows state via manageWakeLock
+                }
+                else -> {} // already engaged/connecting — nothing to do
+            }
         }
     }
 
@@ -229,6 +279,10 @@ class ProximityService : Service() {
         private const val CHANNEL_ID = "proximity"
         private const val NOTIF_ID = 42
         private const val RECONNECT_INTERVAL_MS = 8_000L
+        // After a link drop, keep foreground-reconnecting (not the slow offloaded scan) while you're
+        // moving, for this long since the last live session — covers a walk-up where the link dropped at
+        // range; a genuine walk-away goes quiet (STILL) or ages out and falls back to the low-power scan.
+        private const val AGGRESSIVE_RECONNECT_MS = 30_000L
         /** While yielded to the watch, poll faster so we notice resume/expiry promptly. */
         private const val WATCH_YIELD_POLL_MS = 1_000L
 

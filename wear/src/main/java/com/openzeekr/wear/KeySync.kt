@@ -21,6 +21,13 @@ class KeySyncService : WearableListenerService() {
     override fun onMessageReceived(event: MessageEvent) {
         when (event.path) {
             WearKeyProtocol.PATH_KEY -> importKey(event)
+            WearKeyProtocol.PATH_PURGE -> {
+                Log.i(TAG, "watch purging cached key (phone removed / signed out)")
+                DkIdentity.get(this).wipeAll()
+                runCatching { com.openzeekr.app.ble.DkBleManager.get(this).disconnect() }
+                WearKeyState.status.value = "Key removed on phone"
+                WearKeyState.refresh(this)
+            }
             WearKeyProtocol.PATH_STATUS -> {
                 val m = runCatching { Json.decodeFromString<Map<String, String>>(String(event.data, Charsets.UTF_8)) }.getOrNull()
                 PhoneLink.onStatus(connected = m?.get("connected") == "1", prox = m?.get("prox") == "1")

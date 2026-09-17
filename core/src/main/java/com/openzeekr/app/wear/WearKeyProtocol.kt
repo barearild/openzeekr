@@ -12,6 +12,9 @@ object WearKeyProtocol {
     /** Phone → watch: the DK credential blob (JSON of [com.openzeekr.app.ble.DkIdentity.exportCredentialBlob]). */
     const val PATH_KEY = "/openzeekr/key"
 
+    /** Phone → watch: "the key was removed — purge your cached copy." (Sent on Remove key / sign-out.) */
+    const val PATH_PURGE = "/openzeekr/purge-key"
+
     // ---- BLE-link arbitration (the car allows only ONE peer, so watch and phone can't both
     // hold the DK session; the watch checks with the phone before touching the car) ----
 
