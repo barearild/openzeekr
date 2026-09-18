@@ -49,6 +49,36 @@ interface TspApi {
         @Body body: RemoteControlRequest,
     ): BaseResponse<RemoteControlResponse>
 
+    // ---- scheduled charging: "booking charge" off-peak windows (serviceId ZAZ) ----
+    // Same ms-charge-manage service, V2 "booking" plane. Body = ChargingBookingRequest
+    // {serviceId:"ZAZ", bookingDetailSetting{priorityToSoc, settings:[{id,sts,startTime,endTime}]}}.
+    // (stock VclEnergyApi.setChargingPlanV2 → ChargingPlanRequestV2Bean.)
+    @POST("ms-charge-manage/api/v2.0/charge/setBookingCharge")
+    suspend fun setChargeBooking(
+        @Body body: com.openzeekr.app.net.model.ChargingBookingRequest,
+    ): BaseResponse<RemoteControlResponse>
+
+    // Read the current booking-charge windows. `groupNumber` selects the plan group (stock passes an
+    // int; 0 = the default/first group). (stock VclEnergyApi.getChargingPlanV2.)
+    @GET("/ms-charge-manage/api/v2.0/charge/getBookingCharge")
+    suspend fun getChargeBooking(
+        @Query("groupNumber") groupNumber: Int = 0,
+    ): BaseResponse<com.openzeekr.app.net.model.ChargingBookingSetting>
+
+    // ---- departure / "booking travel" schedule (serviceId ZAO) ----
+    // Precondition (climate/preheat) by a departure time, optionally recurring per weekday.
+    // Body = SetTravelPlanRequest {command:start|edit|stop, serviceId:"ZAO", setting:BookingTravelSetting}.
+    // (stock VclEnergyApi.setTravelPlanV2.)
+    @POST("/ms-charge-manage/api/v2.0/charge/setTravelPlan")
+    suspend fun setTravelPlan(
+        @Body body: com.openzeekr.app.net.model.SetTravelPlanRequest,
+    ): BaseResponse<com.openzeekr.app.net.model.SetTravelPlanResponse>
+
+    // List the current departure schedules. Stock issues this as a POST with an EMPTY body
+    // (no @Body / no params). (stock VclEnergyApi.getTravelPlanV2 → List<BookingTravelSetting>.)
+    @POST("/ms-charge-manage/api/v2.0/charge/getTravelPlan")
+    suspend fun getTravelPlans(): BaseResponse<List<com.openzeekr.app.net.model.BookingTravelSetting>>
+
     // ---- vehicle status (VIN via X-VIN header) ----
     // Stock always sends latest=false & target=new; the gateway may 4xx without them.
     // `data` is returned as a raw JsonObject and mapped tolerantly (see

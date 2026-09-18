@@ -14,6 +14,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.openzeekr.app.Deps
 import com.openzeekr.app.DepsHolder
+import com.openzeekr.app.util.CarNotifier
 import com.openzeekr.app.util.Logx
 import com.openzeekr.core.R
 import kotlinx.coroutines.CoroutineScope
@@ -91,6 +92,8 @@ class ProximityService : Service() {
                 launch { runApproach(deps) }
                 launch { onMotionEscalate(deps) }
                 launch { manageWakeLock(deps) }
+                launch { pollCarMessages(deps) }
+                launch { observeCarAutoLock(deps) }
             }
         }
         return START_STICKY
@@ -248,6 +251,64 @@ class ProximityService : Service() {
         }
     }
 
+    /**
+     * Poll the car's message centre and raise a system notification (own channel) for anything new.
+     * There is no server push, so this is the delivery mechanism. On the first run we only *seed* the
+     * high-water mark (newest existing message) so we don't replay the whole history as alerts; after
+     * that, every message newer than the mark and still unread is posted via [CarNotifier]. The mark
+     * is persisted so a service restart doesn't re-notify. Guarded on being logged in/provisioned.
+     */
+    private suspend fun pollCarMessages(deps: Deps) {
+        val prefs = getSharedPreferences(CAR_MSG_PREFS, Context.MODE_PRIVATE)
+        var lastSeen = prefs.getLong(CAR_MSG_LAST_SEEN, 0L)
+        var seeded = lastSeen > 0L
+        while (scope.isActive) {
+            runCatching {
+                if (deps.config.config.value.overseasReady) {
+                    val res = deps.inbox.messages()
+                    if (res is com.openzeekr.app.remote.CallResult.Ok) {
+                        val msgs = res.value.filter { it.timeMs != null }
+                        val newest = msgs.maxOfOrNull { it.timeMs ?: 0L } ?: 0L
+                        if (!seeded) {
+                            seeded = true
+                        } else {
+                            msgs.filter { (it.timeMs ?: 0L) > lastSeen && !it.read }
+                                .sortedBy { it.timeMs }
+                                .forEach { CarNotifier.notify(this@ProximityService, it) }
+                        }
+                        if (newest > lastSeen) {
+                            lastSeen = newest
+                            prefs.edit().putLong(CAR_MSG_LAST_SEEN, lastSeen).apply()
+                        }
+                    }
+                }
+            }
+            delay(CAR_MSG_POLL_MS)
+        }
+    }
+
+    /**
+     * Surface the car's own walk-away auto-lock (DK 0x0159 APPROACHLOCK_NOTIFY, exposed by
+     * [com.openzeekr.app.ble.CarProximityController.autoLockEvents]) as a notification, so the user gets
+     * confirmation the safety-net fired ("the car locked itself as you walked away"). Only ever emits
+     * when the car actually reports an auto-lock, so this is silent unless it happens.
+     */
+    private suspend fun observeCarAutoLock(deps: Deps) {
+        deps.carProximity.autoLockEvents.collect {
+            val now = System.currentTimeMillis()
+            CarNotifier.notify(
+                this@ProximityService,
+                com.openzeekr.app.net.model.InboxMessage(
+                    id = "carlock-$now",
+                    title = "Car locked",
+                    body = "Your Zeekr locked itself as you walked away.",
+                    category = null, redirectUrl = null, imageUrl = null,
+                    timeMs = now, read = false,
+                ),
+            )
+        }
+    }
+
     private fun startInForeground() {
         createChannel()
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -285,6 +346,10 @@ class ProximityService : Service() {
         private const val AGGRESSIVE_RECONNECT_MS = 30_000L
         /** While yielded to the watch, poll faster so we notice resume/expiry promptly. */
         private const val WATCH_YIELD_POLL_MS = 1_000L
+        /** Car message-centre poll cadence (no server push, so we pull). */
+        private const val CAR_MSG_POLL_MS = 5 * 60 * 1000L
+        private const val CAR_MSG_PREFS = "car_notify"
+        private const val CAR_MSG_LAST_SEEN = "last_seen_ms"
 
         /** BleScanReceiver → service: the car's advert just entered range (FIRST_MATCH). */
         const val ACTION_PRESENT = "com.openzeekr.app.ble.PROX_PRESENT"

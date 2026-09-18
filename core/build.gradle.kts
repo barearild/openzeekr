@@ -70,6 +70,13 @@ dependencies {
     // Activity Recognition (proximity motion fallback when there's no hardware motion sensor)
     api("com.google.android.gms:play-services-location:21.3.0")
 
+    // FCM push (car message-centre alarms while the screen is off). NO google-services plugin /
+    // google-services.json — the default FirebaseApp auto-inits from the stock project's string
+    // resources (core/src/main/res/values/secrets_firebase.xml) via FirebaseInitProvider, which
+    // firebase-messaging pulls in transitively (firebase-common). `api` so :app inherits it.
+    api(platform("com.google.firebase:firebase-bom:33.5.1"))
+    api("com.google.firebase:firebase-messaging")
+
     // DK BLE crypto
     api("org.bouncycastle:bcprov-jdk18on:1.78.1")
     api("org.bouncycastle:bcpkix-jdk18on:1.78.1")

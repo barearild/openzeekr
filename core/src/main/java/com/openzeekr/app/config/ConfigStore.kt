@@ -77,6 +77,14 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
         )
     }
 
+    /**
+     * Enable/disable the car-side walk-away auto-lock safety net (runs IN PARALLEL with the
+     * always-on phone-side ProximityController). Persisted like any other config field; the
+     * [com.openzeekr.app.ble.CarProximityController] observes [config] and arms/idles accordingly.
+     */
+    fun setCarSideAutoLock(enabled: Boolean) =
+        update { it.copy(carSideAutoLock = enabled) }
+
     /** Re-apply the baked build defaults (secrets.properties), keeping device id. */
     fun resetToBuildDefaults() =
         persist(ensureDeviceId(SecretsConfig.fromBuildDefaults().copy(deviceIdentifier = _config.value.deviceIdentifier)))

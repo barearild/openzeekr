@@ -3,18 +3,24 @@ package com.openzeekr.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
@@ -29,8 +35,6 @@ import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -66,6 +70,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     VEHICLE("Vehicle", Icons.Filled.DirectionsCar),
     PARKING("Location", Icons.Filled.LocationOn),
     SECURITY("Security", Icons.Filled.Shield),
+    SCHEDULE("Schedule", Icons.Filled.CalendarMonth),
     KEY("Key", Icons.Filled.VpnKey),
     SETTINGS("Settings", Icons.Filled.Settings),
     // Sentry footage/live-view stays hidden (sentinel-monitoring-service is CN-only /
@@ -201,14 +206,34 @@ fun AppRoot(deps: Deps) {
             }
         },
         bottomBar = {
-            NavigationBar {
-                tabs.forEachIndexed { i, t ->
-                    NavigationBarItem(
-                        selected = tab == i,
-                        onClick = { tab = i },
-                        icon = { Icon(t.icon, contentDescription = t.label) },
-                        label = { Text(t.label) },
-                    )
+            // Custom, horizontally-scrollable bar: with 6+ tabs the stock NavigationBar squeezes labels
+            // until they wrap ("Schedul\ne"). Fixed-width, single-line items that scroll sideways keep
+            // every label intact on any screen width.
+            Column {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Brand.line))
+                Row(
+                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
+                        .horizontalScroll(rememberScrollState())
+                        .navigationBarsPadding()
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    tabs.forEachIndexed { i, t ->
+                        val selected = tab == i
+                        val tint = if (selected) Brand.accent else Brand.muted
+                        Column(
+                            Modifier.width(76.dp).clip(RoundedCornerShape(14.dp))
+                                .clickable { tab = i }.padding(vertical = 6.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            Icon(t.icon, t.label, tint = tint, modifier = Modifier.size(24.dp))
+                            Text(
+                                t.label, color = tint, fontSize = 11.sp, maxLines = 1,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        }
+                    }
                 }
             }
         },
@@ -219,6 +244,7 @@ fun AppRoot(deps: Deps) {
             Tab.VEHICLE -> VehicleScreen(deps, snackbar, m)
             Tab.PARKING -> ParkingScreen(deps, m)
             Tab.SECURITY -> SecurityScreen(deps, snackbar, m)
+            Tab.SCHEDULE -> ScheduleScreen(deps, snackbar, m)
             Tab.KEY -> androidx.compose.foundation.layout.Box(m) {
                 SetupScreen(
                     provisioning = deps.provisioning,

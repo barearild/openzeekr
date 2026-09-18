@@ -55,12 +55,18 @@ class DkProvisioning(
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; isLenient = true }
     private val api: DkApi by lazy {
         // BODY-level logging into the on-device log so cert/key-list request +
-        // response bodies (incl. any 4xx error body) are visible.
+        // response bodies (incl. any 4xx error body) are visible — but only while debug
+        // logging is on. With it off the level is NONE, so the sensitive cert/key material
+        // is never even formatted into a string.
         val httpLog = okhttp3.logging.HttpLoggingInterceptor { m -> Logx.d("http", m) }
-            .apply { level = okhttp3.logging.HttpLoggingInterceptor.Level.BODY }
         val ok = OkHttpClient.Builder()
             .addInterceptor(HeaderInterceptor(store))
             .addInterceptor(SignInterceptor(store))
+            .addInterceptor { chain ->
+                httpLog.level = if (Logx.isEnabled) okhttp3.logging.HttpLoggingInterceptor.Level.BODY
+                    else okhttp3.logging.HttpLoggingInterceptor.Level.NONE
+                chain.proceed(chain.request())
+            }
             .addInterceptor(httpLog)
             .build()
         Retrofit.Builder()
@@ -201,23 +207,32 @@ class DkProvisioning(
             if (dd.digitalKey.isNullOrBlank())
                 error("key-info returned no digitalKey after retries — share not fully bound/pushed yet")
 
-            identity.saveProvisioned(
-                certBase64 = cert, dkId = dkId, bookId = bookId ?: dd.bookId ?: "",
-                digitalKeyB64 = dd.digitalKey!!,
-                cmacKeyCertHex = dd.cmacKeyCert ?: "", coefSmallHex = dd.coefSmallParam ?: "", vin = vin,
-                coefBigHex = dd.coefBigParam ?: "", mobileCodeHex = dd.mobileCode ?: "",
-            )
-            identity.credential()?.let { ble.setCredential(it) }
-
-            // Match the stock app's flow exactly: fetch phone approach-coef (the one endpoint
-            // the working device hit that we didn't). Best-effort — not required for lock/unlock.
-            runCatching {
-                // Stock sends ONLY mobileBrand + mobileModel (Pixel 6a) — NO coefHash. Match it.
+            // 5. demarcate / phonecoef (ResponseNewDemarcateBean): the per-phone-model RSSI calibration
+            //    coefficients keyed by mobileBrand+mobileModel. key-info (DkInfoBean) usually already
+            //    carries coefBigParam/coefSmallParam/mobileCode, but if it came back blank we fall back
+            //    to these so the car can still range this phone for walk-away auto-lock. Best-effort;
+            //    stock sends ONLY mobileBrand + mobileModel (Pixel 6a), NO coefHash — match it.
+            val demarcate = runCatching {
                 val pc = api.phoneCoef(
                     com.openzeekr.app.net.ZeekrConst.XCHANGER_DEVICE_MANUFACTURE,
                     com.openzeekr.app.net.ZeekrConst.XCHANGER_DEVICE_MODEL, null)
-                Logx.d("provision", "step 5 phonecoef code=${pc.code}")
-            }.onFailure { Logx.w("provision", "phonecoef: ${it.message} (non-fatal)") }
+                Logx.d("provision", "step 5 phonecoef code=${pc.code} " +
+                    "coefBig=${pc.data?.coefBigParam?.length ?: 0} coefSmall=${pc.data?.coefSmallParam?.length ?: 0}")
+                pc.data
+            }.onFailure { Logx.w("provision", "phonecoef: ${it.message} (non-fatal)") }.getOrNull()
+
+            // Prefer the key-info value; fall back to the demarcate bean only when key-info was blank.
+            fun pick(primary: String?, fallback: String?): String =
+                primary?.takeIf { it.isNotBlank() } ?: (fallback ?: "")
+            identity.saveProvisioned(
+                certBase64 = cert, dkId = dkId, bookId = bookId ?: dd.bookId ?: "",
+                digitalKeyB64 = dd.digitalKey!!,
+                cmacKeyCertHex = dd.cmacKeyCert ?: "",
+                coefSmallHex = pick(dd.coefSmallParam, demarcate?.coefSmallParam), vin = vin,
+                coefBigHex = pick(dd.coefBigParam, demarcate?.coefBigParam),
+                mobileCodeHex = pick(dd.mobileCode, demarcate?.mobileCode),
+            )
+            identity.credential()?.let { ble.setCredential(it) }
 
             Logx.d("provision", "=== provision DONE dkId=$dkId ===")
             _state.value = State(Step.DONE, "dkId=$dkId" + (shareStatus?.let { " shareStatus=$it" } ?: " (owner)"))
@@ -371,7 +386,7 @@ interface DkApi {
         @Query("mobileBrand") mobileBrand: String,
         @Query("mobileModel") mobileModel: String,
         @Query("coefHash") coefHash: String?,   // null => omitted (stock sends no coefHash)
-    ): DkResp<kotlinx.serialization.json.JsonElement>
+    ): DkResp<DemarcateData>
 }
 
 @Serializable data class DkStatusData(val dkStatus: Int? = null)
@@ -398,4 +413,11 @@ interface DkApi {
     val digitalKey: String? = null, val cmacKeyCert: String? = null,
     val phoneCoef: String? = null, val mobileCode: String? = null,
     val coefSmallParam: String? = null, val coefBigParam: String? = null, val coefHash: String? = null,
+)
+
+/** ResponseNewDemarcateBean — the /phonecoef (demarcate) response: per-phone-model RSSI calibration
+ *  coefficients keyed by mobileBrand+mobileModel. Fallback source for coef when key-info is blank. */
+@Serializable data class DemarcateData(
+    val coefBigParam: String? = null, val coefSmallParam: String? = null,
+    val mobileCode: String? = null, val coefHash: String? = null, val phoneCoef: String? = null,
 )

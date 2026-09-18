@@ -75,5 +75,22 @@
                 <data android:scheme="wear" android:host="*" android:pathPrefix="/openzeekr/" />
             </intent-filter>
         </service>
+
+        <!-- FCM push: receives the car's message-centre pushes (security alarms, abnormal parking,
+             tow, charging, OTA) via the STOCK Firebase project (core secrets_firebase.xml). Data
+             messages reach onMessageReceived with the screen off; the 5-min inbox poll stays as a
+             fallback. -->
+        <service
+            android:name=".push.ZeekrFcmService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        <!-- Notification-payload pushes the SDK auto-displays in the background land on
+             CarNotifier's "car_alerts" channel. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="car_alerts" />
     </application>
 </manifest>

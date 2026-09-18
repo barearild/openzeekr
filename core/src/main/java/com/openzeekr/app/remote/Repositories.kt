@@ -392,3 +392,147 @@ class NavRepository(private val store: ConfigStore, private val client: ApiClien
         }
     }
 }
+
+/**
+ * Car-side schedules on the `ms-charge-manage` service (a SEPARATE plane from ms-remote-control,
+ * like the on-demand charge control). Two independent schedule types:
+ *
+ *  - SCHEDULED CHARGING — "booking charge" off-peak windows. serviceId "ZAZ". A single setting
+ *    object (priorityToSoc + a list of windows) that you overwrite wholesale (set/get).
+ *  - DEPARTURE / "booking travel" — CRUD list of precondition-by-departure-time plans.
+ *    serviceId "ZAO"; command "start"=create, "edit"=update, "stop"=delete (identify by btId).
+ *
+ * Shapes reconstructed clean-room from the stock `VclEnergyApi` retrofit interface and the
+ * `BookingTravelSetting`/`ChargingPlanRequestV2Bean` beans (see CHARGING_CONTROL_FINDINGS.md).
+ * Every call heartbeats first (as [RemoteControlRepository.send] does) so the TSP has us ONLINE.
+ */
+class ScheduleRepository(private val store: ConfigStore, private val client: ApiClient) {
+
+    // ---- scheduled charging (booking windows) ----
+
+    /** Read the current off-peak charge windows. [groupNumber] selects the plan group; the gateway
+     *  requires it to be >= 1 (groupNumber=0 → 400 "groupNumber必须大于等于1"), so 1 is the default. */
+    suspend fun chargingWindows(groupNumber: Int = 1): CallResult<com.openzeekr.app.net.model.ChargingBookingSetting> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                requireVin()
+                runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
+                val resp = client.api.getChargeBooking(groupNumber)
+                resp.data ?: com.openzeekr.app.net.model.ChargingBookingSetting(priorityToSoc = false, settings = emptyList())
+            }
+        }
+
+    /**
+     * Overwrite the off-peak charge windows (serviceId "ZAZ").
+     *
+     * IMPORTANT: this is a VEHICLE-RELAYED async op, not a cloud-DB write. The POST returns
+     * `{success:true, data:{sessionId}}` as soon as the op is QUEUED — it only actually applies
+     * (persists the `sts` enable) once the CAR is online/awake and acks it. There is no server
+     * push (no websocket/mqtt in the stock app), so the stock learns the result by POLLING; a bare
+     * HTTP 200 is NOT "saved". We heartbeat (RVS, hbType=3 — same as stock `ZeekrHeartbeatImpl.rvsService`)
+     * to nudge the car awake, then poll the readback to confirm the enable stuck. If it never sticks
+     * within the window the car is asleep/offline, so we return an honest error instead of a false ✓.
+     */
+    suspend fun setChargingWindows(setting: com.openzeekr.app.net.model.ChargingBookingSetting): CallResult<Unit> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                requireVin()
+                runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
+                val resp = client.api.setChargeBooking(
+                    com.openzeekr.app.net.model.ChargingBookingRequest(serviceId = SERVICE_ID_CHARGE, bookingDetailSetting = setting),
+                )
+                if (!resp.success && resp.data == null) error(resp.message ?: "charge schedule failed (code=${resp.code})")
+                // Confirm the car actually applied it (poll the readback until the enable matches).
+                val wantEnabledStarts = setting.settings.filter { it.sts == 1 }.map { it.startTime }.toSet()
+                val applied = pollUntil {
+                    val cur = client.api.getChargeBooking(1).data?.settings ?: emptyList()
+                    if (wantEnabledStarts.isEmpty()) cur.none { it.sts == 1 }
+                    else wantEnabledStarts.all { st -> cur.any { it.startTime == st && it.sts == 1 } }
+                }
+                if (!applied) error(CAR_ASLEEP)
+                Unit
+            }
+        }
+
+    // ---- departure / booking-travel schedules ----
+
+    /** List the current departure schedules (may be empty). */
+    suspend fun departures(): CallResult<List<com.openzeekr.app.net.model.BookingTravelSetting>> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                requireVin()
+                runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
+                client.api.getTravelPlans().data ?: emptyList()
+            }
+        }
+
+    /** Create a departure schedule (command "start"). btId is ignored server-side for a create. */
+    suspend fun createDeparture(setting: com.openzeekr.app.net.model.BookingTravelSetting): CallResult<Unit> =
+        sendTravel(CMD_CREATE, setting, verify = true)
+
+    /** Update an existing departure schedule (command "edit"); [setting].btId picks the entry. */
+    suspend fun updateDeparture(setting: com.openzeekr.app.net.model.BookingTravelSetting): CallResult<Unit> =
+        sendTravel(CMD_UPDATE, setting, verify = true)
+
+    /** Delete a departure schedule (command "stop"); [setting].btId picks the entry. */
+    suspend fun deleteDeparture(setting: com.openzeekr.app.net.model.BookingTravelSetting): CallResult<Unit> =
+        sendTravel(CMD_DELETE, setting, verify = false)
+
+    /**
+     * Same async, vehicle-relayed model as [setChargingWindows]: the POST only QUEUES the op
+     * (returns a sessionId); it applies only when the car is online/awake and acks it. We heartbeat
+     * (RVS) then, for create/edit, poll the readback until the plan is actually present with the
+     * requested state — otherwise the car is asleep and we return an honest error rather than a false ✓.
+     */
+    private suspend fun sendTravel(
+        command: String,
+        setting: com.openzeekr.app.net.model.BookingTravelSetting,
+        verify: Boolean,
+    ): CallResult<Unit> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                requireVin()
+                runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
+                val resp = client.api.setTravelPlan(
+                    com.openzeekr.app.net.model.SetTravelPlanRequest(command = command, serviceId = SERVICE_ID_TRAVEL, setting = setting),
+                )
+                // A travel op is accepted (queued) when the gateway returns success or a sessionId.
+                if (!resp.success && resp.data?.sessionId == null && resp.sessionId == null) {
+                    error(resp.message ?: "departure schedule failed (code=${resp.code})")
+                }
+                if (verify) {
+                    // Confirm the plan actually applied on the car (match by name + requested enable state).
+                    val applied = pollUntil {
+                        val plans = client.api.getTravelPlans().data ?: emptyList()
+                        plans.any { it.name == setting.name && it.sts == setting.sts }
+                    }
+                    if (!applied) error(CAR_ASLEEP)
+                }
+                Unit
+            }
+        }
+
+    private fun requireVin() = require(store.current().vin.isNotBlank()) { "VIN not configured" }
+
+    /** Poll [check] (tolerant of transient errors) every [delayMs] up to [attempts] times; true on
+     *  the first success. Used to confirm a queued schedule op actually landed on the vehicle. */
+    private suspend fun pollUntil(attempts: Int = 8, delayMs: Long = 2000L, check: suspend () -> Boolean): Boolean {
+        repeat(attempts) { i ->
+            if (runCatching { check() }.getOrDefault(false)) return true
+            if (i < attempts - 1) kotlinx.coroutines.delay(delayMs)
+        }
+        return false
+    }
+
+    private companion object {
+        const val SERVICE_ID_CHARGE = "ZAZ"   // booking-charge service id
+        const val SERVICE_ID_TRAVEL = "ZAO"   // booking-travel (departure) service id
+        const val CMD_CREATE = "start"
+        const val CMD_UPDATE = "edit"
+        const val CMD_DELETE = "stop"
+        const val CAR_ASLEEP =
+            "The car didn't confirm the schedule — it's asleep or offline. The cloud queued it but the " +
+                "car must be awake to store it. Wake the car (unlock it, open the Zeekr app, or plug it in " +
+                "to charge) and try again."
+    }
+}

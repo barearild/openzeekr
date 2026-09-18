@@ -231,6 +231,9 @@ fun SetupScreen(
                     color = Brand.faint, fontSize = 11.5.sp,
                 )
             }
+            // NOTE: the experimental CAR-side walk-away auto-lock toggle is intentionally hidden for now
+            // (it did nothing testable). The flag is force-disabled at startup in Deps, and the phone-side
+            // approach + the cloud out-of-range lock backstop below cover walk-away locking.
             Text(
                 "Runs a low-power scan, then connects & unlocks over the BLE key. Uses a foreground " +
                     "service — allow unrestricted background for reliability.",

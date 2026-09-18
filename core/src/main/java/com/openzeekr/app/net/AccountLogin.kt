@@ -45,23 +45,34 @@ class AccountLogin(private val store: ConfigStore) {
     /** user-center session token (from loginByEmailEncrypt), added to later UC calls. */
     @Volatile private var ucToken: String = ""
 
-    // Pipe OkHttp's HEADERS-level log into our on-device ring buffer too.
+    // Pipe OkHttp's HEADERS-level log into our on-device ring buffer too. Level is flipped to
+    // NONE when debug logging is off (via httpLogGate below), so nothing is formatted/logged then.
     private val httpLog = okhttp3.logging.HttpLoggingInterceptor { m -> Logx.d("http", m) }
-        .apply { level = okhttp3.logging.HttpLoggingInterceptor.Level.HEADERS }
+    // Runs just before httpLog and sets its level from the debug-logging toggle.
+    private val httpLogGate = okhttp3.Interceptor { chain ->
+        httpLog.level = if (Logx.isEnabled) okhttp3.logging.HttpLoggingInterceptor.Level.HEADERS
+            else okhttp3.logging.HttpLoggingInterceptor.Level.NONE
+        chain.proceed(chain.request())
+    }
 
     // user-center client: DEFAULT_HEADERS + X-HMAC-* (key = hmac_access/secret)
     private val ucClient = OkHttpClient.Builder()
         .addInterceptor(UcInterceptor())
+        .addInterceptor(httpLogGate)
         .addInterceptor(httpLog)
         .build()
     // TSP client: LOGGED_IN_HEADERS + X-SIGNATURE (key = prod_secret) — reuses the app transport
     private val tspClient = OkHttpClient.Builder()
         .addInterceptor(HeaderInterceptor(store))
         .addInterceptor(SignInterceptor(store))
+        .addInterceptor(httpLogGate)
         .addInterceptor(httpLog)
         .build()
     // xchanger (ECARX DK backend) client — plain; the authCode in the body is the auth.
-    private val xchangerClient = OkHttpClient.Builder().addInterceptor(httpLog).build()
+    private val xchangerClient = OkHttpClient.Builder()
+        .addInterceptor(httpLogGate)
+        .addInterceptor(httpLog)
+        .build()
 
     private inner class UcInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {

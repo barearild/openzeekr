@@ -55,6 +55,26 @@ class RealDkSession(
     /** 16-byte AES-CMAC key for RPA frames (ECIES-unwrapped once from the credential). */
     @Volatile private var cmacKeyCache: ByteArray? = null
 
+    /**
+     * Additive listeners for the car->phone 0x0159 APPROACHLOCK_NOTIFY event (see [onApproachLock]).
+     * Kept SEPARATE from the single [appHandler] slot (which RpaController owns via [onInbound]) so the
+     * experimental CAR-side proximity path can observe approach auto-lock without clobbering RPA.
+     */
+    private val approachLockListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    /**
+     * Calibration-refresh flags the car reports in the 0x0102 DK_STATUS (DigtalKeyStatusPayloadNew):
+     * after nSeq(2)‖ts(4) the payload is errCode(2)‖refreshBigData(2)‖refreshSmallData(2)‖selfRefreshData(2),
+     * all big-endian shorts (VERIFIED against DigtalKeyStatusPayloadNew.fromBin: offsets 6/8/10/12).
+     * A value of 0 means "car wants this calibration (re)uploaded" — stock (n0/g$e) uploads small when
+     * refreshSmallData==0 and big when refreshBigData==0. null = not captured yet. Cleared on [reset].
+     */
+    @Volatile private var refreshBigData: Int? = null
+    @Volatile private var refreshSmallData: Int? = null
+
+    /** True when the car's last 0x0102 DK_STATUS asked us to (re)upload the BIG calibration (refreshBigData==0). */
+    fun carWantsBigCalibration(): Boolean = refreshBigData == 0
+
     init { transport.onInbound(::onRawInbound) }
 
     // ---------------- handshake ----------------
@@ -191,8 +211,14 @@ class RealDkSession(
             throw IllegalStateException("0x0102 decrypt failed (wrong VIN or broadcastRnd?): ${e.message}")
         }
         val err = if (status.size >= 8) ((status[6].toInt() and 0xFF) shl 8) or (status[7].toInt() and 0xFF) else null
+        // DigtalKeyStatusPayloadNew: errCode@6, refreshBigData@8, refreshSmallData@10, selfRefreshData@12 (BE shorts).
+        // 0 = the car wants that calibration (re)uploaded. Capture so the calibration path can honor it.
+        if (status.size >= 12) {
+            refreshBigData = ((status[8].toInt() and 0xFF) shl 8) or (status[9].toInt() and 0xFF)
+            refreshSmallData = ((status[10].toInt() and 0xFF) shl 8) or (status[11].toInt() and 0xFF)
+        }
         Logx.d("dk", "handshake 0/5 DK_STATUS (initState=$initState) errCode=${err?.let { "0x%04x".format(it) } ?: "?"} " +
-            "status=${hexOf(status)}")
+            "refreshBig=${refreshBigData} refreshSmall=${refreshSmallData} status=${hexOf(status)}")
         return err
     }
 
@@ -327,6 +353,96 @@ class RealDkSession(
 
     override fun onInbound(handler: (Int, ByteArray) -> Unit) { appHandler = handler }
 
+    /**
+     * Register an additive listener for the car->phone 0x0159 APPROACHLOCK_NOTIFY event
+     * ("the car just auto-LOCKED because you walked away"). Independent of [onInbound] so it does
+     * not disturb the RPA inbound handler. Returns a lambda that unregisters it.
+     *
+     * NOTE: the notify is auto-LOCK ONLY and carries no distance/RSSI — there is no approach-UNLOCK
+     * counterpart in the protocol. See [CarProximityController].
+     */
+    fun onApproachLock(listener: () -> Unit): () -> Unit {
+        approachLockListeners.add(listener)
+        return { approachLockListeners.remove(listener) }
+    }
+
+    /**
+     * CAR-side proximity: upload the per-phone-model BIG RSSI-calibration coefficients (0x0171) so the
+     * car can range this phone and drive walk-away auto-lock itself.
+     *
+     * Byte layout (VERIFIED against stock `BigCalibrationPayload.toBin` + the sender loop in n0/g):
+     *   each package frame body = nSeq(2) ‖ ts(4) ‖ calibrationParam(slice) ‖ pakegeSum(2 BE) ‖ pakegeIndex(2 BE)
+     *   - PLAINTEXT (not GCM), GATT channel 1 (2A10) — ChnType.UUID1 in stock.
+     *   - pakegeSum = total package count (fixed for all frames); pakegeIndex = 1-based.
+     *   - 100 ms spacing between packages (stock Thread.sleep(0x64)).
+     *
+     * The coefficient bytes come from [DkCredential.coefBig] (cloud DkInfoBean.coefBigParam from
+     * key-info, hex-decoded). Must run AFTER the small-calibration handshake (0x0172/0x0173).
+     *
+     * REFRESH GATING (matches stock n0/g$e): stock only uploads big when the car's 0x0102 DK_STATUS
+     * reported `refreshBigData == 0` ("car wants the big data"). We honor that by default; pass
+     * [force] = true to upload regardless (e.g. a manual re-push). When the car did NOT ask
+     * ([carWantsBigCalibration] false and the flag was seen), we skip and return true (already in sync).
+     * Returns true when every package left the phone, or when correctly skipped as already-fresh.
+     */
+    suspend fun uploadBigCalibration(force: Boolean = false): Boolean {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "big calib: session not ready"); return false }
+        // Honor the car's refresh request: refreshBigData==0 means "upload it". A non-zero flag that we
+        // actually captured means the car already has fresh big data -> skip (return true = in sync).
+        if (!force && refreshBigData != null && refreshBigData != 0) {
+            Logx.d("dk", "big calib: car did not request refresh (refreshBigData=$refreshBigData) — already in sync, skipping")
+            return true
+        }
+        val cred = credentialProvider() ?: run { Logx.w("dk", "big calib: no credential"); return false }
+        val param = cred.coefBig
+        if (param.isEmpty()) {
+            Logx.w("dk", "big calib: coefBig is empty — need the cloud coefBigParam (DkInfoBean.coefBigParam from " +
+                "key-info, or the phonecoef/demarcate bean keyed by mobileBrand+mobileModel). Nothing uploaded.")
+            return false
+        }
+        val pkg = DkProtocol.BIG_CALIB_APP_CHUNK
+        val chunks = ArrayList<ByteArray>()
+        var off = 0
+        while (off < param.size) { val end = minOf(off + pkg, param.size); chunks.add(param.copyOfRange(off, end)); off = end }
+        val total = chunks.size
+        val pakegeSum = short2(total)
+        Logx.d("dk", "big calib: uploading ${param.size}B in $total package(s) of ≤${pkg}B on ch1")
+        for ((i, chunk) in chunks.withIndex()) {
+            if (!isEstablished) { Logx.w("dk", "big calib: link dropped before pkg ${i + 1}/$total"); return false }
+            val tail = chunk + pakegeSum + short2(i + 1)   // calibrationParam ‖ pakegeSum ‖ pakegeIndex(1-based)
+            if (!send(DkProtocol.CMD_A2V_BIG_CALIBRATION_DATA, tail)) {
+                Logx.w("dk", "big calib: write failed at pkg ${i + 1}/$total"); return false
+            }
+            if (i < total - 1) delay(100)                  // stock inter-package spacing (Thread.sleep 0x64)
+        }
+        Logx.d("dk", "big calib: upload complete ($total pkg)")
+        return true
+    }
+
+    /**
+     * Send a 0x0151 CUST_REQ custom command (the ONLY wire form for walk-away-lock / approach-unlock —
+     * there is no cloud/TSP path). Body (VERIFIED against stock CustomPayload.toBin + n0/g.D):
+     *   nSeq(2) ‖ ts(4) ‖ type(1) ‖ data(N) , GCM-encrypted, GATT channel 2 (ChnType.UUID2).
+     *
+     * @param type   [DkProtocol.CUST_TYPE_WALK_AWAY_LOCK] (0x02) or [DkProtocol.CUST_TYPE_APPROACH_UNLOCK] (0x01)
+     * @param enable true -> data=[0x01] (on), false -> data=[0x00] (off)
+     *
+     * Fire-and-forget: returns whether the GATT write left the phone. The car answers 0x0152 CUST_RESP
+     * (subCode 0x1000 = success), but we don't block on it here — the enable/disable is idempotent and
+     * re-asserted on the next session. Requires a live, established session.
+     */
+    suspend fun sendCustomCommand(type: Byte, enable: Boolean): Boolean {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "cust cmd: session not ready"); return false }
+        val tail = byteArrayOf(type, if (enable) DkProtocol.CUST_ENABLE else DkProtocol.CUST_DISABLE)
+        val ok = send(DkProtocol.CMD_A2V_CUST_REQ, tail)
+        Logx.d("dk", "cust cmd type=0x%02x data=%d (0x0151, ch2) write=%s".format(type, if (enable) 1 else 0, ok))
+        return ok
+    }
+
+    /** 2-byte big-endian short (pakegeSum / pakegeIndex), matching stock BytesUtil.short2Bytes. */
+    private fun short2(v: Int): ByteArray =
+        byteArrayOf(((v ushr 8) and 0xFF).toByte(), (v and 0xFF).toByte())
+
     override fun close() {
         reset()
         transport.close()
@@ -343,6 +459,7 @@ class RealDkSession(
      */
     fun reset() {
         isEstablished = false; cryptoReady = false; cmacKeyCache = null
+        refreshBigData = null; refreshSmallData = null
         pending.values.forEach { it.cancel() }; pending.clear()
     }
 
@@ -434,6 +551,16 @@ class RealDkSession(
         if (failFor != null) {
             Logx.w("dk", "${failFor.second}")
             pending[failFor.first]?.completeExceptionally(IllegalStateException(failFor.second))
+            return
+        }
+        // 0x0159 APPROACHLOCK_NOTIFY: car->phone, AES-GCM under the session key, EMPTY payload
+        // (base header nSeq||ts only — no distance/RSSI). Fire-and-forget "approach auto-LOCK happened".
+        // VERIFIED against stock q0/s (GCM-decrypt via CipherEngine + EmptyPayload) and the no-op stock
+        // handler (VehicleBleImpl$…$approachLockNotify$1.invokeSuspend just returns Unit). We fan it out
+        // to the approach-lock listeners instead of the no-op. There is NO approach-UNLOCK notify.
+        if (cmdId == DkProtocol.CMD_V2A_APPROACHLOCK_NOTIFY) {
+            Logx.d("dk", "0x0159 APPROACHLOCK_NOTIFY — car reported approach auto-LOCK (${approachLockListeners.size} listener(s))")
+            approachLockListeners.forEach { runCatching { it.invoke() } }
             return
         }
         // unsolicited (status / RPA challenge / result): hand the tail (after nSeq||ts) to the app

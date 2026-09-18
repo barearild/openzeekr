@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.1** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+**Version 0.1.2 (WIP)** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -62,6 +62,26 @@ token of appreciation is genuinely welcome (never expected):
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
 
 ## Changelog
+
+### 0.1.2 (work in progress)
+- **Fixed logging still leaking.** HTTP traffic was still being written to logcat even when
+  the debug-logging switch was **off** — the toggle is now honoured everywhere, so nothing is
+  logged unless you explicitly opt in.
+- **Push notifications from Zeekr, directly in OpenZeekr.** Hooked into Firebase so the app now
+  receives the car's message-centre pushes (security alarms, charging, service messages, …) and
+  displays them itself — no need to keep the official app running to get notified.
+- **Power trunk.** Added an option to power **open / close the trunk** remotely.
+- **Better walk-away lock.** Enhanced the phone-side walk-away lock logic, including a cloud
+  backstop so the car still gets locked if the BLE lock command can't be confirmed as you leave.
+- **Groundwork for car-driven walk-away lock.** Started on Zeekr's own **car-side** approach to
+  walk-away locking — the car locks itself when you walk away even if the app fails to send the
+  lock command, adding a redundant layer of security. Not finished/enabled yet.
+- **Scheduling UI (still broken).** Added UI elements for charge/departure scheduling. ⚠️ Saving
+  a schedule does **not** work yet — the screen is in, the commit path isn't.
+- **Nicer climate UI.** Improved the UI for climate **cooling / heating**.
+- **Seat ventilation detection (currently broken).** While improving how seat ventilation is
+  detected, we broke it in this build. The intent — and the fix in progress — is for the UI to
+  reflect **only the options your specific car actually supports**.
 
 ### 0.1.1
 - **Prevented log leakage when logging is off.** Debug logging is now truly silent unless

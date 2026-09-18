@@ -28,9 +28,10 @@ class ApiClient private constructor(private val store: ConfigStore) {
 
     private fun build(): Retrofit {
         // Route OkHttp logging into the on-device log (Logx) at BODY level so cloud
-        // request/response bodies are visible on-device while debugging.
+        // request/response bodies are visible on-device while debugging. The level is
+        // flipped to NONE when debug logging is off, so with the toggle off OkHttp never
+        // even formats request/response bodies (no tokens built into strings, nothing to leak).
         val logging = HttpLoggingInterceptor { m -> com.openzeekr.app.util.Logx.d("http", m) }
-            .apply { level = HttpLoggingInterceptor.Level.BODY }
         val ok = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
@@ -41,6 +42,13 @@ class ApiClient private constructor(private val store: ConfigStore) {
             // Signs the overseas-app inbox host with its own HMAC AK/SK (the two above
             // passthrough for that host); no-op for every other request.
             .addInterceptor(OverseasAppAuthInterceptor(store))
+            // Gate the logging level per-request (interceptor runs just before `logging`,
+            // which reads its level at the start of its own intercept()).
+            .addInterceptor { chain ->
+                logging.level = if (com.openzeekr.app.util.Logx.isEnabled)
+                    HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
+                chain.proceed(chain.request())
+            }
             .addInterceptor(logging)
             .build()
 

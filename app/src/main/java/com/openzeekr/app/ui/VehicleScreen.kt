@@ -36,10 +36,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.ViewColumn
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -102,6 +105,10 @@ import kotlinx.coroutines.launch
 @Composable
 fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+    // Remembered A/C target temperature: the car doesn't report the setpoint, so we persist the last
+    // value set in the climate sheet and use it for the home glyph (cool vs heat) + to seed the sheet.
+    var targetTemp by remember { mutableStateOf(readTargetTemp(ctx)) }
     val bleState by deps.ble.state.collectAsState()
     val bleReady = bleState == DkBleManager.State.SESSION_READY
 
@@ -132,14 +139,24 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
 
     // Home-screen climate glyph: while A/C runs, show whether it's cooling or heating the cabin —
     // compare interior temp to the target setpoint. Cooling → blue snowflake; heating → orange sun.
+    // The car doesn't report the setpoint, so use our remembered [targetTemp] (prefer the car's
+    // crSetTemp on the rare model that does report it).
     val acOn = climate?.acOn == true
+    val acTarget = climate?.crSetTemp?.toDoubleOrNull() ?: targetTemp
     val acHeating = acOn && run {
-        val set = climate?.crSetTemp?.toDoubleOrNull()
         val inside = climate?.interiorTemp?.toDoubleOrNull()
-        set != null && inside != null && inside < set
+        inside != null && inside < acTarget
     }
     val climateIcon = if (acHeating) Icons.Filled.WbSunny else Icons.Filled.AcUnit
     val climateTint = if (acHeating) Brand.energy else Brand.accent
+
+    // Windows quick-action tile reflects the car's real state (from winPos%): cracked → "Vent" (air
+    // glyph, accent), fully down → "Open" (energy), all closed → "Windows" (idle).
+    val windowsVenting = climate?.windowsVenting == true
+    val windowsOpen = climate?.windowsOpen == true
+    val windowIcon = if (windowsVenting) Icons.Filled.Air else Icons.Filled.ViewColumn
+    val windowLabel = when { windowsVenting -> "Vent"; windowsOpen -> "Open"; else -> "Windows" }
+    val windowTint = if (windowsVenting) Brand.accent else Brand.energy
 
     val locked = safety?.centralLockingStatus?.let { it == "1" } ?: true
     val charging = elec?.chargingActive == true
@@ -152,11 +169,19 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
 
     var showCharge by remember { mutableStateOf(false) }
     var showClimate by remember { mutableStateOf(false) }
+    var showWindows by remember { mutableStateOf(false) }
+    var showTrunk by remember { mutableStateOf(false) }
 
+    // On success also kick a spaced status-refresh burst so the on-screen state (lock/windows/charge/
+    // climate…) catches up once the car applies the command, instead of lagging to the next routine
+    // poll. Deduped inside the holder: overlapping commands replace the in-flight burst.
     fun fire(label: String, block: suspend () -> CallResult<*>) {
         snackbar("$label…")
         scope.launch {
-            when (val r = block()) { is CallResult.Ok -> snackbar("$label ✓"); is CallResult.Err -> snackbar("$label ✗ ${r.message}") }
+            when (val r = block()) {
+                is CallResult.Ok -> { snackbar("$label ✓"); deps.vehicleState.refreshAfterCommand() }
+                is CallResult.Err -> snackbar("$label ✗ ${r.message}")
+            }
         }
     }
     // Quiet variant for rapid in-modal adjustments (climate cabin: each seat/temp tweak is its own
@@ -164,18 +189,16 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     // "Climate ✓" toasts that landed after the sheet was already closed (debounced/late responses).
     fun fireQuiet(label: String, block: suspend () -> CallResult<*>) {
         scope.launch {
-            (block() as? CallResult.Err)?.let { snackbar("$label ✗ ${it.message}") }
+            when (val r = block()) {
+                is CallResult.Ok -> deps.vehicleState.refreshAfterCommand()
+                is CallResult.Err -> snackbar("$label ✗ ${r.message}")
+            }
         }
     }
+    // BLE-first (confirmed) then cloud fallback, via the shared dispatcher.
     fun door(lockIt: Boolean) {
         val n = if (lockIt) "Lock" else "Unlock"
-        if (bleReady) {
-            snackbar("$n (key)…")
-            scope.launch {
-                val ok = runCatching { if (lockIt) deps.lock.lock() else deps.lock.unlock() }.getOrDefault(false)
-                snackbar(if (ok) "$n ✓" else "$n ✗")
-            }
-        } else fire("$n (cloud)") { deps.control.send(if (lockIt) Command.LOCK else Command.UNLOCK) }
+        fire(n) { deps.vehicleControl.send(if (lockIt) Command.LOCK else Command.UNLOCK) }
     }
 
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
@@ -189,6 +212,9 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         Divider()
 
         Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            // Quick actions — 2 x 4. Actuating tiles route through deps.vehicleControl (BLE-first, cloud
+            // fallback). Trunk is ALWAYS shown (lock/unlock works even without a powered tailgate);
+            // powered "Open" appears inside the trunk sheet only when the car reports it.
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Ctl(if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen, if (locked) "Locked" else "Unlocked",
                     tint = if (locked) Brand.good else Brand.energy, active = true, modifier = Modifier.weight(1f)) { door(!locked) }
@@ -197,14 +223,21 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
                 // action) and the charge-port control all live there, so it must be reachable when
                 // unplugged too, not only mid-charge.
                 ChargeCtl(charging, plugged, soc, powerKw, Modifier.weight(1f)) { showCharge = true }
+                Ctl(windowIcon, windowLabel, tint = windowTint, active = windowsOpen, modifier = Modifier.weight(1f)) { showWindows = true }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Ctl(Icons.Filled.Campaign, "Flash + Honk", modifier = Modifier.weight(1f)) { fire("Flash + Honk") { deps.control.send(Command.FLASH_HORN) } }
-                // Frunk/tailgate shown only if the car reports the capability (per-VIN).
-                if (caps.frunk) Ctl(Icons.Filled.Inventory2, "Frunk", modifier = Modifier.weight(1f)) { fire("Frunk") { deps.control.send(Command.FRONT_TRUNK) } }
-                if (caps.tailgate) Ctl(Icons.Filled.Inventory2, "Trunk", modifier = Modifier.weight(1f)) { fire("Trunk") { deps.control.send(Command.TRUNK_OPEN) } }
-                // keep the 3-across row balanced when a control is hidden
-                repeat((if (caps.frunk) 0 else 1) + (if (caps.tailgate) 0 else 1)) { Spacer(Modifier.weight(1f)) }
+                // Combined locator: the ONE signal action the key session can fire directly (DK 0x03 =
+                // flash + honk together), so it's BLE-first (instant in range) with cloud fallback.
+                // Flash-only / Honk-only have NO BLE opcode, so those two always go via the cloud.
+                Ctl(Icons.Filled.Campaign, "Flash+Honk", modifier = Modifier.weight(1f)) { fire("Locate") { deps.vehicleControl.send(Command.FLASH_HORN) } }
+                Ctl(Icons.Filled.FlashOn, "Flash", modifier = Modifier.weight(1f)) { fire("Flash") { deps.vehicleControl.send(Command.FLASH) } }
+                Ctl(Icons.Filled.VolumeUp, "Honk", modifier = Modifier.weight(1f)) { fire("Honk") { deps.vehicleControl.send(Command.HONK) } }
+                Ctl(Icons.Filled.Inventory2, "Trunk", modifier = Modifier.weight(1f)) { showTrunk = true }
+            }
+            // Frunk only when the car reports a powered hood (per-VIN); its own row so the grid stays 4-wide.
+            if (caps.frunk) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Ctl(Icons.Filled.Inventory2, "Frunk", modifier = Modifier.weight(1f)) { fire("Frunk") { deps.vehicleControl.send(Command.FRONT_TRUNK) } }
+                Spacer(Modifier.weight(1f)); Spacer(Modifier.weight(1f)); Spacer(Modifier.weight(1f))
             }
         }
 
@@ -224,7 +257,20 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         onLimitSet = { pct -> deps.config.update { it.copy(chargeLimitPct = pct) } },
         onDismiss = { showCharge = false })
     if (showClimate) ClimateSheet(status?.additionalVehicleStatus?.climateStatus,
+        initialTemp = targetTemp, showSeatCool = caps.seatCool,
+        onTempChange = { t -> targetTemp = t; writeTargetTemp(ctx, t) },
         onCmd = { c, extra -> fireQuiet("Climate") { deps.control.send(c, extra) } }, onDismiss = { showClimate = false })
+    // Window/trunk actions close the sheet first, THEN fire — the snackbar host lives behind the modal
+    // sheet, so a toast raised while the sheet is open isn't visible until it's dismissed.
+    if (showWindows) WindowsSheet(
+        sunroof = caps.sunroof, sunshade = caps.sunshade,
+        windowsOpen = windowsOpen, windowsVenting = windowsVenting, sunroofOpen = climate?.sunroofOpen == true,
+        onCmd = { c, label -> showWindows = false; fire(label) { deps.vehicleControl.send(c) } },
+        onDismiss = { showWindows = false })
+    if (showTrunk) TrunkSheet(
+        poweredOpen = caps.tailgate,
+        onCmd = { c, label -> showTrunk = false; fire(label) { deps.vehicleControl.send(c) } },
+        onDismiss = { showTrunk = false })
 }
 
 @Composable
@@ -385,13 +431,83 @@ private fun ChargeSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ClimateSheet(climate: ClimateStatusVo?, onCmd: (Command, List<ServiceParameter>) -> Unit, onDismiss: () -> Unit) {
+private fun WindowsSheet(
+    sunroof: Boolean, sunshade: Boolean,
+    windowsOpen: Boolean, windowsVenting: Boolean, sunroofOpen: Boolean,
+    onCmd: (Command, String) -> Unit, onDismiss: () -> Unit,
+) {
+    val sheet = rememberModalBottomSheetState()
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Windows", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(when { windowsVenting -> "Venting"; windowsOpen -> "Open"; else -> "Closed" },
+                    color = if (windowsOpen) Brand.energy else Brand.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Filled = the current state (from winPos%): fully-down → Open, cracked → Vent, else Close.
+                StateBtn("Open", active = windowsOpen && !windowsVenting, Modifier.weight(1f)) { onCmd(Command.WINDOW_OPEN, "Windows open") }
+                StateBtn("Vent", active = windowsVenting, Modifier.weight(1f)) { onCmd(Command.WINDOW_VENT, "Windows vent") }
+                StateBtn("Close", active = !windowsOpen, Modifier.weight(1f), tint = Brand.good) { onCmd(Command.WINDOW_CLOSE, "Windows close") }
+            }
+            if (sunroof) {
+                Text("Sunroof", color = Brand.muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    StateBtn("Open", active = sunroofOpen, Modifier.weight(1f)) { onCmd(Command.SUNROOF_OPEN, "Sunroof open") }
+                    StateBtn("Close", active = !sunroofOpen, Modifier.weight(1f), tint = Brand.good) { onCmd(Command.SUNROOF_CLOSE, "Sunroof close") }
+                }
+            }
+            if (sunshade) {
+                Text("Sunshade", color = Brand.muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    GhostButton("Open", Modifier.weight(1f)) { onCmd(Command.SUNSHADE_OPEN, "Sunshade open") }
+                    GhostButton("Close", Modifier.weight(1f), tint = Brand.good) { onCmd(Command.SUNSHADE_CLOSE, "Sunshade close") }
+                }
+            }
+        }
+    }
+}
+
+/** Ghost button that becomes a filled PrimaryButton when it represents the current state. */
+@Composable
+private fun StateBtn(text: String, active: Boolean, modifier: Modifier = Modifier, tint: Color = Brand.accent, onClick: () -> Unit) {
+    if (active) PrimaryButton(text, modifier, tint = tint, onClick = onClick)
+    else GhostButton(text, modifier, tint = tint, onClick = onClick)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TrunkSheet(poweredOpen: Boolean, onCmd: (Command, String) -> Unit, onDismiss: () -> Unit) {
+    val sheet = rememberModalBottomSheetState()
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Trunk", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            // Lock/unlock work on virtually every car; powered "Open" only where the car reports it.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                GhostButton("Unlock", Modifier.weight(1f)) { onCmd(Command.TRUNK_UNLOCK, "Trunk unlock") }
+                GhostButton("Lock", Modifier.weight(1f), tint = Brand.good) { onCmd(Command.TRUNK_LOCK, "Trunk lock") }
+            }
+            if (poweredOpen) PrimaryButton("Open tailgate", Modifier.fillMaxWidth()) { onCmd(Command.TRUNK_OPEN, "Trunk open") }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ClimateSheet(
+    climate: ClimateStatusVo?,
+    initialTemp: Double,
+    showSeatCool: Boolean,
+    onTempChange: (Double) -> Unit,
+    onCmd: (Command, List<ServiceParameter>) -> Unit,
+    onDismiss: () -> Unit,
+) {
     // skipPartiallyExpanded → the sheet opens FULL height, so the whole cabin + the temperature bar
     // are visible at once (no half-height stop that hides the controls behind a swipe).
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // Target A/C temperature (°C): the car doesn't report the setpoint (only interiorTemp), so seed
-    // to 22.0 and keep the user's choice for the session.
-    var temp by remember { mutableStateOf(22.0) }
+    // from the remembered value and persist changes via [onTempChange] (used by the home glyph too).
+    var temp by remember { mutableStateOf(initialTemp) }
     // A/C ON + temperature as ONE explicit ZAF command (no reliance on AC_ON's base params + dedup).
     // WIRE value MUST be dot-decimal ("21.6"): the car rejects a locale comma ("21,6") — so format
     // AC.temp with Locale.US (fmt1 stays locale-aware, but only for on-screen display).
@@ -406,6 +522,7 @@ private fun ClimateSheet(climate: ClimateStatusVo?, onCmd: (Command, List<Servic
     var tempDirty by remember { mutableStateOf(false) }
     LaunchedEffect(temp) {
         if (!tempDirty) return@LaunchedEffect
+        onTempChange(temp) // persist immediately so the home glyph (cool vs heat) uses the new target
         delay(600)
         onCmd(Command.CLIMATE_ZAF, acOnParams())
     }
@@ -440,16 +557,16 @@ private fun ClimateSheet(climate: ClimateStatusVo?, onCmd: (Command, List<Servic
                 }
                 // front row — copper-trimmed console between the seats
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    SeatCabinTile("Driver", "11", climate?.drvHeatSts, climate?.drvVentDetail, Modifier.weight(1f), onCmd)
+                    SeatCabinTile("Driver", "11", climate?.drvHeatSts, climate?.drvVentDetail, showSeatCool, Modifier.weight(1f), onCmd)
                     Box(Modifier.width(20.dp).height(104.dp).clip(RoundedCornerShape(8.dp))
                         .background(Brush.verticalGradient(listOf(ZCopper.copy(alpha = .5f), ZConsole))))
-                    SeatCabinTile("Passenger", "19", climate?.passHeatingSts, climate?.passVentDetail, Modifier.weight(1f), onCmd)
+                    SeatCabinTile("Passenger", "19", climate?.passHeatingSts, climate?.passVentDetail, showSeatCool, Modifier.weight(1f), onCmd)
                 }
                 // rear row
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SeatCabinTile("Rear L", "21", climate?.rlHeatingSts, climate?.rlVentDetail, Modifier.weight(1f), onCmd)
+                    SeatCabinTile("Rear L", "21", climate?.rlHeatingSts, climate?.rlVentDetail, showSeatCool, Modifier.weight(1f), onCmd)
                     Spacer(Modifier.width(20.dp))
-                    SeatCabinTile("Rear R", "29", climate?.rrHeatingSts, climate?.rrVentDetail, Modifier.weight(1f), onCmd)
+                    SeatCabinTile("Rear R", "29", climate?.rrHeatingSts, climate?.rrVentDetail, showSeatCool, Modifier.weight(1f), onCmd)
                 }
             }
 
@@ -506,7 +623,7 @@ private val ZConsole = Color(0xFF2C322E)
  */
 @Composable
 private fun SeatCabinTile(
-    label: String, pos: String, seedHeat: String?, seedCool: String?,
+    label: String, pos: String, seedHeat: String?, seedCool: String?, showCool: Boolean,
     modifier: Modifier = Modifier, onCmd: (Command, List<ServiceParameter>) -> Unit,
 ) {
     var heat by remember(seedHeat) { mutableStateOf(seedHeat?.toIntOrNull() ?: 0) }
@@ -569,7 +686,8 @@ private fun SeatCabinTile(
                 SeatMiniBtn(Icons.Filled.Whatshot, heat, Brand.energy) {
                     val n = (heat + 1) % 4; heat = n; if (n > 0) cool = 0; sendHeat(n)
                 }
-                SeatMiniBtn(Icons.Filled.Air, cool, Brand.accent) {
+                // Cooled/ventilated seats only where the car advertises them (VehicleCapabilities.seatCool).
+                if (showCool) SeatMiniBtn(Icons.Filled.Air, cool, Brand.accent) {
                     val n = (cool + 1) % 4; cool = n; if (n > 0) heat = 0; sendCool(n)
                 }
             }
@@ -688,3 +806,20 @@ private fun rememberAssetBitmap(path: String): ImageBitmap? {
 
 private fun fmt(f: Float) = if (f % 1f == 0f) f.toInt().toString() else "%.1f".format(f)
 private fun fmt1(d: Double) = "%.1f".format(d)
+
+// Remembered A/C target temperature (°C). The car doesn't report the climate setpoint, so we keep the
+// last value the user set and use it for the home cool/heat glyph + to seed the climate sheet. Stored
+// in a tiny prefs file (per-viewer convenience); reads/writes are guarded so a locked/blocked store
+// never crashes the UI. Default 22.0.
+private const val CLIMATE_PREFS = "climate_prefs"
+private const val KEY_TARGET_TEMP = "target_temp_c"
+private fun readTargetTemp(ctx: android.content.Context): Double = runCatching {
+    ctx.getSharedPreferences(CLIMATE_PREFS, android.content.Context.MODE_PRIVATE)
+        .getFloat(KEY_TARGET_TEMP, 22f).toDouble()
+}.getOrDefault(22.0)
+private fun writeTargetTemp(ctx: android.content.Context, t: Double) {
+    runCatching {
+        ctx.getSharedPreferences(CLIMATE_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_TARGET_TEMP, t.toFloat()).apply()
+    }
+}

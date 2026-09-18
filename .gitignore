@@ -19,6 +19,10 @@
 secrets.json
 zeekr_secrets.json
 secrets.properties
+# Stock Firebase project config for FCM push — client config from the stock APK, kept local
+# only (see secrets_firebase.xml.example). Absent = FCM auto-init skips, push disabled.
+secrets_firebase.xml
+/core/src/main/res/values/secrets_firebase.xml
 # Release-signing config (passwords + keystore path) — keep local only.
 keystore.properties
 

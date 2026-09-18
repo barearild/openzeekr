@@ -66,6 +66,143 @@ data class RemoteControlResponse(
     val status: String? = null,
 )
 
+// ---------------------------------------------------------- schedules (charge + departure)
+//
+// Two car-side schedule types, both on the `ms-charge-manage` service (NOT ms-remote-control):
+//
+//  (a) SCHEDULED CHARGING — "booking charge" off-peak windows. serviceId "ZAZ".
+//      POST ms-charge-manage/api/v2.0/charge/setBookingCharge  body = ChargingBookingRequest
+//      GET  /ms-charge-manage/api/v2.0/charge/getBookingCharge?groupNumber=<n>  -> ChargingBookingSetting
+//      (stock: VclEnergyApi.setChargingPlanV2 / getChargingPlanV2; request bean
+//       ChargingPlanRequestV2Bean{serviceId,bookingDetailSetting:MultipleBookingChargingBean}).
+//
+//  (b) DEPARTURE / "booking travel" — precondition (climate/preheat) by a departure time,
+//      optionally recurring per weekday. serviceId "ZAO", command start|edit|stop (=create|update|delete).
+//      POST /ms-charge-manage/api/v2.0/charge/setTravelPlan  body = SetTravelPlanRequest
+//      POST /ms-charge-manage/api/v2.0/charge/getTravelPlan  (no body) -> List<BookingTravelSetting>
+//      (stock: VclEnergyApi.setTravelPlanV2 / getTravelPlanV2; request bean SetTravelPlanRequest).
+//
+// NOTE on `encodeDefaults = false` (see ApiClient): kotlinx-serialization SKIPS any property
+// whose value equals its declared default. So every field that MUST appear on the wire is declared
+// WITHOUT a default; only genuinely-optional nested blocks carry a `= null` / `= emptyList()` default
+// so they drop out when unused (matching the stock beans, which send the full object every time).
+
+// ---- (a) scheduled charging (booking windows) ----
+
+/** One off-peak charge window. Mirrors stock `MultipleBookingChargingSettingBean`
+ *  {id, sts, startTime, endTime}. `sts` = 1 enabled / 0 disabled; times are "HH:mm". */
+@Serializable
+data class ChargingWindow(
+    val id: Long,
+    val sts: Int,
+    val startTime: String,
+    val endTime: String,
+)
+
+/** The charge-booking payload. Mirrors stock `MultipleBookingChargingBean`
+ *  {priorityToSoc, settings}. `priorityToSoc` = whether the target-SOC wins over the window. */
+@Serializable
+data class ChargingBookingSetting(
+    val priorityToSoc: Boolean,
+    val settings: List<ChargingWindow>,
+)
+
+/** Body of `POST setBookingCharge`. Mirrors stock `ChargingPlanRequestV2Bean`
+ *  {serviceId, bookingDetailSetting}. serviceId is always "ZAZ" for booking charge. */
+@Serializable
+data class ChargingBookingRequest(
+    val serviceId: String,
+    val bookingDetailSetting: ChargingBookingSetting,
+)
+
+// ---- (b) departure / booking-travel schedule ----
+
+/** One weekday recurrence. Mirrors stock `CycleTime` {day, sts, time}. `day` is 0-based
+ *  (stock builds a 7-entry week, day 0..6); `sts` = 1 active / 0 inactive; time is "HH:mm:00". */
+@Serializable
+data class CycleTime(
+    val day: Int,
+    val sts: Int,
+    val time: String,
+)
+
+/** Cabin climate block of a departure plan (stock `CsSetting` {duration, sts, temp}). */
+@Serializable
+data class TravelClimateSetting(
+    val duration: Int,
+    val sts: Int,
+    val temp: String,
+)
+
+/** Per-zone seat heat/ventilation block (stock `HeatSetting`/`VentiSetting`
+ *  {duration, level, location, sts}). */
+@Serializable
+data class TravelSeatSetting(
+    val duration: Int,
+    val level: Int,
+    val location: Int,
+    val sts: Int,
+)
+
+/** Steering-wheel heat block (stock `WhlSetting` {duration, level, sts}; level nullable). */
+@Serializable
+data class TravelWheelSetting(
+    val duration: Int,
+    val level: Int? = null,
+    val sts: Int,
+)
+
+/** Fragrance block (stock `FragranceSetting` {channel, duration, level, sts}). */
+@Serializable
+data class TravelFragranceSetting(
+    val channel: Int,
+    val duration: Int,
+    val level: Int,
+    val sts: Int,
+)
+
+/**
+ * A departure/booking-travel entry. Mirrors stock `BookingTravelSetting`. Field order matches the
+ * stock bean's constructor. `btId` identifies an existing entry (0 = new). `sts` = 1 on / 0 off.
+ * `temporaryTime` is a one-off departure ("HH:mm:00" / date-time); `cycleTimes` holds the recurring
+ * weekly departures. `preHeatSts` toggles battery preheat. The climate/seat/wheel/fragrance blocks
+ * are optional and drop out of the JSON when unused.
+ */
+@Serializable
+data class BookingTravelSetting(
+    val btId: Int,
+    val name: String,
+    val sts: Int,
+    val displaySts: Int,
+    val bookingType: Int,
+    val temporaryTime: String,
+    val cycleTimes: List<CycleTime>,
+    val preHeatSts: Int,
+    val csSetting: TravelClimateSetting? = null,
+    val ventiSettings: List<TravelSeatSetting> = emptyList(),
+    val heatSettings: List<TravelSeatSetting> = emptyList(),
+    val whlSetting: TravelWheelSetting? = null,
+    val fragSetting: TravelFragranceSetting? = null,
+)
+
+/**
+ * Body of `POST setTravelPlan`. Mirrors stock `SetTravelPlanRequest`. serviceId is always "ZAO";
+ * `command` is "start" (create), "edit" (update) or "stop" (delete). Field order = the stock bean's
+ * declared order (command, serviceId, setting).
+ */
+@Serializable
+data class SetTravelPlanRequest(
+    val command: String,
+    val serviceId: String,
+    val setting: BookingTravelSetting,
+)
+
+/** Response of `setTravelPlan` — stock `SetTravelPlanResponse` {sessionId}. */
+@Serializable
+data class SetTravelPlanResponse(
+    val sessionId: String? = null,
+)
+
 // ------------------------------------------------------------------ auth
 
 @Serializable
@@ -534,16 +671,36 @@ data class EcarxControlResponse(
  * the list (endpoint unverified / offline) — in that case every flag reads true so we
  * "fail open" and show all controls rather than hiding everything.
  */
-data class VehicleCapabilities(val codes: Set<String>, val known: Boolean = true) {
+data class VehicleCapabilities(
+    val codes: Set<String>,
+    val known: Boolean = true,
+    /**
+     * Roof features fail CLOSED (optional hardware many cars — e.g. the Zeekr 7GT — simply don't
+     * have). Computed in [VehicleCapabilityParse.parse] from a POSITIVE indicator in the list;
+     * false when unknown/absent, so we never show a sunroof/sunshade the car lacks. Everything
+     * else keeps the fail-open [has] behaviour below.
+     */
+    val sunroofConfirmed: Boolean = false,
+    val sunshadeConfirmed: Boolean = false,
+    /** Cooled/ventilated seats — not all models have them. Fail CLOSED like the roof features: only
+     *  true when the capability list positively advertises seat ventilation. */
+    val seatCoolConfirmed: Boolean = false,
+) {
     private fun has(vararg keys: String): Boolean =
         !known || keys.any { k -> codes.any { it.contains(k, ignoreCase = true) } }
 
     val frunk get() = has("ZK_remote_hood_control", "hood")
     val tailgate get() = has("C_RDU_2", "trunk")
     val chargeCover get() = has("charging_cover", "charge_cover")
-    val sunroof get() = has("C_RWS_4", "sunroof")
+    // Sunroof/sunshade: fail CLOSED (see [sunroofConfirmed]/[sunshadeConfirmed]). The stock
+    // capability transform (com.zeekr.snc.iov.model.base.ModelTransformKt, VehicleFunctionBean
+    // switch) enables the sunroof control ONLY when functionCode "C_RWS_4" is present AND its
+    // paramValueUse (trimmed) == "Y" (sswitch_5), and the sunshade ONLY when functionCode
+    // "remote_control_curtain_2" is present (sswitch_10). A car without the key omits it entirely,
+    // so a fail-open has() would wrongly show these on cars that lack the hardware.
+    val sunroof get() = sunroofConfirmed
     val windows get() = has("remote_control_window")
-    val sunshade get() = has("curtain", "sunshade")
+    val sunshade get() = sunshadeConfirmed
     val engineRes get() = has("C_RES")
     val rpa get() = has("RPA")
     val sentry get() = has("sentry")
@@ -551,7 +708,12 @@ data class VehicleCapabilities(val codes: Set<String>, val known: Boolean = true
     val fragrance get() = has("fragrance")
     val climate get() = has("climate")
     val seatHeat get() = has("seat_heating")
-    val seatCool get() = has("seat_ventilation")
+    // Cooled seats — fail OPEN. A fail-CLOSED gate on functionCode "seat_ventilation"=Y wrongly hid
+    // this on cars (e.g. the 7GT) whose capability list doesn't carry that exact entry even though the
+    // hardware + control work fine. Show it when unknown, when ventilation is advertised, or when seat
+    // heating exists (ventilated-seat trims with heating also have cooling). A dead control on a bare
+    // model is better than a hidden one on a car that has it. ([seatCoolConfirmed] kept for reference.)
+    val seatCool get() = has("seat_ventilation") || seatHeat
     val steeringHeat get() = has("steering_wheel_heating")
     val charging get() = has("V_RCS", "RCS")
     val glovebox get() = has("storageBox_codeLock", "T_ZAP", "ZAD")
@@ -571,9 +733,27 @@ object VehicleCapabilityParse {
                 ?: data["data"] as? JsonArray ?: data.values.firstOrNull { it is JsonArray } as? JsonArray)
             else -> null
         } ?: return VehicleCapabilities.UNKNOWN
-        val codes = arr.mapNotNull { ((it as? JsonObject)?.get("functionCode") as? JsonPrimitive)?.contentOrNull }
+        val beans = arr.mapNotNull { it as? JsonObject }
+        val codes = beans.mapNotNull { (it["functionCode"] as? JsonPrimitive)?.contentOrNull }
             .filter { it.isNotBlank() }.toSet()
-        return if (codes.isEmpty()) VehicleCapabilities.UNKNOWN else VehicleCapabilities(codes)
+        if (codes.isEmpty()) return VehicleCapabilities.UNKNOWN
+        // Roof features — POSITIVE confirmation only (fail closed). Mirrors the stock
+        // ModelTransformKt VehicleFunctionBean switch:
+        //  - Sunroof (sswitch_5): functionCode "C_RWS_4" AND paramValueUse (trimmed) == "Y".
+        //  - Sunshade (sswitch_10): functionCode "remote_control_curtain_2" present (presence-only).
+        val sunroof = beans.any { o ->
+            (o["functionCode"] as? JsonPrimitive)?.contentOrNull == "C_RWS_4" &&
+                (o["paramValueUse"] as? JsonPrimitive)?.contentOrNull?.trim() == "Y"
+        }
+        val sunshade = codes.any { it.equals("remote_control_curtain_2", ignoreCase = true) }
+        // Cooled seats: functionCode "seat_ventilation" with paramValueUse (trimmed) == "Y".
+        val seatCool = beans.any { o ->
+            (o["functionCode"] as? JsonPrimitive)?.contentOrNull == "seat_ventilation" &&
+                (o["paramValueUse"] as? JsonPrimitive)?.contentOrNull?.trim() == "Y"
+        }
+        return VehicleCapabilities(
+            codes, sunroofConfirmed = sunroof, sunshadeConfirmed = sunshade, seatCoolConfirmed = seatCool,
+        )
     }
 }
 
@@ -669,6 +849,13 @@ data class ClimateStatusVo(
     val winStatusPassenger: String? = null,
     val winStatusPassengerRear: String? = null,
     val sunroofOpenStatus: String? = null,
+    // Position PERCENTAGE per window (0 = closed, 100 = fully open, 1–99 = partially open / vent).
+    // This is how the stock app tells "vent" from "open"; winStatus* above is only a coarse enum.
+    val winPosDriver: String? = null,
+    val winPosPassenger: String? = null,
+    val winPosDriverRear: String? = null,
+    val winPosPassengerRear: String? = null,
+    val sunroofPos: String? = null,
 ) {
     /** A/C running — preClimateActive is the authoritative on/off flag. */
     val acOn: Boolean get() = preClimateActive == true
@@ -676,6 +863,33 @@ data class ClimateStatusVo(
     /** Any seat heater on (level > 0 on any seat). */
     val seatHeatOn: Boolean get() = listOf(drvHeatSts, passHeatingSts, rlHeatingSts, rrHeatingSts)
         .any { (it?.toIntOrNull() ?: 0) > 0 }
+
+    // ---- Windows / sunroof state (drive the home tile + the Windows sheet) ----
+    // The stock app decides open/vent/closed from the POSITION percentage winPos* (0 = closed,
+    // 100 = fully open, 1–99 = partially open / vent) — see ModelTransformKt. winStatus* is only a
+    // coarse enum ("2" = closed), which can't tell vent from open. So we key off winPos* and fall
+    // back to the winStatus enum only when a position isn't reported.
+    private fun pct(s: String?): Int? = s?.trim()?.toIntOrNull()
+    private val sideWinPos get() = listOf(winPosDriver, winPosPassenger, winPosDriverRear, winPosPassengerRear)
+    private val haveWinPos get() = sideWinPos.any { pct(it) != null }
+    private fun winStatusOpen(s: String?): Boolean = !s.isNullOrBlank() && s != "0" && s != "2"
+
+    /** Any side window not fully closed. */
+    val windowsOpen: Boolean get() =
+        if (haveWinPos) sideWinPos.any { (pct(it) ?: 0) > 0 }
+        else listOf(winStatusDriver, winStatusDriverRear, winStatusPassenger, winStatusPassengerRear).any { winStatusOpen(it) }
+    /** Every open side window is only partially down (1–99 %) — ventilation, not fully lowered.
+     *  Needs winPos*; without positions we can't distinguish vent, so it reports false. */
+    val windowsVenting: Boolean get() {
+        if (!haveWinPos) return false
+        val open = sideWinPos.mapNotNull { pct(it) }.filter { it > 0 }
+        return open.isNotEmpty() && open.all { it < 100 }
+    }
+    /** Sunroof: prefer the position % (0 = closed); fall back to its own enum where a closed sunroof
+     *  reports sunroofOpenStatus = "1". */
+    val sunroofOpen: Boolean get() =
+        pct(sunroofPos)?.let { it > 0 }
+            ?: (!sunroofOpenStatus.isNullOrBlank() && sunroofOpenStatus != "0" && sunroofOpenStatus != "1")
 }
 
 /** Battery SOC / range / charging. */
@@ -813,6 +1027,11 @@ object VehicleStatus {
                             winStatusPassenger = c.str("winStatusPassenger"),
                             winStatusPassengerRear = c.str("winStatusPassengerRear"),
                             sunroofOpenStatus = c.str("sunroofOpenStatus"),
+                            winPosDriver = c.str("winPosDriver"),
+                            winPosPassenger = c.str("winPosPassenger"),
+                            winPosDriverRear = c.str("winPosDriverRear"),
+                            winPosPassengerRear = c.str("winPosPassengerRear"),
+                            sunroofPos = c.str("sunroofPos"),
                         )
                     },
                     drivingSafetyStatus = a.obj("drivingSafetyStatus")?.let { d ->

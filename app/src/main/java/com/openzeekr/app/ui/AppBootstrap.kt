@@ -56,6 +56,10 @@ fun AppBootstrap(deps: Deps, serviceEnabled: Boolean) {
         else maybeRequestBackgroundLocation(context, backgroundLauncher::launch)
 
         requestBatteryExemption(context)
+
+        // Register our FCM token with the message-centre so the car's pushes (esp. security alarms)
+        // arrive when the phone is asleep. No-op until logged in + the Firebase resources are present.
+        deps.push.registerIfLoggedIn()
     }
 
     // Keep the foreground key service running exactly while logged-in + provisioned,

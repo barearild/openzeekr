@@ -227,6 +227,8 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                         // Revoke + wipe the DK (cloud remove + local wipe + purge watch), then the account.
                         runCatching { deps.provisioning.removeKey() }
                         runCatching { com.openzeekr.app.wear.PhoneKeyPush.purgeWatches(ctx) }
+                        // Unregister our FCM push token from the message-centre before clearing the account.
+                        runCatching { deps.push.disableOnLogout() }
                         store.signOut()
                         cfg = store.current(); deps.onEndpointChanged(); status = "Signed out."
                     }

@@ -39,7 +39,7 @@ import kotlin.math.pow
  * which are what the single sensitivity knob tunes.
  */
 class ProximityController(
-    @Suppress("UNUSED_PARAMETER") appContext: android.content.Context,
+    private val appContext: android.content.Context,
     private val store: ConfigStore,
     private val lock: DkLockController,
     private val ble: DkBleManager,
@@ -48,6 +48,9 @@ class ProximityController(
     /** Cloud lock fallback (POST Command.LOCK). Returns true if the cloud accepted it. Injected by Deps
      *  so :core stays decoupled from the remote-control catalog; defaults to a no-op for tests. */
     private val cloudLock: suspend () -> Boolean = { false },
+    /** Cloud lock-state probe (GET vehicle status → centralLockingStatus). true=locked, false=unlocked,
+     *  null=unknown/failed. Used by the out-of-range cloud backstop so we only spend a lock when needed. */
+    private val cloudIsLocked: suspend () -> Boolean? = { null },
 ) {
     enum class Zone { UNKNOWN, FAR, NEAR }
     enum class Phase { PASSIVE, CONNECTING, MONITORING }
@@ -107,6 +110,9 @@ class ProximityController(
     private var lostReceding = false
     private var lostRssi: Int? = null
     private var walkAwayArmed = false
+    // Out-of-range cloud lock backstop fired for this link-loss (reset when the link returns / on start),
+    // so a single walk-away triggers at most one cloud status-check + lock.
+    private var cloudNetFired = false
 
     // ---- wakelock + two-state (NEAR/FAR) machine ----
     /** True whenever the proximity loop needs the CPU: NEAR (< 6 m, engaged) or a FAR approach burst.
@@ -131,7 +137,7 @@ class ProximityController(
         gattEma = null; nextIntervalMs = MONITOR_MID_MS
         inCarSinceMs = 0L; steadyRef = null; steadySinceMs = 0L; lastCadence = ""
         rssiNullStreak = 0; pingInFlight = false; pingFailStreak = 0; lastPingMs = 0L
-        linkLostAtMs = 0L; walkAwayArmed = false; lostReceding = false; lostRssi = null
+        linkLostAtMs = 0L; walkAwayArmed = false; lostReceding = false; lostRssi = null; cloudNetFired = false
         // Keep armedUnlocked as-is across start/stop toggles within a session isn't meaningful;
         // reset so a fresh monitor starts from a known state.
         armedUnlocked = false
@@ -149,7 +155,7 @@ class ProximityController(
                 farAsleep = false   // onSample sets it true only for FAR + still; cleared each tick
                 when (ble.state.value) {
                     DkBleManager.State.SESSION_READY, DkBleManager.State.CONNECTED -> {
-                        if (linkLostAtMs != 0L) { linkLostAtMs = 0L; walkAwayArmed = false }
+                        if (linkLostAtMs != 0L) { linkLostAtMs = 0L; walkAwayArmed = false; cloudNetFired = false }
                         // Unlocked at the car (NEAR): don't burn battery polling — idle until the car
                         // pushes a frame (activity = you moving/leaving) or the link drops. Hold the
                         // wakelock: this is the at-the-car case and the inbound-frame wake needs the CPU.
@@ -199,7 +205,7 @@ class ProximityController(
         ble.onInboundActivity = null; activityWake?.complete(Unit); activityWake = null
         motion.onMovingEdge = null; motionWake?.complete(Unit); motionWake = null
         motion.stop()
-        gattEma = null; linkLostAtMs = 0L; walkAwayArmed = false
+        gattEma = null; linkLostAtMs = 0L; walkAwayArmed = false; cloudNetFired = false
         inCarSinceMs = 0L; steadyRef = null; steadySinceMs = 0L; lastCadence = ""
         rssiNullStreak = 0; pingInFlight = false; pingFailStreak = 0; lastPingMs = 0L
         farAsleep = false; nearRefDist = null; _wakeLockNeeded.value = false
@@ -219,6 +225,17 @@ class ProximityController(
             walkAwayArmed = armedUnlocked
             Logx.d("prox", "link down (lastRssi=$lostRssi armed=$armedUnlocked) " +
                 "-> ${if (walkAwayArmed) "arming walk-away lock (lock if no reconnect in ${LINK_LOSS_LOCK_DELAY_MS}ms)" else "not armed — idle"}")
+            // Out-of-range CLOUD backstop (extra hardening). When the BLE link drops as a genuine
+            // walk-away — last sample receding or already far — but we did NOT unlock it ourselves (so the
+            // BLE walk-away-lock path above won't run), verify over the cloud that the car is actually
+            // locked and, if not, issue a cloud lock. Holds its own ~20s wakelock so the check survives the
+            // CPU trying to sleep right after the drop. Fires once per link-loss.
+            val lockThresh = store.current().sensitivityLockRssi
+            val outOfRange = lostReceding || (lostRssi?.let { it <= lockThresh } == true)
+            if (!armedUnlocked && outOfRange && !cloudNetFired) {
+                cloudNetFired = true
+                cloudLockSafetyNet("out-of-range")
+            }
             gattEma = null
             inCarSinceMs = 0L; steadyRef = null; steadySinceMs = 0L; lastCadence = ""
         rssiNullStreak = 0; pingInFlight = false; pingFailStreak = 0; lastPingMs = 0L
@@ -507,6 +524,56 @@ class ProximityController(
         }
     }
 
+    /**
+     * Out-of-range CLOUD lock backstop. Runs when the BLE link drops as a walk-away that the BLE
+     * walk-away-lock path won't cover (we didn't unlock it). Holds a dedicated ~20s wakelock so the
+     * check completes even as the CPU tries to suspend after the drop, waits [LINK_LOSS_LOCK_DELAY_MS]
+     * to let a transient drop reconnect, then: if the link is back → skip; else read the cloud lock
+     * state — if the car is already locked, do nothing; otherwise (unlocked or unknown) issue a cloud
+     * lock. Never leaves the car open on a missed lock. Idempotent: a cloud lock on an already-locked
+     * car is harmless, so "unknown" errs toward locking.
+     */
+    private fun cloudLockSafetyNet(reason: String) {
+        scope.launch {
+            val wl = acquireSafetyWakelock()
+            try {
+                delay(LINK_LOSS_LOCK_DELAY_MS)   // give a genuine transient drop time to reconnect
+                if (ble.state.value == DkBleManager.State.SESSION_READY) {
+                    Logx.d("prox", "$reason: link back before cloud check — skip"); return@launch
+                }
+                val locked = runCatching { cloudIsLocked() }.getOrNull()
+                Logx.d("prox", "$reason: cloud lock check -> " +
+                    (locked?.let { if (it) "LOCKED" else "unlocked" } ?: "unknown"))
+                if (locked == true) {
+                    _state.value = _state.value.copy(lastAction = "$reason · already locked ✓")
+                    return@launch
+                }
+                val ok = runCatching { cloudLock() }.getOrDefault(false)
+                Logx.d("prox", "$reason: car ${if (locked == false) "unlocked" else "state unknown"} " +
+                    "-> cloud lock ${if (ok) "ok" else "FAILED"}")
+                _state.value = _state.value.copy(
+                    lastAction = "$reason · ${if (ok) "cloud-locked ✓" else "LOCK FAILED ✗"}",
+                )
+            } finally {
+                releaseSafetyWakelock(wl)
+            }
+        }
+    }
+
+    /** A short, self-releasing partial wakelock so the out-of-range cloud check/lock survives the CPU
+     *  trying to suspend right after a BLE drop. Times out on its own; we also release in a finally. */
+    private fun acquireSafetyWakelock(): android.os.PowerManager.WakeLock? = runCatching {
+        val pm = appContext.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+        pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "openzeekr:cloud-oor-lock").apply {
+            setReferenceCounted(false)
+            acquire(CLOUD_NET_WAKELOCK_MS)
+        }
+    }.getOrNull()
+
+    private fun releaseSafetyWakelock(wl: android.os.PowerManager.WakeLock?) {
+        runCatching { if (wl?.isHeld == true) wl.release() }
+    }
+
     /** Tear the link down and re-establish it (reuse the KNOWN device, no rescan), for the unlock loop. */
     private suspend fun resetLink() {
         Logx.d("prox", "unlock: resetting the BLE link")
@@ -638,6 +705,9 @@ class ProximityController(
         private const val ALPHA_FAST = 0.6
         private const val ALPHA_SLOW = 0.35
         private const val LINK_LOSS_LOCK_DELAY_MS = 5_000L
+        // Out-of-range cloud lock backstop: hold the CPU up to ~20s (drop-settle delay + status GET +
+        // lock command) so the check completes even as the phone tries to sleep after a walk-away drop.
+        private const val CLOUD_NET_WAKELOCK_MS = 20_000L
         // Approach-unlock BT-reset retry: time to let a teardown settle to IDLE, and to wait for
         // the fresh session to come up before the second (final) unlock attempt.
         private const val RESET_SETTLE_MS = 1_500L
