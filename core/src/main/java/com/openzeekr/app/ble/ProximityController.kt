@@ -433,8 +433,12 @@ class ProximityController(
             needToUnlock = false
             unlockJob?.cancel(); unlockJob = null
         }
-        // LOCK: far enough AND receding, and currently unlocked-by-us.
-        if (armedUnlocked && smoothed <= lockThresh && receding) {
+        // LOCK: crossed to FAR while unlocked-by-us. We do NOT require a `receding` trend anymore -
+        // a fast/clean walk-away can cross the FAR threshold without a smooth downward trend, and for
+        // LOCK we bias toward always securing the car (precision does not matter; the NEAR/FAR
+        // hysteresis gap already prevents flapping at the door). Firing here, while still connected,
+        // is the offline path: the DK lock goes over BLE - no cloud needed.
+        if (armedUnlocked && smoothed <= lockThresh) {
             armedUnlocked = false
             Logx.d("prox", "walk-away-lock (rssi=$smoothed ~${"%.1f".format(dist)}m)")
             startLockLoop("walk-away-lock")
@@ -723,7 +727,13 @@ class ProximityController(
         // silence longer than it = "settled" (idle, event-wait). And the safety re-check period while
         // idle — one RSSI read that catches a rare drift-away with no car pushes.
         private const val ARMED_ACTIVE_MS = 4_000L
-        private const val ARMED_IDLE_MAX_MS = 30_000L
+        // Safety re-check period while armed+idle. Kept SHORT so a walk-away is caught by an RSSI read
+        // while the link is still up - the only window a BLE lock can be sent (offline / no-LTE garage,
+        // where the after-link-drop cloud fallback is useless). Walking away drops through the FAR
+        // threshold over several seconds; a ~3s poll gets a valid far reading before the link dies. The
+        // battery cost is one RSSI read/~3s while you sit in the car unlocked - negligible; reliable
+        // walk-away lock is worth more (per the user). Was 30s, which missed the connected window.
+        private const val ARMED_IDLE_MAX_MS = 3_000L
         private const val MAX_UNLOCK_ATTEMPTS = 5          // bound so a walked-away/absent car can't spin
         private const val UNLOCK_SESSION_WAIT_MS = 8_000L  // wait for SESSION_READY before an attempt
         private const val UNLOCK_ACK_TIMEOUT_MS = 1_500L   // wait for the car's 0x0111 receipt
