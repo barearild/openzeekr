@@ -39,8 +39,9 @@ object Logx {
 
     private val clock = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
-    /** Areas that belong to the HTTP-logging category (gated by [httpOn]). */
-    private val HTTP_TAGS = setOf("http", "login", "net", "session", "tsp", "push")
+    /** Areas that belong to the HTTP-logging category (gated by [httpOn]) - cloud request/response
+     *  and cloud-side results: transport, auth, vehicle status, control acks, FCM push. */
+    private val HTTP_TAGS = setOf("http", "login", "net", "session", "tsp", "push", "status", "ctl", "fcm")
     /** Areas that belong to the BLE-logging category (gated by [bleOn]). */
     private val BLE_TAGS = setOf("ble", "carprox", "dk", "lock", "motion", "provision", "prox", "svc")
 

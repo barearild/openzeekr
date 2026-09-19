@@ -66,6 +66,9 @@ class AuthRepository(private val store: ConfigStore, private val client: ApiClie
 
 class RemoteControlRepository(private val store: ConfigStore, private val client: ApiClient) {
 
+    /** Last status key-structure we logged; used to dump the schema only when it changes (not per poll). */
+    private var lastStatusKeyTree: String? = null
+
     /** Fire a catalog command. Physical-actuation ids (RDU_2/RDL_2/RDO/RDC) route through
      *  the ecarx device-api transport (System B); everything else through /ms-remote-control. */
     suspend fun send(cmd: Command, extraParams: List<ServiceParameter> = emptyList()): CallResult<RemoteControlResponse> =
@@ -116,9 +119,14 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
             runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
             val resp = client.api.vehicleStatus()
             val obj = resp.data ?: error(resp.message ?: "status failed (code=${resp.code})")
-            // PII-safe: log only the key structure (names, never values like VIN/GPS/SOC)
-            // so an unexpected shape can be diagnosed from the on-device debug log.
-            com.openzeekr.app.util.Logx.d("status", "keys=${VehicleStatus.keyTree(obj)}")
+            // PII-safe: log only the key STRUCTURE (names, never values like VIN/GPS/SOC) so an
+            // unexpected shape can be diagnosed. The schema is static across polls, so log it only
+            // when it first appears or actually changes - re-dumping the whole tree every poll spams.
+            val keyTree = VehicleStatus.keyTree(obj)
+            if (keyTree != lastStatusKeyTree) {
+                lastStatusKeyTree = keyTree
+                com.openzeekr.app.util.Logx.d("status", "keys=$keyTree")
+            }
             // `data` is a raw JsonObject; map it tolerantly (never throws on shape).
             VehicleStatus.parse(obj)
         }
