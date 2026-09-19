@@ -37,7 +37,8 @@ enum class Command(
     LOCK("Lock", Category.DOORS, "RDL", "start", listOf(ServiceParameter("door", "all"))),
     // Power tailgate OPEN is RDU_2/start (System-B "ActionControl") — NOT the latch
     // unlock RDU/stop, which only releases the lock and does not power the tailgate up.
-    // Trunk LOCK is RDL_2/start. (TRUNK_UNLOCK kept for completeness / latch-only release.)
+    // Trunk LOCK is RDL_2/start - on a POWERED tailgate this is also the "close" action (the stock app
+    // toggles RDU_2 open / RDL_2 close by trunkOpenStatus). TRUNK_UNLOCK = latch-only pop (non-powered).
     TRUNK_OPEN("Open Trunk", Category.DOORS, "RDU_2", "start", listOf(ServiceParameter("target", "trunk"))),
     TRUNK_UNLOCK("Unlock Trunk", Category.DOORS, "RDU", "stop", listOf(ServiceParameter("target", "trunk"))),
     TRUNK_LOCK("Lock Trunk", Category.DOORS, "RDL_2", "start", listOf(ServiceParameter("target", "trunk"))),

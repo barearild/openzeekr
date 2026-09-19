@@ -166,6 +166,9 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     val rangeStr = elec?.distanceToEmptyOnBatteryOnly?.takeIf { it.isNotBlank() && it != "0" }
         ?: status?.basicVehicleStatus?.distanceToEmpty
     val powerKw = elec?.chargePowerW?.let { it / 1000.0 }
+    // Trunk tile reflects the car's real state (trunkOpenStatus: "0"=closed, non-zero=open):
+    // open -> highlighted "Open" (energy), closed -> idle "Trunk".
+    val trunkOpen = safety?.trunkOpenStatus?.let { it.isNotBlank() && it != "0" } ?: false
 
     var showCharge by remember { mutableStateOf(false) }
     var showClimate by remember { mutableStateOf(false) }
@@ -216,9 +219,9 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         Divider()
 
         Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            // Quick actions — 2 x 4. Actuating tiles route through deps.vehicleControl (BLE-first, cloud
-            // fallback). Trunk is ALWAYS shown (lock/unlock works even without a powered tailgate);
-            // powered "Open" appears inside the trunk sheet only when the car reports it.
+            // Quick actions - 2 x 4. Actuating tiles route through deps.vehicleControl (BLE-first, cloud
+            // fallback). Trunk is ALWAYS shown; the sheet offers Open/Close on a powered tailgate, else
+            // latch unlock/lock. The tile reflects the live open/closed state (trunkOpen).
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Ctl(if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen, if (locked) "Locked" else "Unlocked",
                     tint = if (locked) Brand.good else Brand.energy, active = true, modifier = Modifier.weight(1f)) { door(!locked) }
@@ -236,7 +239,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
                 // honk-only action — the car only supports flash-only and flash+honk together.)
                 Ctl(Icons.Filled.Campaign, "Flash+Honk", modifier = Modifier.weight(1f)) { fire("Locate") { deps.vehicleControl.send(Command.FLASH_HORN) } }
                 Ctl(Icons.Filled.FlashOn, "Flash", modifier = Modifier.weight(1f)) { fire("Flash") { deps.vehicleControl.send(Command.FLASH) } }
-                Ctl(Icons.Filled.Luggage, "Trunk", modifier = Modifier.weight(1f)) { showTrunk = true }
+                Ctl(Icons.Filled.Luggage, if (trunkOpen) "Open" else "Trunk", tint = Brand.energy, active = trunkOpen, modifier = Modifier.weight(1f)) { showTrunk = true }
             }
             // Frunk only when the car reports a powered hood (per-VIN); its own row so the grid stays 4-wide.
             if (caps.frunk) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -273,6 +276,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         onDismiss = { showWindows = false })
     if (showTrunk) TrunkSheet(
         poweredOpen = caps.tailgate,
+        trunkOpen = trunkOpen,
         onCmd = { c, label -> showTrunk = false; fire(label) { deps.vehicleControl.send(c) } },
         onDismiss = { showTrunk = false })
 }
@@ -481,17 +485,26 @@ private fun StateBtn(text: String, active: Boolean, modifier: Modifier = Modifie
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TrunkSheet(poweredOpen: Boolean, onCmd: (Command, String) -> Unit, onDismiss: () -> Unit) {
+private fun TrunkSheet(poweredOpen: Boolean, trunkOpen: Boolean, onCmd: (Command, String) -> Unit, onDismiss: () -> Unit) {
     val sheet = rememberModalBottomSheetState()
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surface) {
         Column(Modifier.padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Trunk", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            // Lock/unlock work on virtually every car; powered "Open" only where the car reports it.
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                GhostButton("Unlock", Modifier.weight(1f)) { onCmd(Command.TRUNK_UNLOCK, "Trunk unlock") }
-                GhostButton("Lock", Modifier.weight(1f), tint = Brand.good) { onCmd(Command.TRUNK_LOCK, "Trunk lock") }
+            Text(if (trunkOpen) "Currently open" else "Currently closed", color = Brand.muted, fontSize = 12.sp)
+            if (poweredOpen) {
+                // Powered tailgate: Open = RDU_2/start, Close = RDL_2/start (the stock app toggles by
+                // trunkOpenStatus - see TRUNK_CHARGEPORT_FINDINGS.md), so these are open/close, not latch.
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    GhostButton("Open", Modifier.weight(1f)) { onCmd(Command.TRUNK_OPEN, "Trunk open") }
+                    GhostButton("Close", Modifier.weight(1f), tint = Brand.good) { onCmd(Command.TRUNK_LOCK, "Trunk close") }
+                }
+            } else {
+                // No powered tailgate: only the latch unlock (pop) + lock are available.
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    GhostButton("Unlock", Modifier.weight(1f)) { onCmd(Command.TRUNK_UNLOCK, "Trunk unlock") }
+                    GhostButton("Lock", Modifier.weight(1f), tint = Brand.good) { onCmd(Command.TRUNK_LOCK, "Trunk lock") }
+                }
             }
-            if (poweredOpen) PrimaryButton("Open tailgate", Modifier.fillMaxWidth()) { onCmd(Command.TRUNK_OPEN, "Trunk open") }
         }
     }
 }
