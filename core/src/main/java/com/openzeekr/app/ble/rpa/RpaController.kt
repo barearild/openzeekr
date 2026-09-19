@@ -103,6 +103,12 @@ class RpaController(
         if (reqModeJob?.isActive == true) return
         reqModeJob = scope.launch {
             while (isActive) {
+                // Stop the moment the session is gone (e.g. the user turned Bluetooth off mid-session):
+                // don't keep polling a dead link forever.
+                if (!session.isEstablished) {
+                    fail(IllegalStateException("Bluetooth/link lost - remote parking stopped"))
+                    return@launch
+                }
                 runCatching {
                     val blk = block(RpaReq.CMD_RPA_REQ_MODE, RpaReq.CMD_NONE)
                     com.openzeekr.app.util.Logx.d("dk", "RPA REQ_MODE block=" +
@@ -230,7 +236,8 @@ class RpaController(
         val provider = rssi ?: return
         if (rssiJob?.isActive == true) return
         rssiJob = scope.launch {
-            while (isActive) {
+            // Stop when the session drops (Bluetooth off / link lost) instead of spinning a dead poll.
+            while (isActive && session.isEstablished) {
                 provider()?.let { reportRssi(it) }
                 delay(RpaConst.HEARTBEAT_MS)
             }

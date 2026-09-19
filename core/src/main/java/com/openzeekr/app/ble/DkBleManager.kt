@@ -13,7 +13,10 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanSettings
 import android.os.ParcelUuid
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import com.openzeekr.app.util.Logx
@@ -59,6 +62,52 @@ class DkBleManager(base: Context) : DkTransport {
         (appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     }
     val bluetoothAvailable: Boolean get() = adapter?.isEnabled == true
+
+    /**
+     * Whether the Bluetooth adapter is currently ON. Driven by [btStateReceiver] (ACTION_STATE_CHANGED)
+     * so retry/keep-alive loops can suspend while BT is off and resume when it comes back, instead of
+     * hammering a dead stack. Seeded from the live adapter state.
+     */
+    private val _adapterEnabled = MutableStateFlow(bluetoothAvailable)
+    val adapterEnabled: StateFlow<Boolean> = _adapterEnabled
+
+    /**
+     * Reacts to the user toggling Bluetooth. On OFF we tear the session down ONCE (the GATT binder is
+     * already dead - Android won't reliably deliver onConnectionStateChange(DISCONNECTED) in this case)
+     * and stop the offloaded scan, so nothing keeps retrying against a dead stack. On ON we just flip
+     * the flag; keep-alive (already gated on [bluetoothAvailable]) reconnects on its own.
+     */
+    private val btStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                    if (_adapterEnabled.value) {
+                        _adapterEnabled.value = false
+                        Logx.d("ble", "bluetooth turned OFF - tearing down session, stopping retries")
+                        runCatching { disconnect() }
+                        runCatching { disarmPresenceScan() }
+                    }
+                }
+                BluetoothAdapter.STATE_ON -> {
+                    if (!_adapterEnabled.value) {
+                        _adapterEnabled.value = true
+                        Logx.d("ble", "bluetooth turned ON - keep-alive may reconnect")
+                    }
+                }
+            }
+        }
+    }
+
+    init {
+        runCatching {
+            val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                appContext.registerReceiver(btStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else
+                appContext.registerReceiver(btStateReceiver, filter)
+        }.onFailure { Logx.w("ble", "bt state receiver register failed: ${it.message}") }
+    }
 
     // Wear OS BLE: Samsung's watch stack advertises hardware scan-batching as supported but often
     // never flushes it (no onBatchScanResults, no onScanFailed) — the scan just silently finds
@@ -111,6 +160,10 @@ class DkBleManager(base: Context) : DkTransport {
      */
     @SuppressLint("MissingPermission")
     fun pollRemoteRssi(): Int? {
+        // If Bluetooth is OFF (user toggled it, mid-session), don't even attempt the transact — a
+        // readRemoteRssi() on the now-dead IBluetoothGatt binder throws DeadObjectException and Android
+        // floods logcat ("Too many transaction errors"). Report null so callers treat it as a dead link.
+        if (!bluetoothAvailable || gatt == null) { lastRemoteRssi = null; rssiReadPending = false; return null }
         val initiated = runCatching { gatt?.readRemoteRssi() == true }.getOrDefault(false)
         if (!initiated) {
             // Dead binder / no GATT: the reading is meaningless. Drop the stale cache and report null.
