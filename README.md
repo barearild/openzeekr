@@ -2,9 +2,6 @@
 
 **Version 0.1.2** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
-> This app is vibecoded, as it still being actively developed and play around with it,
-> code haven't been checked against performance / bug / leaks / etc !!!
-
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
 > rough edges and changes without notice. **Support is best-effort** — this is not a
@@ -31,6 +28,9 @@ for interoperability and research.
 > fail for your market.
 
 ## ⚠️ Read this before you start
+
+> **This app is vibecoded, as it still being actively developed and play around with it,
+> code haven't been checked against performance / bug / leaks / etc !!!**
 
 > 🔐 **You can only be signed in on one app at a time.** The Zeekr cloud allows **one
 > active session per account** — signing into OpenZeekr signs you out of the official
