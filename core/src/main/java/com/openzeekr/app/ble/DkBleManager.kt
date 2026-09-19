@@ -83,6 +83,12 @@ class DkBleManager(base: Context) : DkTransport {
 
     // ---- live RSSI of the connected car (for the RPA proximity gate) ----
     @Volatile private var lastRemoteRssi: Int? = null
+    // True between initiating a readRemoteRssi and its onReadRemoteRssi callback. If a NEW read is
+    // initiated while this is still set, the PREVIOUS read never called back -> the link is wedged
+    // (its cached value is stale), so pollRemoteRssi reports null rather than a stale reading. This is
+    // what lets ProximityController's null-streak reconnect actually fire; a half-dead GATT
+    // (DeadObjectException on read, or a read that never calls back) otherwise looked "alive" forever.
+    @Volatile private var rssiReadPending = false
 
     /** Epoch-ms of the last inbound DK frame from the car. The car pushes status (0x121 VSTATUS_SYNC
      *  etc.) when the vehicle state CHANGES (movement/doors) — bursts with long silent gaps while
@@ -94,11 +100,26 @@ class DkBleManager(base: Context) : DkTransport {
      *  controller uses it to wake instantly from its unlocked idle-wait the moment the car speaks. */
     @Volatile var onInboundActivity: (() -> Unit)? = null
 
-    /** Trigger a remote-RSSI read on the live GATT and return the most recent value. */
+    /**
+     * Trigger a remote-RSSI read and return the value from the PREVIOUS read's callback (the read is
+     * async). Returns null when the link is not usable, so callers treat null as a liveness failure:
+     *  - the read can't be initiated (no GATT, or readRemoteRssi throws DeadObjectException / returns
+     *    false on a dead binder), or
+     *  - the PREVIOUS read never called back (rssiReadPending still set) -> the cached value is stale.
+     * A dead/half-dead GATT that never emits onConnectionStateChange(DISCONNECTED) used to keep
+     * returning the last good RSSI forever; now it surfaces as null and the null-streak reconnect fires.
+     */
     @SuppressLint("MissingPermission")
     fun pollRemoteRssi(): Int? {
-        runCatching { gatt?.readRemoteRssi() }
-        return lastRemoteRssi
+        val initiated = runCatching { gatt?.readRemoteRssi() == true }.getOrDefault(false)
+        if (!initiated) {
+            // Dead binder / no GATT: the reading is meaningless. Drop the stale cache and report null.
+            lastRemoteRssi = null; rssiReadPending = false
+            return null
+        }
+        val prevAnswered = !rssiReadPending   // did the previous read's callback land?
+        rssiReadPending = true
+        return if (prevAnswered) lastRemoteRssi else null
     }
 
     // ---- GATT state ----
@@ -454,6 +475,7 @@ class DkBleManager(base: Context) : DkTransport {
         gatt = null
         chWrite1 = null; chWrite2 = null; chNotify1 = null; chNotify2 = null
         reasm1.reset(); reasm2.reset()
+        lastRemoteRssi = null; rssiReadPending = false
         _state.value = State.IDLE
     }
 
@@ -476,6 +498,7 @@ class DkBleManager(base: Context) : DkTransport {
                 (session as? RealDkSession)?.reset()
                 chWrite1 = null; chWrite2 = null; chNotify1 = null; chNotify2 = null
                 reasm1.reset(); reasm2.reset()
+                lastRemoteRssi = null; rssiReadPending = false
                 val wasReady = _state.value == State.SESSION_READY
                 runCatching { g.close() }
                 gatt = null
@@ -523,6 +546,7 @@ class DkBleManager(base: Context) : DkTransport {
         }
 
         override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) {
+            rssiReadPending = false   // the read answered (success or not) -> link is alive
             if (status == BluetoothGatt.GATT_SUCCESS) lastRemoteRssi = rssi
         }
 

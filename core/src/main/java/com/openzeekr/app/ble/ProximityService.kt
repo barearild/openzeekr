@@ -93,7 +93,6 @@ class ProximityService : Service() {
                 launch { onMotionEscalate(deps) }
                 launch { manageWakeLock(deps) }
                 launch { pollCarMessages(deps) }
-                launch { observeCarAutoLock(deps) }
             }
         }
         return START_STICKY
@@ -284,28 +283,6 @@ class ProximityService : Service() {
                 }
             }
             delay(CAR_MSG_POLL_MS)
-        }
-    }
-
-    /**
-     * Surface the car's own walk-away auto-lock (DK 0x0159 APPROACHLOCK_NOTIFY, exposed by
-     * [com.openzeekr.app.ble.CarProximityController.autoLockEvents]) as a notification, so the user gets
-     * confirmation the safety-net fired ("the car locked itself as you walked away"). Only ever emits
-     * when the car actually reports an auto-lock, so this is silent unless it happens.
-     */
-    private suspend fun observeCarAutoLock(deps: Deps) {
-        deps.carProximity.autoLockEvents.collect {
-            val now = System.currentTimeMillis()
-            CarNotifier.notify(
-                this@ProximityService,
-                com.openzeekr.app.net.model.InboxMessage(
-                    id = "carlock-$now",
-                    title = "Car locked",
-                    body = "Your Zeekr locked itself as you walked away.",
-                    category = null, redirectUrl = null, imageUrl = null,
-                    timeMs = now, read = false,
-                ),
-            )
         }
     }
 

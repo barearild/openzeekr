@@ -110,17 +110,6 @@ data class SecretsConfig(
 
     // ---- proximity (RSSI-based approach-unlock / walk-away-lock) ----
     val proximityEnabled: Boolean = false,
-    /**
-     * Car-side walk-away auto-lock as a PARALLEL, redundant safety net alongside the phone-side
-     * approach engine — NOT an exclusive alternative. The phone-side
-     * [com.openzeekr.app.ble.ProximityController] always runs (it owns approach-UNLOCK and its own
-     * walk-away lock); when this is on, [com.openzeekr.app.ble.CarProximityController] ALSO runs in
-     * parallel: it uploads the RSSI calibration (0x0171/0x0172) so the vehicle's own firmware can
-     * range this phone and auto-LOCK if the phone-side lock ever fails (link drop / app killed /
-     * flaky RSSI). Lock is safety-critical, so having the car secure the vehicle too is pure upside.
-     * The "0x0159 is auto-LOCK only, no approach-UNLOCK" limitation is fine — lock is what we want.
-     */
-    val carSideAutoLock: Boolean = false,
     /** BLE MAC of the vehicle to range against (blank = strongest advertiser). */
     val proximityDeviceMac: String = "",
     /**

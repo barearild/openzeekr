@@ -5,7 +5,6 @@ import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkIdentity
 import com.openzeekr.app.ble.DkLockController
 import com.openzeekr.app.ble.DkProvisioning
-import com.openzeekr.app.ble.CarProximityController
 import com.openzeekr.app.ble.PhoneStatusProvider
 import com.openzeekr.app.ble.ProximityController
 import com.openzeekr.app.ble.rpa.RpaController
@@ -81,17 +80,6 @@ class Deps(context: Context) {
                 ?.let { it == "1" }
         },
     )
-    /**
-     * Car-side walk-away auto-lock — a PARALLEL, redundant safety net that runs ALONGSIDE the always-on
-     * phone-side [proximity] (not instead of it). When config.carSideAutoLock is on it uploads RSSI
-     * calibration so the car's own firmware can auto-LOCK on walk-away too, and surfaces the car's
-     * 0x0159 auto-lock events. Self-gates on the toggle, so starting it here is always safe: it idles
-     * until config.carSideAutoLock is turned on in Settings (Passive entry), so this is a no-op for
-     * users who leave it off.
-     */
-    val carProximity = CarProximityController(config, ble, appScope)
-        .also { it.start() }
-
     /** Call after the base URL / sign algo changes so the HTTP client rebuilds. */
     fun onEndpointChanged() = apiClient.rebuild()
 }
