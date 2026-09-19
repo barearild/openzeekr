@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.2 (WIP)** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+**Version 0.1.2** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -65,7 +65,7 @@ token of appreciation is genuinely welcome (never expected):
 
 ## Changelog
 
-### 0.1.2 (work in progress)
+### 0.1.2
 - **Region selection (beyond EU).** You can now pick your market — **EU / SEA / LA / ME** — in
   onboarding and under Settings › Region. This swaps in that region's Zeekr servers (TSP gateway,
   Azure overseas-app, xchanger DK backend), project-id, country and push region. **Only EU is
@@ -81,9 +81,10 @@ token of appreciation is genuinely welcome (never expected):
 - **Power trunk.** Added an option to power **open / close the trunk** remotely.
 - **Better walk-away lock.** Enhanced the phone-side walk-away lock logic, including a cloud
   backstop so the car still gets locked if the BLE lock command can't be confirmed as you leave.
-- **Groundwork for car-driven walk-away lock.** Started on Zeekr's own **car-side** approach to
-  walk-away locking — the car locks itself when you walk away even if the app fails to send the
-  lock command, adding a redundant layer of security. Not finished/enabled yet.
+- **Average trip consumption.** The app now shows your car's average energy consumption
+  (Ø kWh/100km) alongside the vehicle status.
+- **Mobile data usage.** See how much of your car's built-in eSIM data plan you've used this
+  month, right inside the app.
 - **Scheduling UI (still broken).** Added UI elements for charge/departure scheduling. ⚠️ Saving
   a schedule does **not** work yet — the screen is in, the commit path isn't.
 - **Nicer climate UI.** Improved the UI for climate **cooling / heating**.
