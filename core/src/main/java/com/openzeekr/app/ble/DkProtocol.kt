@@ -63,6 +63,26 @@ object DkProtocol {
     const val CMD_V2A_SMALL_CALIBRATION_DATA_RESP = 0x0173
     const val CMD_INVALID = 0xFFFF
 
+    /** Short human name for a frame opcode, for readable BLE logs. Unmapped opcodes (e.g. the car's
+     *  0x182 periodic push, which lives in the native DK lib and isn't modelled here) read as
+     *  "unknown" so they stand out in the trace. */
+    fun name(cmdId: Int): String = when (cmdId) {
+        CMD_A2V_CONNECT_CONFIRM -> "CONNECT_CONFIRM"
+        CMD_V2A_DK_STATUS -> "DK_STATUS"
+        CMD_A2V_DK_PRE_SYNC -> "DK_PRE_SYNC"; CMD_V2A_DK_PRE_SYNC_RESP -> "DK_PRE_SYNC_RESP"
+        CMD_A2V_SEND_DKEY -> "SEND_DKEY"; CMD_V2A_DK_VERIFY_STATUS -> "DK_VERIFY_STATUS"
+        CMD_A2V_CONTROL -> "CONTROL"; CMD_V2A_CMD_RECEIVED -> "CMD_RECEIVED"; CMD_V2A_RESULT -> "RESULT"
+        CMD_A2V_RPA_REQ -> "RPA_REQ"; CMD_V2A_RPA_STATUS -> "RPA_STATUS"; CMD_V2A_RPA_CHALLENGE -> "RPA_CHALLENGE"
+        CMD_A2V_RPA_ANSWER -> "RPA_ANSWER"; CMD_V2A_RPA_SYNC -> "RPA_SYNC"; CMD_V2A_RPA_SYNC2 -> "RPA_SYNC2"
+        CMD_A2V_TRANS -> "TRANS"; CMD_V2A_VSTATUS_SYNC -> "VSTATUS_SYNC"
+        CMD_A2V_PAIRING_REQ -> "PAIRING_REQ"; CMD_V2A_PAIRING_RESP -> "PAIRING_RESP"
+        CMD_A2V_CUST_REQ -> "CUST_REQ"; CMD_V2A_CUST_RESP -> "CUST_RESP"
+        CMD_A2V_RSSI_SYNC -> "RSSI_SYNC"; CMD_V2A_APPROACHLOCK_NOTIFY -> "APPROACHLOCK_NOTIFY"
+        CMD_A2V_BIG_CALIBRATION_DATA -> "BIG_CALIB"; CMD_A2V_SMALL_CALIBRATION_DATA -> "SMALL_CALIB"
+        CMD_V2A_SMALL_CALIBRATION_DATA_RESP -> "SMALL_CALIB_RESP"
+        else -> "unknown"
+    }
+
     // ---- VehicleCtrlCmd.cmdType (the mControlType byte); cmdType = enum ordinal - 1 ----
     const val CTRL_NULL: Byte = 0x00
     const val CTRL_UNLOCK: Byte = 0x01

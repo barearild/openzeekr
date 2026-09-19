@@ -583,7 +583,7 @@ class DkBleManager(base: Context) : DkTransport {
             val f = DkFrame.decode(frameBytes)
             lastInboundMs = System.currentTimeMillis() // the car is talking = activity
             runCatching { onInboundActivity?.invoke() }
-            Logx.d("ble", "<- frame cmd=0x${f.cmdId.toString(16)} body=${f.body.size}B " +
+            Logx.d("ble", "<- frame cmd=0x${f.cmdId.toString(16)} ${DkProtocol.name(f.cmdId)} body=${f.body.size}B " +
                 "hex=${f.body.take(64).joinToString("") { "%02x".format(it) }}")
             inboundHandler?.invoke(f.cmdId, f.body)
         } catch (e: DkFrameException) {
@@ -597,7 +597,7 @@ class DkBleManager(base: Context) : DkTransport {
     override suspend fun write(cmd: Int, framed: ByteArray): Boolean = writeLock.withLock {
         val g = gatt ?: return false
         val ch = (if (DkProtocol.isChannel2(cmd)) chWrite2 else chWrite1) ?: return false
-        Logx.d("ble", "-> frame cmd=0x${cmd.toString(16)} ${framed.size}B")
+        Logx.d("ble", "-> frame cmd=0x${cmd.toString(16)} ${DkProtocol.name(cmd)} ${framed.size}B")
         for (chunk in DkFragmenter.split(framed, maxChunk)) {
             val ack = CompletableDeferred<Boolean>(); writeAck = ack
             val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

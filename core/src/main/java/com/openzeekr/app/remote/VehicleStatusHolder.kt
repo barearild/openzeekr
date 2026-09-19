@@ -28,6 +28,13 @@ class VehicleStatusHolder(
     private var job: Job? = null
     private var burstJob: Job? = null
 
+    // Last-seen lock/trunk states, so we log only the TRANSITIONS (not every poll). This makes every
+    // lock/unlock + trunk open/close visible + timestamped in the log regardless of what caused it
+    // (phone command, cloud backstop, or the car's own auto-lock), which is what you watch to work out
+    // the auto-lock logic. Tagged "lock" so it rides the BLE logging switch, next to the carprox traces.
+    private var prevLock: String? = null
+    private var prevTrunk: String? = null
+
     /** Begin foreground polling (idempotent). control.status() heartbeats first. */
     fun start() {
         if (job?.isActive == true) return
@@ -43,8 +50,28 @@ class VehicleStatusHolder(
 
     suspend fun refresh() {
         when (val r = control.status()) {
-            is CallResult.Ok -> { _state.value = r.value; lastError = null }
+            is CallResult.Ok -> { logStateTransitions(r.value); _state.value = r.value; lastError = null }
             is CallResult.Err -> lastError = r.message
+        }
+    }
+
+    /** Log lock/trunk state changes (never values that identify the car). centralLockingStatus:
+     *  "1"=locked / "0"=unlocked; trunkOpenStatus: "0"=closed / non-zero=open. */
+    private fun logStateTransitions(s: VehicleStatusBean) {
+        val safety = s.additionalVehicleStatus?.drivingSafetyStatus
+        safety?.centralLockingStatus?.let { lock ->
+            if (prevLock != null && lock != prevLock) {
+                val word = if (lock == "1") "LOCKED" else "UNLOCKED"
+                com.openzeekr.app.util.Logx.d("lock", "central lock -> $word (was ${if (prevLock == "1") "locked" else "unlocked"})")
+            }
+            prevLock = lock
+        }
+        safety?.trunkOpenStatus?.let { trunk ->
+            if (prevTrunk != null && trunk != prevTrunk) {
+                val word = if (trunk == "0") "CLOSED" else "OPEN"
+                com.openzeekr.app.util.Logx.d("lock", "trunk -> $word")
+            }
+            prevTrunk = trunk
         }
     }
 
