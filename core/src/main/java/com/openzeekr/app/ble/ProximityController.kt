@@ -225,16 +225,18 @@ class ProximityController(
             walkAwayArmed = armedUnlocked
             Logx.d("prox", "link down (lastRssi=$lostRssi armed=$armedUnlocked) " +
                 "-> ${if (walkAwayArmed) "arming walk-away lock (lock if no reconnect in ${LINK_LOSS_LOCK_DELAY_MS}ms)" else "not armed — idle"}")
-            // Out-of-range CLOUD backstop (extra hardening). When the BLE link drops as a genuine
-            // walk-away — last sample receding or already far — but we did NOT unlock it ourselves (so the
-            // BLE walk-away-lock path above won't run), verify over the cloud that the car is actually
-            // locked and, if not, issue a cloud lock. Holds its own ~20s wakelock so the check survives the
-            // CPU trying to sleep right after the drop. Fires once per link-loss.
-            val lockThresh = store.current().sensitivityLockRssi
-            val outOfRange = lostReceding || (lostRssi?.let { it <= lockThresh } == true)
-            if (!armedUnlocked && outOfRange && !cloudNetFired) {
+            // Walk-away CLOUD backstop (ranging-independent). If we did NOT unlock the car ourselves
+            // (so the armed BLE walk-away-lock path above won't run), a sustained link loss still means
+            // you left - so lock it. We deliberately do NOT gate this on an RSSI "out-of-range"
+            // classification: a clean walk-away can drop with a stale-strong last sample, and the user
+            // wants the car locked on walk-away even if ranging is unreliable (e.g. a model-spoofed
+            // phone). Safety is preserved by cloudLockSafetyNet: it waits LINK_LOSS_LOCK_DELAY_MS and
+            // SKIPS if the link comes back (transient drop) or the car is already locked (no redundant
+            // lock, no false lock while you are still next to a briefly-glitched link). Fires once per
+            // link-loss. Worst case (a real drop while still near) just locks a car you can re-unlock.
+            if (!armedUnlocked && !cloudNetFired) {
                 cloudNetFired = true
-                cloudLockSafetyNet("out-of-range")
+                cloudLockSafetyNet("walk-away (link lost)")
             }
             gattEma = null
             inCarSinceMs = 0L; steadyRef = null; steadySinceMs = 0L; lastCadence = ""
