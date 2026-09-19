@@ -30,7 +30,8 @@ class Deps(context: Context) {
 
     val config: ConfigStore = ConfigStore.get(context)
         .also {
-            com.openzeekr.app.util.Logx.setEnabled(it.current().debugLogging)
+            com.openzeekr.app.util.Logx.setHttp(it.current().logHttp)
+            com.openzeekr.app.util.Logx.setBle(it.current().logBle)
             // The experimental CAR-side walk-away auto-lock is hidden/disabled for now. Force the flag
             // off on every launch so a value persisted from a previous build can't keep it active while
             // the UI toggle is gone. Re-enable by restoring the toggle + removing this line.

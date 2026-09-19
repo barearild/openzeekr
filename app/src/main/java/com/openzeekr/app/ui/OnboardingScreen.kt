@@ -48,7 +48,7 @@ import kotlinx.coroutines.launch
  * none yet) → Login → Digital-key provisioning (skippable) → main app. Sets
  * [SecretsConfig.onboardingDone] on finish so it never shows again (until logout resets it).
  */
-private enum class OnbStep { WELCOME, SECRETS, LOGIN, KEY }
+private enum class OnbStep { WELCOME, REGION, SECRETS, LOGIN, KEY }
 
 @Composable
 fun OnboardingScreen(deps: Deps, onDone: () -> Unit) {
@@ -60,6 +60,7 @@ fun OnboardingScreen(deps: Deps, onDone: () -> Unit) {
     val steps = remember(secretsValid) {
         buildList {
             add(OnbStep.WELCOME)
+            add(OnbStep.REGION)
             if (!secretsValid) add(OnbStep.SECRETS)
             add(OnbStep.LOGIN)
             add(OnbStep.KEY)
@@ -96,6 +97,7 @@ fun OnboardingScreen(deps: Deps, onDone: () -> Unit) {
             Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
                 when (step) {
                     OnbStep.WELCOME -> WelcomeStep()
+                    OnbStep.REGION -> RegionStep(deps)
                     OnbStep.SECRETS -> SecretsStep(deps, secretsValid)
                     OnbStep.LOGIN -> LoginStep(deps)
                     OnbStep.KEY -> KeyStep(deps)
@@ -108,6 +110,7 @@ fun OnboardingScreen(deps: Deps, onDone: () -> Unit) {
                 if (safeIdx > 0) TextButton(onClick = ::back) { Text("Back") } else Spacer(Modifier.height(1.dp))
                 when (step) {
                     OnbStep.WELCOME -> Button(onClick = ::next) { Text("Get started") }
+                    OnbStep.REGION -> Button(onClick = ::next) { Text("Next") }
                     OnbStep.SECRETS -> Button(onClick = ::next, enabled = secretsValid) { Text("Next") }
                     OnbStep.LOGIN -> Button(onClick = ::next, enabled = loggedIn) { Text("Next") }
                     OnbStep.KEY -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -136,6 +139,44 @@ private fun WelcomeStep() {
             "Authorized use only — for a vehicle you own or are permitted to access.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/** Region picker: seeds the correct gateway hosts + projectId for the user's market before they
+ *  enter secrets/log in. Defaults to EU. Non-EU regions are experimental (host tables only). */
+@Composable
+private fun RegionStep(deps: Deps) {
+    val store = deps.config
+    val cfg by store.config.collectAsState()
+    val current = com.openzeekr.app.net.Region.byCode(cfg.regionCode)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Region", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text(
+            "Pick the market your car and account belong to. This selects the right Zeekr servers. " +
+                "Each region also needs its OWN extracted keys (zeekr_key_extractor --region " +
+                "${current.extractorRegion}) — you'll add them next.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            com.openzeekr.app.net.Region.ALL.forEach { r ->
+                SelectChip(r.code, selected = current.code == r.code) {
+                    if (current.code != r.code) { store.setRegion(r.code); deps.onEndpointChanged() }
+                }
+            }
+        }
+        Text(
+            current.displayName + (if (current.verified) "  ·  verified" else "  ·  experimental"),
+            style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold,
+            color = if (current.verified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+        )
+        if (!current.verified) {
+            Text(
+                "⚠️ This region is reconstructed from the stock app's host tables and has not been " +
+                    "verified against a real car. Login and the digital key may need a host corrected " +
+                    "later under Settings › Region › Advanced.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

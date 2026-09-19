@@ -9,17 +9,23 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * App-wide logging with two tiers, both gated by the Settings "Debug logging" toggle:
- *  - **verbose (D)** — the HTTP interceptors, handshake traces, tokens/key material.
- *    Written to logcat AND the on-device ring buffer **only while logging is ON**. With the
- *    toggle OFF it is fully suppressed, so a released/idle app never sprays request bodies or
- *    secrets to logcat.
- *  - **warnings/errors (W/E)** — low-volume, non-bulk (no HTTP bodies; secrets already go
+ * App-wide logging with two INDEPENDENT category gates, both driven by Settings switches:
+ *  - **HTTP logging** ([setHttp]) gates the cloud request/response traces (areas in [HTTP_TAGS]:
+ *    http, login, net, session, tsp, push) - tokens, VIN, request/response bodies.
+ *  - **BLE logging** ([setBle]) gates the digital-key / proximity traffic (areas in [BLE_TAGS]:
+ *    ble, carprox, dk, lock, motion, provision, prox, svc) - key material, RSSI, handshakes.
+ * Each can be turned on/off separately so a tester can watch one category without the other's
+ * spam. A verbose [d] call is emitted only while its own category is ON; with a category OFF it
+ * is fully suppressed (not even logcat), so an idle app never sprays that category's secrets.
+ *
+ * Two tiers within each category:
+ *  - **verbose (D)** - fully gated on the matching category flag (see above).
+ *  - **warnings/errors (W/E)** - low-volume, non-bulk (no HTTP bodies; secrets already go
  *    through [preview]). Always emitted to logcat so real failures are still diagnosable, but
- *    only added to the on-device buffer while logging is ON.
+ *    only added to the on-device buffer while EITHER category is ON.
  *
  * The ring buffer is a [StateFlow] the UI shows on-device (handy at the car with no debugger).
- * Nothing is persisted, so a restart clears it.
+ * It is cleared when BOTH categories go off. Nothing is persisted, so a restart clears it too.
  *
  * Secrets: helper [preview] keeps sensitive values out of the log while still showing enough
  * to debug (length + last 4 chars).
@@ -33,23 +39,49 @@ object Logx {
 
     private val clock = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
-    /** Master gate, driven by the Settings "Debug logging" toggle; off by default until config
-     *  is applied. When OFF: verbose [d] is suppressed from BOTH logcat and the ring buffer, so
-     *  no HTTP bodies/tokens/key material reach the log. W/E still hit logcat (minimal, basic). */
-    @Volatile private var enabled = false
-    fun setEnabled(on: Boolean) { enabled = on; if (!on) _lines.value = emptyList() }
-    /** Whether verbose logging is on — lets callers (e.g. the OkHttp interceptor) skip building
-     *  expensive/sensitive body strings entirely when logging is off. */
-    val isEnabled: Boolean get() = enabled
+    /** Areas that belong to the HTTP-logging category (gated by [httpOn]). */
+    private val HTTP_TAGS = setOf("http", "login", "net", "session", "tsp", "push")
+    /** Areas that belong to the BLE-logging category (gated by [bleOn]). */
+    private val BLE_TAGS = setOf("ble", "carprox", "dk", "lock", "motion", "provision", "prox", "svc")
 
-    /** Verbose. Fully gated — nothing (not even logcat) unless logging is ON. */
+    /** HTTP-category gate, driven by the Settings "HTTP logging" switch; off by default until
+     *  config is applied. When OFF, verbose [d] for HTTP areas is suppressed from BOTH logcat and
+     *  the ring buffer, so no request bodies/tokens/VIN reach the log. */
+    @Volatile private var httpOn = false
+    /** BLE-category gate, driven by the Settings "BLE logging" switch; off by default. When OFF,
+     *  verbose [d] for BLE areas is suppressed from logcat and the buffer (no key material/RSSI). */
+    @Volatile private var bleOn = false
+
+    /** Set the HTTP-category gate. Clears the ring buffer only when BOTH categories are now off
+     *  (preserves the old "clear when logging goes fully off" behavior). */
+    fun setHttp(on: Boolean) { httpOn = on; if (!anyOn) _lines.value = emptyList() }
+    /** Set the BLE-category gate. Clears the ring buffer only when BOTH categories are now off. */
+    fun setBle(on: Boolean) { bleOn = on; if (!anyOn) _lines.value = emptyList() }
+
+    /** Whether HTTP logging is on - lets HTTP callers (e.g. the OkHttp interceptor) skip building
+     *  expensive/sensitive body strings entirely when HTTP logging is off. */
+    val isHttpEnabled: Boolean get() = httpOn
+    /** Whether BLE logging is on. */
+    val isBleEnabled: Boolean get() = bleOn
+    /** True when either category is on. */
+    private val anyOn: Boolean get() = httpOn || bleOn
+    /** Legacy alias for any missed caller - true when either category is on. */
+    val isEnabled: Boolean get() = anyOn
+
+    /** Verbose. Fully gated on the area's category - nothing (not even logcat) unless that
+     *  category is ON. An unknown/general area logs if EITHER category is on. */
     fun d(area: String, msg: String) {
-        if (!enabled) return
+        val on = when {
+            area in HTTP_TAGS -> httpOn
+            area in BLE_TAGS -> bleOn
+            else -> anyOn
+        }
+        if (!on) return
         emit('D', area, msg); Log.d(TAG, "[$area] $msg")
     }
-    /** Warning — always to logcat (low-volume, no HTTP bodies); buffered only when ON. */
+    /** Warning - always to logcat (low-volume, no HTTP bodies); buffered only when a category is ON. */
     fun w(area: String, msg: String) = emit('W', area, msg).also { Log.w(TAG, "[$area] $msg") }
-    /** Error — always to logcat; buffered only when ON. */
+    /** Error - always to logcat; buffered only when a category is ON. */
     fun e(area: String, msg: String, t: Throwable? = null) {
         emit('E', area, msg + (t?.let { " :: ${it.javaClass.simpleName}: ${it.message}" } ?: ""))
         Log.e(TAG, "[$area] $msg", t)
@@ -61,7 +93,7 @@ object Logx {
     fun dump(): String = _lines.value.joinToString("\n")
 
     private fun emit(level: Char, area: String, msg: String) {
-        if (!enabled) return
+        if (!anyOn) return
         val line = "${clock.format(Date())} $level/$area  $msg"
         val cur = _lines.value
         _lines.value = (if (cur.size >= MAX) cur.drop(cur.size - MAX + 1) else cur) + line

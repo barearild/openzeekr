@@ -174,6 +174,9 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
  */
 class InboxRepository(private val store: ConfigStore, private val client: ApiClient) {
 
+    /** Inbox base URL, region-derived (…/overseas-app/member/inbox). See the companion note on auth. */
+    private val INBOX: String get() = store.current().inboxUrl
+
     /**
      * The message list. Uses the grouped `/inbox/home` landing (latest preview per category) —
      * the paged `/inbox` list 400s without a per-category `customTypeId` we can't know up front,
@@ -243,7 +246,6 @@ class InboxRepository(private val store: ConfigStore, private val client: ApiCli
          * as a @Query (already sent). Until a dedicated app-BFF client with those headers is
          * wired, this call reaches the right host but 401s. Tracked as back-burner.
          */
-        const val INBOX = "https://gateway-pub-azure.zeekr.eu/overseas-app/member/inbox"
         const val NOT_CONFIGURED = "Notifications need your overseas-app keys — add them in Settings › App secrets."
     }
 }
@@ -397,62 +399,99 @@ class NavRepository(private val store: ConfigStore, private val client: ApiClien
  * Car-side schedules on the `ms-charge-manage` service (a SEPARATE plane from ms-remote-control,
  * like the on-demand charge control). Two independent schedule types:
  *
- *  - SCHEDULED CHARGING — "booking charge" off-peak windows. serviceId "ZAZ". A single setting
- *    object (priorityToSoc + a list of windows) that you overwrite wholesale (set/get).
+ *  - SCHEDULED CHARGING — V1 "charging plan": a SINGLE daily window per timerId (start/end time +
+ *    the keep-charging `target` mode). command "start"=enabled, "stop"=disabled. NO serviceId.
+ *    (The V2 "booking charge" plane 400s on this EU car, so V1 is what actually applies.)
  *  - DEPARTURE / "booking travel" — CRUD list of precondition-by-departure-time plans.
  *    serviceId "ZAO"; command "start"=create, "edit"=update, "stop"=delete (identify by btId).
  *
  * Shapes reconstructed clean-room from the stock `VclEnergyApi` retrofit interface and the
- * `BookingTravelSetting`/`ChargingPlanRequestV2Bean` beans (see CHARGING_CONTROL_FINDINGS.md).
+ * `BookingTravelSetting`/`ChargingPlanRequestBean` beans (see SCHEDULE_TRACE_FINDINGS.md).
  * Every call heartbeats first (as [RemoteControlRepository.send] does) so the TSP has us ONLINE.
  */
 class ScheduleRepository(private val store: ConfigStore, private val client: ApiClient) {
 
-    // ---- scheduled charging (booking windows) ----
+    // ---- scheduled charging (V1 charging-plan; single daily window per timerId) ----
 
-    /** Read the current off-peak charge windows. [groupNumber] selects the plan group; the gateway
-     *  requires it to be >= 1 (groupNumber=0 → 400 "groupNumber必须大于等于1"), so 1 is the default. */
-    suspend fun chargingWindows(groupNumber: Int = 1): CallResult<com.openzeekr.app.net.model.ChargingBookingSetting> =
+    /** Read the current charging plan (V1). Returns the sparse read-back bean; a car with no plan
+     *  yet returns mostly-null fields. GET has no params — the VIN rides the X-VIN header. */
+    suspend fun chargePlan(): CallResult<com.openzeekr.app.net.model.ChargingPlanV1> =
         withContext(Dispatchers.IO) {
             guarded {
                 requireVin()
                 runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
-                val resp = client.api.getChargeBooking(groupNumber)
-                resp.data ?: com.openzeekr.app.net.model.ChargingBookingSetting(priorityToSoc = false, settings = emptyList())
+                client.api.getChargingPlan().data ?: com.openzeekr.app.net.model.ChargingPlanV1()
             }
         }
 
     /**
-     * Overwrite the off-peak charge windows (serviceId "ZAZ").
+     * Set (or disable) the single charge window (V1 `setChargingPlan`).
      *
-     * IMPORTANT: this is a VEHICLE-RELAYED async op, not a cloud-DB write. The POST returns
-     * `{success:true, data:{sessionId}}` as soon as the op is QUEUED — it only actually applies
-     * (persists the `sts` enable) once the CAR is online/awake and acks it. There is no server
-     * push (no websocket/mqtt in the stock app), so the stock learns the result by POLLING; a bare
-     * HTTP 200 is NOT "saved". We heartbeat (RVS, hbType=3 — same as stock `ZeekrHeartbeatImpl.rvsService`)
-     * to nudge the car awake, then poll the readback to confirm the enable stuck. If it never sticks
-     * within the window the car is asleep/offline, so we return an honest error instead of a false ✓.
+     * @param enabled       true → command "start" (window active); false → "stop" (disabled, times dropped)
+     * @param startTime     "HH:mm" — only sent when [enabled]
+     * @param endTime       "HH:mm" — only sent when [enabled]
+     * @param keepCharging  the "charging will continue if the limit isn't reached at end time" option
+     *                      → wire `target` "1" (on) / "2" (off)
+     * @param timerId       reuse the read-back timerId ("2" on this car); a fresh plan uses "2"
+     * @param scheduledTime the read-back epoch-ms trigger to reuse; blank → computed from [startTime]
+     *
+     * VEHICLE-RELAYED async op: the POST only QUEUES (returns a sessionId); it applies once the CAR
+     * is online/awake and acks it — HTTP 200 is NOT "saved". We heartbeat (RVS), then poll
+     * getChargingPlan until `command` matches and `dataSource=="APP"` (the car took our write).
      */
-    suspend fun setChargingWindows(setting: com.openzeekr.app.net.model.ChargingBookingSetting): CallResult<Unit> =
+    suspend fun setChargePlan(
+        enabled: Boolean,
+        startTime: String,
+        endTime: String,
+        keepCharging: Boolean,
+        timerId: String,
+        scheduledTime: String,
+    ): CallResult<Unit> =
         withContext(Dispatchers.IO) {
             guarded {
                 requireVin()
                 runCatching { com.openzeekr.app.net.AccountLogin(store).heartbeat() }
-                val resp = client.api.setChargeBooking(
-                    com.openzeekr.app.net.model.ChargingBookingRequest(serviceId = SERVICE_ID_CHARGE, bookingDetailSetting = setting),
+                val command = if (enabled) CMD_CREATE else CMD_DELETE   // "start" / "stop"
+                val sched = scheduledTime.ifBlank { nextTriggerMs(startTime) }
+                val resp = client.api.setChargingPlan(
+                    com.openzeekr.app.net.model.ChargingPlanV1Request(
+                        bcCycleActive = false,
+                        bcTempActive = false,
+                        command = command,
+                        // Omit start/end on stop (matches stock: nulls drop from the wire).
+                        startTime = if (enabled) startTime else null,
+                        endTime = if (enabled) endTime else null,
+                        scheduledTime = sched,
+                        target = if (keepCharging) TARGET_KEEP_ON else TARGET_KEEP_OFF,
+                        timerId = timerId.ifBlank { DEFAULT_TIMER_ID },
+                    ),
                 )
                 if (!resp.success && resp.data == null) error(resp.message ?: "charge schedule failed (code=${resp.code})")
-                // Confirm the car actually applied it (poll the readback until the enable matches).
-                val wantEnabledStarts = setting.settings.filter { it.sts == 1 }.map { it.startTime }.toSet()
+                // Confirm the car actually applied it: read-back command matches + dataSource flipped to APP.
                 val applied = pollUntil {
-                    val cur = client.api.getChargeBooking(1).data?.settings ?: emptyList()
-                    if (wantEnabledStarts.isEmpty()) cur.none { it.sts == 1 }
-                    else wantEnabledStarts.all { st -> cur.any { it.startTime == st && it.sts == 1 } }
+                    val cur = client.api.getChargingPlan().data ?: return@pollUntil false
+                    cur.command == command && cur.dataSource.equals("APP", ignoreCase = true)
                 }
                 if (!applied) error(CAR_ASLEEP)
                 Unit
             }
         }
+
+    /** Epoch-ms of the next occurrence of "HH:mm" from now (local time), as a string. Matches the
+     *  stock `scheduledTime` (the next start trigger). Falls back to now+1h if the time is unparseable. */
+    private fun nextTriggerMs(hhmm: String): String {
+        val parts = hhmm.split(":")
+        val h = parts.getOrNull(0)?.toIntOrNull()
+        val m = parts.getOrNull(1)?.toIntOrNull()
+        val cal = java.util.Calendar.getInstance()
+        if (h == null || m == null) { cal.add(java.util.Calendar.HOUR_OF_DAY, 1); return cal.timeInMillis.toString() }
+        cal.set(java.util.Calendar.HOUR_OF_DAY, h)
+        cal.set(java.util.Calendar.MINUTE, m)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        if (cal.timeInMillis <= System.currentTimeMillis()) cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+        return cal.timeInMillis.toString()
+    }
 
     // ---- departure / booking-travel schedules ----
 
@@ -479,7 +518,7 @@ class ScheduleRepository(private val store: ConfigStore, private val client: Api
         sendTravel(CMD_DELETE, setting, verify = false)
 
     /**
-     * Same async, vehicle-relayed model as [setChargingWindows]: the POST only QUEUES the op
+     * Same async, vehicle-relayed model as [setChargePlan]: the POST only QUEUES the op
      * (returns a sessionId); it applies only when the car is online/awake and acks it. We heartbeat
      * (RVS) then, for create/edit, poll the readback until the plan is actually present with the
      * requested state — otherwise the car is asleep and we return an honest error rather than a false ✓.
@@ -525,11 +564,14 @@ class ScheduleRepository(private val store: ConfigStore, private val client: Api
     }
 
     private companion object {
-        const val SERVICE_ID_CHARGE = "ZAZ"   // booking-charge service id
         const val SERVICE_ID_TRAVEL = "ZAO"   // booking-travel (departure) service id
         const val CMD_CREATE = "start"
         const val CMD_UPDATE = "edit"
         const val CMD_DELETE = "stop"
+        // V1 charge-plan `target` = the "keep charging past end time until the limit is reached" mode.
+        const val TARGET_KEEP_ON = "1"
+        const val TARGET_KEEP_OFF = "2"
+        const val DEFAULT_TIMER_ID = "2"      // this car's plan slot; reuse the read-back timerId on edit
         const val CAR_ASLEEP =
             "The car didn't confirm the schedule — it's asleep or offline. The cloud queued it but the " +
                 "car must be awake to store it. Wake the car (unlock it, open the Zeekr app, or plug it in " +

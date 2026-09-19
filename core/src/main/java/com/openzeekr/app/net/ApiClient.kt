@@ -45,7 +45,7 @@ class ApiClient private constructor(private val store: ConfigStore) {
             // Gate the logging level per-request (interceptor runs just before `logging`,
             // which reads its level at the start of its own intercept()).
             .addInterceptor { chain ->
-                logging.level = if (com.openzeekr.app.util.Logx.isEnabled)
+                logging.level = if (com.openzeekr.app.util.Logx.isHttpEnabled)
                     HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
                 chain.proceed(chain.request())
             }

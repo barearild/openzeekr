@@ -49,21 +49,19 @@ interface TspApi {
         @Body body: RemoteControlRequest,
     ): BaseResponse<RemoteControlResponse>
 
-    // ---- scheduled charging: "booking charge" off-peak windows (serviceId ZAZ) ----
-    // Same ms-charge-manage service, V2 "booking" plane. Body = ChargingBookingRequest
-    // {serviceId:"ZAZ", bookingDetailSetting{priorityToSoc, settings:[{id,sts,startTime,endTime}]}}.
-    // (stock VclEnergyApi.setChargingPlanV2 → ChargingPlanRequestV2Bean.)
-    @POST("ms-charge-manage/api/v2.0/charge/setBookingCharge")
-    suspend fun setChargeBooking(
-        @Body body: com.openzeekr.app.net.model.ChargingBookingRequest,
+    // ---- scheduled charging: V1 "charging plan" (single daily window per timerId) ----
+    // The V2 "booking charge" plane 400s on this EU car (getBookingCharge -> 000002
+    // "groupNumber必须大于等于1"), so we use V1, which the stock app actually used. Body =
+    // ChargingPlanV1Request (NO serviceId). (stock VclEnergyApi.setChargingPlan → ChargingPlanRequestBean.)
+    @POST("ms-charge-manage/api/v1.0/charge/setChargingPlan")
+    suspend fun setChargingPlan(
+        @Body body: com.openzeekr.app.net.model.ChargingPlanV1Request,
     ): BaseResponse<RemoteControlResponse>
 
-    // Read the current booking-charge windows. `groupNumber` selects the plan group (stock passes an
-    // int; 0 = the default/first group). (stock VclEnergyApi.getChargingPlanV2.)
-    @GET("/ms-charge-manage/api/v2.0/charge/getBookingCharge")
-    suspend fun getChargeBooking(
-        @Query("groupNumber") groupNumber: Int = 0,
-    ): BaseResponse<com.openzeekr.app.net.model.ChargingBookingSetting>
+    // Read the current charging plan (V1). GET with NO params — the VIN comes from the X-VIN header.
+    // (stock VclEnergyApi.getChargingPlan → ChargingPlanBean.)
+    @GET("ms-charge-manage/api/v1.0/charge/getChargingPlan")
+    suspend fun getChargingPlan(): BaseResponse<com.openzeekr.app.net.model.ChargingPlanV1>
 
     // ---- departure / "booking travel" schedule (serviceId ZAO) ----
     // Precondition (climate/preheat) by a departure time, optionally recurring per weekday.

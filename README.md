@@ -20,10 +20,12 @@ for interoperability and research.
 > **you own or are explicitly authorized to access.** This is a research tool, not a
 > way to access cars that aren't yours.
 
-> 🌍 **EU only, and only lightly tested.** Everything has ever only been pointed at
-> the **EU** TSP server with an **EU** vehicle and account. Other regions are
-> unlikely to work as-is: **some endpoints, hosts, region and project-id values are
-> currently hardcoded for EU inside the app.** Non-EU support is not implemented.
+> 🌍 **EU verified; other regions experimental.** A **region selector** (EU / SEA / LA / ME)
+> picks the right Zeekr servers, project-id, country and push region for your market. Only **EU**
+> has been verified end-to-end on a real car and account; **SEA / LA / ME** are reconstructed
+> from the stock app's own host tables and are **untested** — bring your region's own extracted
+> secrets, and use Settings › Region › Advanced to correct a host if login or the digital key
+> fail for your market.
 
 ## ⚠️ Read this before you start
 
@@ -64,6 +66,12 @@ token of appreciation is genuinely welcome (never expected):
 ## Changelog
 
 ### 0.1.2 (work in progress)
+- **Region selection (beyond EU).** You can now pick your market — **EU / SEA / LA / ME** — in
+  onboarding and under Settings › Region. This swaps in that region's Zeekr servers (TSP gateway,
+  Azure overseas-app, xchanger DK backend), project-id, country and push region. **Only EU is
+  verified on a real car;** SEA/LA/ME are reconstructed from the stock app's host tables and ship
+  as **experimental**, with an Advanced panel to correct any host per-market. As before, each
+  region needs its **own** extracted secrets (`zeekr_key_extractor --region <REGION>`).
 - **Fixed logging still leaking.** HTTP traffic was still being written to logcat even when
   the debug-logging switch was **off** — the toggle is now honoured everywhere, so nothing is
   logged unless you explicitly opt in.

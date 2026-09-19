@@ -40,10 +40,10 @@ import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Luggage
 import androidx.compose.material.icons.filled.Power
-import androidx.compose.material.icons.filled.ViewColumn
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material.icons.filled.Window
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -154,7 +154,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     // glyph, accent), fully down → "Open" (energy), all closed → "Windows" (idle).
     val windowsVenting = climate?.windowsVenting == true
     val windowsOpen = climate?.windowsOpen == true
-    val windowIcon = if (windowsVenting) Icons.Filled.Air else Icons.Filled.ViewColumn
+    val windowIcon = if (windowsVenting) Icons.Filled.Air else Icons.Filled.Window
     val windowLabel = when { windowsVenting -> "Vent"; windowsOpen -> "Open"; else -> "Windows" }
     val windowTint = if (windowsVenting) Brand.accent else Brand.energy
 
@@ -208,6 +208,10 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
             StatItem("Central lock", if (locked) "Locked" else "Unlocked", if (locked) Brand.good else Brand.energy, Modifier.weight(1f))
             StatItem("Battery", soc?.let { "${fmt(it)}%" } ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
             StatItem("Range", rangeStr?.let { s -> s.toDoubleOrNull()?.let { Units.distance(it, cfg.distanceUnit) } ?: "$s km" } ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+            // Live average energy consumption (ElectricStatusVo.averPowerConsumption); unit is the
+            // car's own — assume kWh/100km. "Ø" = average (compact so the label stays on ONE line in
+            // the narrow 1/4-width stat column, instead of wrapping like "Avg · kWh/100km" did).
+            StatItem("Ø kWh/100km", elec?.avgConsumption?.let { fmt1(it) } ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
         }
         Divider()
 
@@ -228,11 +232,11 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 // Combined locator: the ONE signal action the key session can fire directly (DK 0x03 =
                 // flash + honk together), so it's BLE-first (instant in range) with cloud fallback.
-                // Flash-only / Honk-only have NO BLE opcode, so those two always go via the cloud.
+                // Flash-only has NO BLE opcode, so it always goes via the cloud. (There is no
+                // honk-only action — the car only supports flash-only and flash+honk together.)
                 Ctl(Icons.Filled.Campaign, "Flash+Honk", modifier = Modifier.weight(1f)) { fire("Locate") { deps.vehicleControl.send(Command.FLASH_HORN) } }
                 Ctl(Icons.Filled.FlashOn, "Flash", modifier = Modifier.weight(1f)) { fire("Flash") { deps.vehicleControl.send(Command.FLASH) } }
-                Ctl(Icons.Filled.VolumeUp, "Honk", modifier = Modifier.weight(1f)) { fire("Honk") { deps.vehicleControl.send(Command.HONK) } }
-                Ctl(Icons.Filled.Inventory2, "Trunk", modifier = Modifier.weight(1f)) { showTrunk = true }
+                Ctl(Icons.Filled.Luggage, "Trunk", modifier = Modifier.weight(1f)) { showTrunk = true }
             }
             // Frunk only when the car reports a powered hood (per-VIN); its own row so the grid stays 4-wide.
             if (caps.frunk) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

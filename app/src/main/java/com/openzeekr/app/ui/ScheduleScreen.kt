@@ -42,8 +42,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openzeekr.app.Deps
 import com.openzeekr.app.net.model.BookingTravelSetting
-import com.openzeekr.app.net.model.ChargingBookingSetting
-import com.openzeekr.app.net.model.ChargingWindow
 import com.openzeekr.app.net.model.CycleTime
 import com.openzeekr.app.net.model.TravelClimateSetting
 import com.openzeekr.app.net.model.TravelSeatSetting
@@ -69,12 +67,15 @@ fun ScheduleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
 
-    // ---- charging schedule state ----
-    val chargeWindows = remember { mutableStateListOf<ChargingWindow>() }
-    // Preserved from getBookingCharge (no UI — the toggle was removed as confusing). We keep the car's
-    // current value and send it back on save so saving a window doesn't silently clear a SOC-priority
-    // setting the user may have set in the official app.
-    var priorityToSoc by remember { mutableStateOf(false) }
+    // ---- charging schedule state (V1: a single daily window per timerId) ----
+    var chargeEnabled by remember { mutableStateOf(false) }
+    var chargeStart by remember { mutableStateOf("22:00") }
+    var chargeEnd by remember { mutableStateOf("06:00") }
+    // The "charging will continue if the limit isn't reached at end time" option (wire target 1/2).
+    var keepCharging by remember { mutableStateOf(false) }
+    // Reused from the read-back so an edit targets the car's existing plan slot / trigger.
+    var chargeTimerId by remember { mutableStateOf("2") }
+    var chargeScheduledTime by remember { mutableStateOf("") }
     var chargeLoading by remember { mutableStateOf(true) }
     var chargeSaving by remember { mutableStateOf(false) }
 
@@ -85,10 +86,15 @@ fun ScheduleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
 
     suspend fun reloadCharge() {
         chargeLoading = true
-        when (val r = deps.schedule.chargingWindows()) {
+        when (val r = deps.schedule.chargePlan()) {
             is CallResult.Ok -> {
-                priorityToSoc = r.value.priorityToSoc
-                chargeWindows.clear(); chargeWindows.addAll(r.value.settings)
+                val p = r.value
+                chargeEnabled = p.command == "start"
+                p.startTime?.takeIf { it.isNotBlank() }?.let { chargeStart = it }
+                p.endTime?.takeIf { it.isNotBlank() }?.let { chargeEnd = it }
+                keepCharging = p.target == "1"
+                p.timerId?.takeIf { it.isNotBlank() }?.let { chargeTimerId = it }
+                p.scheduledTime?.takeIf { it.isNotBlank() }?.let { chargeScheduledTime = it }
             }
             is CallResult.Err -> snackbar("Couldn't load charging schedule: ${r.message}")
         }
@@ -114,48 +120,45 @@ fun ScheduleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
         SectionHeader("Charging schedule")
         CockpitCard {
             Text(
-                "Off-peak charge windows. The car only charges inside these times.",
+                "A daily off-peak charge window — the car charges inside these times.",
                 color = Brand.muted, fontSize = 12.sp,
             )
             if (chargeLoading) {
                 LoadingRow()
             } else {
-                if (chargeWindows.isEmpty()) {
-                    EmptyRow("No charge windows yet — add one below.")
-                } else {
-                    chargeWindows.forEachIndexed { i, w ->
-                        WindowRow(
-                            window = w,
-                            onStart = { t -> chargeWindows[i] = w.copy(startTime = t) },
-                            onEnd = { t -> chargeWindows[i] = w.copy(endTime = t) },
-                            onToggle = { on -> chargeWindows[i] = w.copy(sts = if (on) 1 else 0) },
-                            onDelete = { chargeWindows.removeAt(i) },
-                            ctx = ctx,
-                        )
-                    }
+                // The single window: start → end + an on/off switch.
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Brand.surface2).padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(Icons.Filled.Bolt, null, tint = Brand.accent, modifier = Modifier.size(20.dp))
+                    TimeChip(chargeStart) { pickTime(ctx, chargeStart, withSeconds = false) { chargeStart = it } }
+                    Text("→", color = Brand.muted)
+                    TimeChip(chargeEnd) { pickTime(ctx, chargeEnd, withSeconds = false) { chargeEnd = it } }
+                    Spacer(Modifier.weight(1f))
+                    Switch(checked = chargeEnabled, onCheckedChange = { chargeEnabled = it }, colors = brandSwitchColors(Brand.good))
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    GhostButton("Add window", Modifier.weight(1f)) {
-                        // id=0 => let the car assign the slot id. Windows returned by getBookingCharge carry
-                        // a real server id (preserved on edit); a client-invented id is NOT persisted, which
-                        // is why an added window came back sts=0. Existing windows keep their server id.
-                        chargeWindows.add(ChargingWindow(id = 0L, sts = 1, startTime = "22:00", endTime = "06:00"))
+                // "Keep charging past end time" — stock: "Charging will continue, if limit is not reached at end time."
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Keep charging past end time", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Charging will continue if the limit isn't reached at the end time.", color = Brand.muted, fontSize = 11.5.sp)
                     }
-                    PrimaryButton(if (chargeSaving) "Saving…" else "Save", Modifier.weight(1f), enabled = !chargeSaving) {
-                        chargeSaving = true
-                        scope.launch {
-                            val r = deps.schedule.setChargingWindows(
-                                ChargingBookingSetting(priorityToSoc = priorityToSoc, settings = chargeWindows.toList()),
-                            )
-                            chargeSaving = false
-                            when (r) {
-                                // The car applies this asynchronously (returns a sessionId); an immediate
-                                // re-GET reads the OLD state (sts=0) and would revert the toggle, making it
-                                // look unsaved. So keep the just-saved state locally and DON'T reload here —
-                                // the car syncs the enable a moment later.
-                                is CallResult.Ok -> snackbar("Charging schedule saved ✓")
-                                is CallResult.Err -> snackbar("Save failed ✗ ${r.message}")
-                            }
+                    Switch(checked = keepCharging, onCheckedChange = { keepCharging = it }, colors = brandSwitchColors())
+                }
+                PrimaryButton(if (chargeSaving) "Saving…" else "Save", Modifier.fillMaxWidth(), enabled = !chargeSaving) {
+                    chargeSaving = true
+                    scope.launch {
+                        val r = deps.schedule.setChargePlan(
+                            enabled = chargeEnabled, startTime = chargeStart, endTime = chargeEnd,
+                            keepCharging = keepCharging, timerId = chargeTimerId, scheduledTime = chargeScheduledTime,
+                        )
+                        chargeSaving = false
+                        when (r) {
+                            // Applied asynchronously; keep the just-saved state locally rather than
+                            // re-GETting immediately (the car syncs a moment later).
+                            is CallResult.Ok -> snackbar("Charging schedule saved ✓")
+                            is CallResult.Err -> snackbar("Save failed ✗ ${r.message}")
                         }
                     }
                 }
@@ -242,34 +245,6 @@ fun ScheduleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
     }
 }
 
-// ---------------------------------------------------------------- charging rows
-
-@Composable
-private fun WindowRow(
-    window: ChargingWindow,
-    onStart: (String) -> Unit,
-    onEnd: (String) -> Unit,
-    onToggle: (Boolean) -> Unit,
-    onDelete: () -> Unit,
-    ctx: Context,
-) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Brand.surface2).padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Icon(Icons.Filled.Bolt, null, tint = Brand.accent, modifier = Modifier.size(20.dp))
-        TimeChip(window.startTime) { pickTime(ctx, window.startTime, withSeconds = false, onStart) }
-        Text("→", color = Brand.muted)
-        TimeChip(window.endTime) { pickTime(ctx, window.endTime, withSeconds = false, onEnd) }
-        Spacer(Modifier.weight(1f))
-        Switch(checked = window.sts == 1, onCheckedChange = onToggle, colors = brandSwitchColors(Brand.good))
-        Icon(
-            Icons.Filled.Delete, "Remove", tint = Brand.faint,
-            modifier = Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onDelete).padding(6.dp),
-        )
-    }
-}
-
 // ---------------------------------------------------------------- departure rows
 
 @Composable
@@ -294,7 +269,7 @@ private fun DepartureRow(
                     append(time.take(5))
                     if (activeDays.isNotEmpty()) {
                         append("  ·  ")
-                        append(activeDays.joinToString("") { DAY_LABELS[it % 7] })
+                        append(activeDays.joinToString("") { DAY_LABELS[(it - 1).coerceIn(0, 6)] })
                     }
                     if (setting.preHeatSts == 1) append("  ·  preheat")
                 },
@@ -335,9 +310,10 @@ private fun AddDepartureSheet(
                 }
                 Text("Repeat on (pick at least one day)", color = Brand.muted, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    for (d in 0..6) {
+                    // day is 1-based on the wire (1=Mon .. 7=Sun); DAY_LABELS is indexed day-1.
+                    for (d in 1..7) {
                         val on = d in days
-                        SelectChip(DAY_LABELS[d], on) { if (on) days.remove(d) else days.add(d) }
+                        SelectChip(DAY_LABELS[d - 1], on) { if (on) days.remove(d) else days.add(d) }
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -380,8 +356,8 @@ private fun LoadingRow() =
 private fun EmptyRow(text: String) =
     Text(text, color = Brand.faint, fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
 
-/** Day labels indexed by the stock `CycleTime.day` (0-based; day 0 shown first).
- *  NOTE: the exact 0->weekday mapping isn't pinned in the decompile — day 0 is assumed Monday. */
+/** Day labels indexed by (stock `CycleTime.day` − 1). `day` is 1-based on the wire (1..7),
+ *  day 1 = Monday … day 7 = Sunday, so DAY_LABELS[day-1] is the label. */
 private val DAY_LABELS = arrayOf("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")
 
 /**
@@ -406,13 +382,13 @@ private val VENTI_LOCATIONS = intArrayOf(1, 2)
  * lists / null blocks are DROPPED from the JSON — so we populate every required block with real,
  * disabled (sts=0) entries so they actually serialize. Only `fragSetting` is optional (omitted).
  *
- * A full 7-day `cycleTimes` array (day 0..6) is sent with sts=1 for the picked days and sts=0 for the
+ * A full 7-day `cycleTimes` array (day 1..7) is sent with sts=1 for the picked days and sts=0 for the
  * rest, mirroring the stock builder that emits a complete week.
  */
 private fun newRecurringDeparture(
     name: String,
     time: String,            // "HH:mm:00"
-    selectedDays: Set<Int>,  // 0..6
+    selectedDays: Set<Int>,  // 1..7 (1=Mon .. 7=Sun)
     preheat: Boolean,
     cabin: Boolean,
 ): BookingTravelSetting = BookingTravelSetting(
@@ -422,10 +398,11 @@ private fun newRecurringDeparture(
     displaySts = 1,
     bookingType = 1,         // 1 = recurring (uses cycleTimes); 0 = one-off (requires a real temporaryTime)
     temporaryTime = TRAVEL_TEMP_PLACEHOLDER,
-    cycleTimes = (0..6).map { CycleTime(day = it, sts = if (it in selectedDays) 1 else 0, time = time) },
+    // day is 1-based (1..7) on the wire — confirmed in the live trace (NOT 0..6).
+    cycleTimes = (1..7).map { CycleTime(day = it, sts = if (it in selectedDays) 1 else 0, time = time) },
     preHeatSts = if (preheat) 1 else 0,
-    // Always send csSetting; temp "22" and a non-zero duration mirror stock's disabled default.
-    csSetting = TravelClimateSetting(duration = 10, sts = if (cabin) 1 else 0, temp = "22"),
+    // Always send csSetting; temp is a one-decimal String on the wire ("22.0"); sts drives on/off.
+    csSetting = TravelClimateSetting(duration = 10, sts = if (cabin) 1 else 0, temp = "22.0"),
     // Required non-empty blocks, all disabled (the UI doesn't expose per-seat/wheel yet).
     ventiSettings = VENTI_LOCATIONS.map { TravelSeatSetting(duration = 10, level = 1, location = it, sts = 0) },
     heatSettings = HEAT_LOCATIONS.map { TravelSeatSetting(duration = 10, level = 1, location = it, sts = 0) },
@@ -440,7 +417,7 @@ private fun newRecurringDeparture(
 private fun BookingTravelSetting.sanitizedForWrite(): BookingTravelSetting = copy(
     btId = if (btId < 1) 1 else btId,
     temporaryTime = temporaryTime.ifBlank { TRAVEL_TEMP_PLACEHOLDER },
-    csSetting = csSetting ?: TravelClimateSetting(duration = 10, sts = 0, temp = "22"),
+    csSetting = csSetting ?: TravelClimateSetting(duration = 10, sts = 0, temp = "22.0"),
     ventiSettings = ventiSettings.ifEmpty { VENTI_LOCATIONS.map { TravelSeatSetting(10, 1, it, 0) } },
     heatSettings = heatSettings.ifEmpty { HEAT_LOCATIONS.map { TravelSeatSetting(10, 1, it, 0) } },
     whlSetting = whlSetting ?: TravelWheelSetting(duration = 10, level = 2, sts = 0),

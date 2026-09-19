@@ -36,6 +36,7 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
 
         return loaded.let(::backfillBakedSecrets)
             .let(::ensureDeviceId)
+            .let(::migrateDebugLogging)
             .apply {
                 // Log validation failures but allow loading (catches bad baked secrets).
                 validate().forEach { Logx.w("config", "Load validation warning: $it") }
@@ -63,6 +64,16 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
     }
 
     /**
+     * One-time migration from the old single [SecretsConfig.debugLogging] toggle to the two
+     * independent [SecretsConfig.logHttp] / [SecretsConfig.logBle] gates. A user who had debug
+     * logging ON (and neither new gate set yet) keeps BOTH categories on. Only touches config
+     * when it applies; otherwise returns it unchanged.
+     */
+    private fun migrateDebugLogging(cfg: SecretsConfig): SecretsConfig =
+        if (cfg.debugLogging && !cfg.logHttp && !cfg.logBle) cfg.copy(logHttp = true, logBle = true)
+        else cfg
+
+    /**
      * Sign out = wipe everything that identifies or authenticates the user from this device: the
      * account (email/password), every session token, the VIN, the car nickname, and the device
      * identifiers (so a re-login mints a fresh device slot). Keeps only the region-static extracted
@@ -84,6 +95,30 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
      */
     fun setCarSideAutoLock(enabled: Boolean) =
         update { it.copy(carSideAutoLock = enabled) }
+
+    /**
+     * Switch the active region: repopulates every region-derived host + identifier
+     * ([SecretsConfig.baseUrl] / [SecretsConfig.azureHost] / [SecretsConfig.xchangerHost] /
+     * [SecretsConfig.projectId] / [SecretsConfig.regionCode] / [SecretsConfig.snsRegion]) from the
+     * static [com.openzeekr.app.net.Region] catalog. countryCode is only overwritten when it still
+     * holds the previous region's default, so a user's manual country edit survives a region change.
+     * The per-account secrets are NOT touched — the user supplies their region's keys separately.
+     * Callers must invoke [com.openzeekr.app.Deps.onEndpointChanged] afterwards to rebuild the HTTP
+     * client against the new TSP base URL.
+     */
+    fun setRegion(code: String) = update { cur ->
+        val prev = com.openzeekr.app.net.Region.byCode(cur.regionCode)
+        val next = com.openzeekr.app.net.Region.byCode(code)
+        cur.copy(
+            regionCode = next.code,
+            baseUrl = next.tspBaseUrl,
+            azureHost = next.azureHost,
+            xchangerHost = next.xchangerHost,
+            projectId = next.projectId,
+            snsRegion = next.snsRegion,
+            countryCode = if (cur.countryCode == prev.countryCode) next.countryCode else cur.countryCode,
+        )
+    }
 
     /** Re-apply the baked build defaults (secrets.properties), keeping device id. */
     fun resetToBuildDefaults() =
@@ -138,6 +173,10 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
             password = incoming.password.ifBlank { cur.password },
             vin = incoming.vin.ifBlank { cur.vin },
             accessToken = incoming.accessToken.ifBlank { cur.accessToken },
+            // NOTE: region/host fields are intentionally NOT merged here. Their defaults are
+            // non-blank (EU), so an absent key in a plain zeekr_secrets.json would deserialize to
+            // the EU default and silently clobber the user's selected region. Region is changed only
+            // through setRegion() / the Settings picker.
         )
         merged.check() // Strict validation for user-initiated import
         persist(merged)

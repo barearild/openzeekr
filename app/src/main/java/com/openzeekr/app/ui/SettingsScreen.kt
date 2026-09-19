@@ -74,7 +74,8 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
     var status by remember { mutableStateOf("") }
     var showHeroLab by remember { mutableStateOf(false) }
     var confirmSignOut by remember { mutableStateOf(false) }
-    var confirmLogging by remember { mutableStateOf(false) }
+    // Which log category is pending a sensitive-data confirmation: "http", "ble", or null.
+    var pendingLogEnable by remember { mutableStateOf<String?>(null) }
 
     fun set(update: (SecretsConfig) -> SecretsConfig) { cfg = update(cfg) }
     val loggedIn = liveCfg.accessToken.isNotBlank()
@@ -149,26 +150,45 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             UnitRow("Temperature", listOf("c" to "°C", "f" to "°F"), liveCfg.tempUnit) { v -> store.update { it.copy(tempUnit = v) } }
         }
 
+        // -------- region --------
+        RegionSection(liveCfg, store) { deps.onEndpointChanged() }
+
         // -------- app --------
         SettingsCard {
             CardTitle("App")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Debug logging", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                    Text("Records the on-device log. Exposes keys, tokens & VIN — keep off unless debugging.",
+                    Text("HTTP logging", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text("Logs cloud requests + responses (tokens, VIN).",
                         color = Brand.muted, fontSize = 12.sp)
                 }
                 Switch(
-                    checked = liveCfg.debugLogging,
+                    checked = liveCfg.logHttp,
                     // Turning OFF is immediate; turning ON first shows the sensitive-data warning.
                     onCheckedChange = { on ->
-                        if (on) confirmLogging = true
-                        else { store.update { it.copy(debugLogging = false) }; Logx.setEnabled(false) }
+                        if (on) pendingLogEnable = "http"
+                        else { store.update { it.copy(logHttp = false) }; Logx.setHttp(false) }
                     },
                     colors = brandSwitchColors(),
                 )
             }
-            if (liveCfg.debugLogging) LogViewer()
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("BLE logging", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text("Logs digital-key / proximity BLE traffic (key material).",
+                        color = Brand.muted, fontSize = 12.sp)
+                }
+                Switch(
+                    checked = liveCfg.logBle,
+                    // Turning OFF is immediate; turning ON first shows the sensitive-data warning.
+                    onCheckedChange = { on ->
+                        if (on) pendingLogEnable = "ble"
+                        else { store.update { it.copy(logBle = false) }; Logx.setBle(false) }
+                    },
+                    colors = brandSwitchColors(),
+                )
+            }
+            if (liveCfg.logHttp || liveCfg.logBle) LogViewer()
             OutlinedButton(onClick = { showHeroLab = true }, modifier = Modifier.fillMaxWidth()) {
                 Text("Hero lab (graphics test)")
             }
@@ -240,31 +260,93 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
         )
     }
 
-    if (confirmLogging) {
+    if (pendingLogEnable != null) {
+        val category = pendingLogEnable
         androidx.compose.material3.AlertDialog(
-            onDismissRequest = { confirmLogging = false },
-            title = { Text("⚠️ Enable debug logging?") },
+            onDismissRequest = { pendingLogEnable = null },
+            title = { Text("⚠️ Enable ${if (category == "ble") "BLE" else "HTTP"} logging?") },
             text = {
                 Text(
-                    "Debug logging writes detailed diagnostics to the on-device log — and that log " +
+                    "Debug logging writes detailed diagnostics to the on-device log - and that log " +
                         "will contain SENSITIVE DATA: your digital-key material, session tokens, VIN, " +
                         "device IDs and location. Anything with access to the app's logs could read it " +
                         "and potentially unlock or track your car. (Your account password is NOT logged.)\n\n" +
-                        "Only turn this on if you're helping debug an issue, and turn it back off — and " +
-                        "clear the log — when you're done. Are you sure you want to continue?",
+                        "Only turn this on if you're helping debug an issue, and turn it back off - and " +
+                        "clear the log - when you're done. Are you sure you want to continue?",
                 )
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(onClick = {
-                    confirmLogging = false
-                    store.update { it.copy(debugLogging = true) }
-                    Logx.setEnabled(true)
+                    if (category == "ble") { store.update { it.copy(logBle = true) }; Logx.setBle(true) }
+                    else { store.update { it.copy(logHttp = true) }; Logx.setHttp(true) }
+                    pendingLogEnable = null
                 }) { Text("Enable logging", color = Brand.crit) }
             },
             dismissButton = {
-                androidx.compose.material3.TextButton(onClick = { confirmLogging = false }) { Text("Cancel") }
+                androidx.compose.material3.TextButton(onClick = { pendingLogEnable = null }) { Text("Cancel") }
             },
         )
+    }
+}
+
+/**
+ * Region selector. Region is not a secret — it just picks which set of Geely/ECARX gateway hosts
+ * (TSP + Azure overseas-app + xchanger DK) the app talks to, plus the projectId / country / SNS
+ * region. Switching repopulates those from the static [com.openzeekr.app.net.Region] catalog via
+ * [com.openzeekr.app.config.ConfigStore.setRegion] and rebuilds the HTTP client. The per-account
+ * six secrets are region-specific too, so a non-EU region also needs its OWN extracted keys.
+ */
+@Composable
+private fun RegionSection(
+    liveCfg: SecretsConfig,
+    store: com.openzeekr.app.config.ConfigStore,
+    onEndpointChanged: () -> Unit,
+) {
+    val current = com.openzeekr.app.net.Region.byCode(liveCfg.regionCode)
+    var showAdvanced by remember { mutableStateOf(false) }
+    SettingsCard {
+        CardTitle("Region")
+        Text(
+            "Which regional Zeekr backend to use. Each region has its own servers AND its own six " +
+                "secrets — switching region does not change your keys, so provide the keys extracted " +
+                "for that region (zeekr_key_extractor --region ${current.extractorRegion}).",
+            color = Brand.muted, fontSize = 12.sp,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            com.openzeekr.app.net.Region.ALL.forEach { r ->
+                SelectChip(r.code, selected = current.code == r.code) {
+                    if (current.code != r.code) { store.setRegion(r.code); onEndpointChanged() }
+                }
+            }
+        }
+        Text(
+            current.displayName + (if (current.verified) "  ·  verified" else "  ·  experimental"),
+            color = if (current.verified) Brand.good else Brand.crit, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+        )
+        if (!current.verified) {
+            Text(
+                "⚠️ Reconstructed from the stock host tables — not verified on a real car. If login or " +
+                    "the digital key fail, a host may be wrong for your market; correct it under Advanced.",
+                color = Brand.muted, fontSize = 12.sp,
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().clickable { showAdvanced = !showAdvanced },
+            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Advanced: host overrides", fontSize = 13.sp, color = Brand.muted)
+            Icon(if (showAdvanced) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, null, tint = Brand.muted)
+        }
+        if (showAdvanced) {
+            Field("TSP gateway (baseUrl)", liveCfg.baseUrl) { v -> store.update { it.copy(baseUrl = v) }; onEndpointChanged() }
+            Field("Azure overseas-app host", liveCfg.azureHost) { v -> store.update { it.copy(azureHost = v) } }
+            Field("xchanger DK host", liveCfg.xchangerHost) { v -> store.update { it.copy(xchangerHost = v) } }
+            Field("X-PROJECT-ID", liveCfg.projectId) { v -> store.update { it.copy(projectId = v) }; onEndpointChanged() }
+            Field("Country code", liveCfg.countryCode) { v -> store.update { it.copy(countryCode = v) } }
+            Field("Push SNS region", liveCfg.snsRegion) { v -> store.update { it.copy(snsRegion = v) } }
+            Text("Re-selecting a region above resets all of these to that region's defaults.",
+                color = Brand.faint, fontSize = 11.sp)
+        }
     }
 }
 

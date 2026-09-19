@@ -82,6 +82,14 @@ data class SecretsConfig(
     val countryCode: String = "SE",
     /** X-PROJECT-ID the DK/TSP gateway validates (EU→ZEEKR_EU). */
     val projectId: String = "ZEEKR_EU",
+    /** Azure "overseas-app" gateway host (scheme+host, no trailing slash). The usercenter (login),
+     *  app-server (inbox) and message-centre (push) all hang off this one host. Seeded from the
+     *  selected [com.openzeekr.app.net.Region]; user-overridable for an unverified region. */
+    val azureHost: String = "https://gateway-pub-azure.zeekr.eu",
+    /** xchanger/ECARX DK-backend host (scheme+host, no trailing slash). Seeded from the region. */
+    val xchangerHost: String = "https://api-zk.ecloudeu.com",
+    /** AWS SNS region the message-centre registers the push endpoint under (EU→eu-central-1). */
+    val snsRegion: String = "eu-central-1",
 
     // ---- device headers (plain, server-logged, none attested) ----
     val appId: String = "ZEEKRCNCH001M0001",
@@ -150,8 +158,14 @@ data class SecretsConfig(
     val onboardingDone: Boolean = false,
     /** One-time "support this passion project" note has been shown/dismissed. */
     val supportNoteShown: Boolean = false,
-    /** Collect + show the on-device debug log. Off hides the log viewer entirely. */
+    /** Collect + show the on-device debug log. Off hides the log viewer entirely.
+     *  DEPRECATED as a live toggle - kept only so old persisted JSON still parses and so the
+     *  one-time migration (ConfigStore) can carry it over to [logHttp]/[logBle]. */
     val debugLogging: Boolean = false,
+    /** Collect + show the on-device HTTP-call log (cloud requests/responses: tokens, VIN). */
+    val logHttp: Boolean = false,
+    /** Collect + show the on-device BLE log (digital-key / proximity traffic: key material). */
+    val logBle: Boolean = false,
     /** User-set display name for the car (shown in the top bar). Blank = use the model
      *  name. The cloud rename API (modify-vehicle / vehNickname) is wired separately. */
     val carNickname: String = "",
@@ -217,6 +231,20 @@ data class SecretsConfig(
 
     /** The secret used for X-SIGNATURE. prodSecret per the reversing notes. */
     val signSecret: String get() = prodSecret
+
+    // ---- region-derived hosts (all hang off [azureHost] / [xchangerHost], seeded per region) ----
+    private val azureBase: String get() = azureHost.trimEnd('/')
+    /** User-center (login) base, trailing slash (e.g. …/zeekr-cuc-idaas/). */
+    val usercenterUrl: String get() = "$azureBase/zeekr-cuc-idaas/"
+    /** App-server base, trailing slash (e.g. …/overseas-app/). */
+    val appServerUrl: String get() = "$azureBase/overseas-app/"
+    /** Message-centre service root (no trailing slash) for FCM push registration. */
+    val messageCoreUrl: String get() = "$azureBase/zom-message-core"
+    /** Inbox base (no trailing slash) — sub-paths /home, /read-all appended by callers. */
+    val inboxUrl: String get() = "$azureBase/overseas-app/member/inbox"
+    /** xchanger DK-backend session/secure URL (full, with the identity_type query). */
+    val xchangerSessionUrl: String get() =
+        "${xchangerHost.trimEnd('/')}/auth/account/session/secure?identity_type=zeekr"
 
     /** True once the overseas-app HMAC AK/SK are present, i.e. the message inbox can auth. */
     val overseasReady: Boolean get() = overseasAccessKey.isNotBlank() && overseasSecretKey.isNotBlank()

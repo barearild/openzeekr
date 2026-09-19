@@ -86,13 +86,13 @@ class PushRegistrar(
             Logx.d(TAG, "not registering: not logged in / overseas AK-SK missing")
             return
         }
-        post(SYNC_PATH, syncBody(token, openId))
+        post(SYNC_PATH, syncBody(token, openId, cfg.snsRegion))
     }
 
-    private fun syncBody(token: String, openId: String): String =
+    private fun syncBody(token: String, openId: String, snsRegion: String): String =
         // Manual JSON so field ORDER matches stock byte-for-byte (the gateway digests body-as-sent).
         "{\"appId\":\"$APP_ID\",\"deviceToken\":\"$token\",\"platformType\":1," +
-            "\"receive\":\"$openId\",\"region\":\"$REGION\"}"
+            "\"receive\":\"$openId\",\"region\":\"$snsRegion\"}"
 
     private fun disableBody(token: String): String {
         val openId = openId(store.current())
@@ -115,7 +115,7 @@ class PushRegistrar(
 
     private suspend fun post(path: String, bodyJson: String) = withContext(Dispatchers.IO) {
         val cfg = store.current()
-        val url = "$MESSAGE_CORE$path"
+        val url = "${cfg.messageCoreUrl}$path"
         val bodyBytes = bodyJson.toByteArray(Charsets.UTF_8)
 
         val httpUrl = url.toHttpUrl()
@@ -174,15 +174,14 @@ class PushRegistrar(
     companion object {
         private const val TAG = "push"
 
-        // EU message-centre service (captured live). The EU region/url response returns an EMPTY
-        // messageCoreUrl, so the segment is hardcoded like the stock app: "zom-message-core".
-        const val MESSAGE_CORE = "https://gateway-pub-azure.zeekr.eu/zom-message-core"
+        // Message-centre service host is region-derived (SecretsConfig.messageCoreUrl). The
+        // region/url response returns an EMPTY messageCoreUrl, so the "zom-message-core" segment is
+        // fixed like the stock app; only the gateway host and the SNS region vary per region.
         const val SYNC_PATH = "/open-api/v1/mcs/notice/receiver/equipment/relation/sycn"   // (stock spelling)
         const val DISABLE_PATH = "/open-api/v1/mcs/notice/receiver/equipment/relation/disable"
 
         const val APP_ID = "10008"           // prod push id (== msgAppId)
         const val MSG_CLIENT_ID = "1009"     // prod tenant (== app-authorization)
-        const val REGION = "eu-central-1"
         const val CLIENT_ID = "1d1921ad4d314ab7b0042a2fe0f479c3"
         const val APP_CODE = "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc"
         const val TENANT = "3300671070785540000"

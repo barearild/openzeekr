@@ -50,7 +50,7 @@ class AccountLogin(private val store: ConfigStore) {
     private val httpLog = okhttp3.logging.HttpLoggingInterceptor { m -> Logx.d("http", m) }
     // Runs just before httpLog and sets its level from the debug-logging toggle.
     private val httpLogGate = okhttp3.Interceptor { chain ->
-        httpLog.level = if (Logx.isEnabled) okhttp3.logging.HttpLoggingInterceptor.Level.HEADERS
+        httpLog.level = if (Logx.isHttpEnabled) okhttp3.logging.HttpLoggingInterceptor.Level.HEADERS
             else okhttp3.logging.HttpLoggingInterceptor.Level.NONE
         chain.proceed(chain.request())
     }
@@ -99,12 +99,12 @@ class AccountLogin(private val store: ConfigStore) {
             Logx.d("login", "email=${cfg.email.ifBlank { "(blank)" }} deviceId=${cfg.deviceIdentifier}")
             Logx.d("login", "hmacAccessKey=${Logx.preview(cfg.hmacAccessKey)} hmacSecretKey=${Logx.preview(cfg.hmacSecretKey)}")
             Logx.d("login", "passwordPublicKey=${Logx.preview(cfg.passwordPublicKey)} prodSecret=${Logx.preview(cfg.prodSecret)}")
-            Logx.d("login", "usercenter=${ZeekrConst.EU_USERCENTER} tsp=${cfg.baseUrl}")
+            Logx.d("login", "region=${cfg.regionCode} usercenter=${cfg.usercenterUrl} tsp=${cfg.baseUrl}")
 
             require(cfg.email.isNotBlank() && cfg.password.isNotBlank()) { "email/password not set (enter them in Settings → Account)" }
             require(cfg.hmacAccessKey.isNotBlank() && cfg.hmacSecretKey.isNotBlank()) { "hmac keys not set" }
             require(cfg.prodSecret.isNotBlank()) { "prod_secret not set" }
-            val uc = ZeekrConst.EU_USERCENTER
+            val uc = cfg.usercenterUrl
             val tsp = cfg.baseUrl.trimEnd('/') + "/"
 
             // 1. check user exists (CANARY: validates the user-center HMAC before
@@ -179,7 +179,7 @@ class AccountLogin(private val store: ConfigStore) {
                 }
                 val sig = hfSign(
                     signSecret = hfKey,
-                    url = ZeekrConst.XCHANGER_SESSION,
+                    url = cfg.xchangerSessionUrl,
                     method = "POST",
                     body = bodyStr,
                     nonce = nonce,
@@ -194,7 +194,7 @@ class AccountLogin(private val store: ConfigStore) {
                 // Only Accept + X-api-* participate in the signature; the rest are unsigned.
                 // (No PLATFORM header — stock adds it only for GEELY/CMA operators, not ZEEKR.)
                 val xRoot = execRoot(xchangerClient, Request.Builder()
-                    .url(ZeekrConst.XCHANGER_SESSION)
+                    .url(cfg.xchangerSessionUrl)
                     .header("urlname", "user-api")
                     .header("X-APP-ID", ZeekrConst.XCHANGER_APP_ID)
                     .header("Accept", ZeekrConst.XCHANGER_ACCEPT)
@@ -241,11 +241,11 @@ class AccountLogin(private val store: ConfigStore) {
                 val deviceToken = "OZ" + cfg.deviceIdentifier.replace("-", "").take(140)
                 val eqBody = buildJsonObject {
                     put("appId", "10008"); put("deviceToken", deviceToken)
-                    put("platformType", 1); put("receive", accountUuid ?: ""); put("region", "eu-central-1")
+                    put("platformType", 1); put("receive", accountUuid ?: ""); put("region", cfg.snsRegion)
                 }
                 Logx.d("login", "step 4c equipment/relation register (push device, claims session) …")
                 val eqRoot = execRoot(ucClient, Request.Builder()
-                    .url("https://gateway-pub-azure.zeekr.eu/zom-message-core/open-api/v1/mcs/notice/receiver/equipment/relation/sycn")
+                    .url("${cfg.messageCoreUrl}/open-api/v1/mcs/notice/receiver/equipment/relation/sycn")
                     .header("app-authorization", "1009")
                     .header("client-id", ZeekrConst.XCHANGER_CLIENT_ID)
                     .header("msgClientId", "1009")

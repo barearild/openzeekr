@@ -12,10 +12,11 @@ package com.openzeekr.app.net
  */
 object ZeekrConst {
 
-    // ---- EU host families ----
-    const val EU_APP_SERVER = "https://gateway-pub-azure.zeekr.eu/overseas-app/"
-    const val EU_USERCENTER = "https://gateway-pub-azure.zeekr.eu/zeekr-cuc-idaas/"
-    // TSP gateway = SecretsConfig.baseUrl (https://eu-snc-tsp-api-gw.zeekrlife.com)
+    // ---- host families are REGION-DERIVED (see [Region] + SecretsConfig host helpers) ----
+    //   usercenter  = SecretsConfig.usercenterUrl   (…/zeekr-cuc-idaas/)
+    //   app-server  = SecretsConfig.appServerUrl    (…/overseas-app/)
+    //   TSP gateway = SecretsConfig.baseUrl         (https://{code}-snc-tsp-api-gw.zeekrlife.com)
+    //   xchanger DK = SecretsConfig.xchangerSessionUrl
 
     // ---- usercenter / app-server paths ----
     const val URL_URL = "region/url"
@@ -38,10 +39,10 @@ object ZeekrConst {
     //      the device here is what makes the vehicle accept our BLE DK (0x0102 -> 0x1011).
     //      This client uses app-authorization "1009" (vs TSP's "1003"). ----
     const val XCHANGER_CLIENT_ID = "1d1921ad4d314ab7b0042a2fe0f479c3"
-    // EU host: exchangerHostChanger rewrites api.xchanger.cn -> api-zk.ecloudeu.com for EU/ZEEKR
-    // (host.txt: EU/ZEEKR gen2SingleAuthPrefix "https://api-zk" + suffix ".ecloudeu.com"). The .cn
-    // host is the CN gateway and does NOT know the EU app (returns 1440 "验签APP不存在").
-    const val XCHANGER_SESSION = "https://api-zk.ecloudeu.com/auth/account/session/secure?identity_type=zeekr"
+    // xchanger DK-backend session host is REGION-DERIVED (SecretsConfig.xchangerSessionUrl):
+    // exchangerHostChanger rewrites api.xchanger.cn -> api-zk.{regional suffix} per host.txt
+    // (EU/ZEEKR: gen2SingleAuthPrefix "https://api-zk" + suffix ".ecloudeu.com"; APAC ".ecloudkr.com";
+    // NA ".ecloudus.com"). The .cn host is the CN gateway and rejects overseas apps (1440 "验签APP不存在").
     const val XCHANGER_APP_ID = "8bbb65c1c4a288a28152c36dfa792014"   // from the xchanger JWT appId
     const val XCHANGER_OPERATOR = "ZEEKR"
     /** Stock Accept header value on the HF calls — part of the signed header set. */

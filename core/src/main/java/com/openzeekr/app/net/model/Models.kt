@@ -70,11 +70,11 @@ data class RemoteControlResponse(
 //
 // Two car-side schedule types, both on the `ms-charge-manage` service (NOT ms-remote-control):
 //
-//  (a) SCHEDULED CHARGING — "booking charge" off-peak windows. serviceId "ZAZ".
-//      POST ms-charge-manage/api/v2.0/charge/setBookingCharge  body = ChargingBookingRequest
-//      GET  /ms-charge-manage/api/v2.0/charge/getBookingCharge?groupNumber=<n>  -> ChargingBookingSetting
-//      (stock: VclEnergyApi.setChargingPlanV2 / getChargingPlanV2; request bean
-//       ChargingPlanRequestV2Bean{serviceId,bookingDetailSetting:MultipleBookingChargingBean}).
+//  (a) SCHEDULED CHARGING — V1 "charging plan": a SINGLE daily window per timerId (no serviceId).
+//      POST ms-charge-manage/api/v1.0/charge/setChargingPlan  body = ChargingPlanV1Request
+//      GET  ms-charge-manage/api/v1.0/charge/getChargingPlan   (no params) -> ChargingPlanV1
+//      (stock: VclEnergyApi.setChargingPlan / getChargingPlan; request bean ChargingPlanRequestBean.
+//       The V2 booking-charge plane 400s on this EU car — see SCHEDULE_TRACE_FINDINGS.md.)
 //
 //  (b) DEPARTURE / "booking travel" — precondition (climate/preheat) by a departure time,
 //      optionally recurring per weekday. serviceId "ZAO", command start|edit|stop (=create|update|delete).
@@ -87,38 +87,55 @@ data class RemoteControlResponse(
 // WITHOUT a default; only genuinely-optional nested blocks carry a `= null` / `= emptyList()` default
 // so they drop out when unused (matching the stock beans, which send the full object every time).
 
-// ---- (a) scheduled charging (booking windows) ----
+// ---- (a) scheduled charging — V1 charging-plan (the plane THIS EU car actually speaks) ----
+// The stock app scheduled charging with POST ms-charge-manage/api/v1.0/charge/setChargingPlan and
+// read it back with GET .../v1.0/charge/getChargingPlan. The V2 "booking charge" plane 400s on this
+// car (getBookingCharge -> 000002 "groupNumber必须大于等于1"), so V1 is what we use. V1 is a SINGLE
+// daily window per timerId (no list, no weekday mask). Byte-exact from SCHEDULE_TRACE_FINDINGS.md.
 
-/** One off-peak charge window. Mirrors stock `MultipleBookingChargingSettingBean`
- *  {id, sts, startTime, endTime}. `sts` = 1 enabled / 0 disabled; times are "HH:mm". */
+/**
+ * Body of `POST setChargingPlan` (V1). Mirrors stock `ChargingPlanRequestBean`. There is NO
+ * `serviceId` on the V1 body. `command` "start" = enabled / "stop" = disabled; on stop the app
+ * OMITS startTime/endTime (kept nullable so they drop from the wire). `target` is the
+ * keep-charging-past-end mode ("1" = ON, "2" = OFF), NOT a SOC%. `timerId` is reused from the
+ * read-back ("2" on this car). `bcCycleActive`/`bcTempActive` are battery-conditioning toggles the
+ * user never touches — always send false.
+ */
 @Serializable
-data class ChargingWindow(
-    val id: Long,
-    val sts: Int,
-    val startTime: String,
-    val endTime: String,
+data class ChargingPlanV1Request(
+    val bcCycleActive: Boolean,
+    val bcTempActive: Boolean,
+    val command: String,             // "start" | "stop"
+    val startTime: String? = null,   // "HH:mm"; omitted on stop
+    val endTime: String? = null,     // "HH:mm"; omitted on stop
+    val scheduledTime: String,       // epoch-ms string (next trigger)
+    val target: String,              // "1" = keep charging past end until limit, "2" = stop at end
+    val timerId: String,             // reuse the read-back timerId
 )
 
-/** The charge-booking payload. Mirrors stock `MultipleBookingChargingBean`
- *  {priorityToSoc, settings}. `priorityToSoc` = whether the target-SOC wins over the window. */
+/** Response of `GET getChargingPlan` (V1). Mirrors stock `ChargingPlanBean`; all fields nullable
+ *  since a car with no plan yet returns sparse data. `command` "start"/"stop" is the enable state;
+ *  `dataSource` flips "DHU"->"APP" once the app writes; `target` is the keep-charging mode. */
 @Serializable
-data class ChargingBookingSetting(
-    val priorityToSoc: Boolean,
-    val settings: List<ChargingWindow>,
-)
-
-/** Body of `POST setBookingCharge`. Mirrors stock `ChargingPlanRequestV2Bean`
- *  {serviceId, bookingDetailSetting}. serviceId is always "ZAZ" for booking charge. */
-@Serializable
-data class ChargingBookingRequest(
-    val serviceId: String,
-    val bookingDetailSetting: ChargingBookingSetting,
+data class ChargingPlanV1(
+    val timerId: String? = null,
+    val target: String? = null,
+    val startTime: String? = null,
+    val endTime: String? = null,
+    val command: String? = null,
+    val scheduledTime: String? = null,
+    val setting: String? = null,
+    val dataSource: String? = null,
+    val bcTempActive: Boolean? = null,
+    val bcCycleActive: Boolean? = null,
+    val updateTime: Long? = null,
 )
 
 // ---- (b) departure / booking-travel schedule ----
 
-/** One weekday recurrence. Mirrors stock `CycleTime` {day, sts, time}. `day` is 0-based
- *  (stock builds a 7-entry week, day 0..6); `sts` = 1 active / 0 inactive; time is "HH:mm:00". */
+/** One weekday recurrence. Mirrors stock `CycleTime` {day, sts, time}. `day` is **1-based (1..7)**
+ *  on the wire — confirmed in the live trace (day 1..7, NOT 0..6); day 1 = Monday, day 7 = Sunday.
+ *  `sts` = 1 active / 0 inactive; time is "HH:mm:00". */
 @Serializable
 data class CycleTime(
     val day: Int,
@@ -692,13 +709,19 @@ data class VehicleCapabilities(
     val frunk get() = has("ZK_remote_hood_control", "hood")
     val tailgate get() = has("C_RDU_2", "trunk")
     val chargeCover get() = has("charging_cover", "charge_cover")
-    // Sunroof/sunshade: fail CLOSED (see [sunroofConfirmed]/[sunshadeConfirmed]). The stock
-    // capability transform (com.zeekr.snc.iov.model.base.ModelTransformKt, VehicleFunctionBean
-    // switch) enables the sunroof control ONLY when functionCode "C_RWS_4" is present AND its
-    // paramValueUse (trimmed) == "Y" (sswitch_5), and the sunshade ONLY when functionCode
-    // "remote_control_curtain_2" is present (sswitch_10). A car without the key omits it entirely,
-    // so a fail-open has() would wrongly show these on cars that lack the hardware.
-    val sunroof get() = sunroofConfirmed
+    // Sunroof: presence gate on the functionCode the car actually reports. The per-VIN capability
+    // list carries functionCode "C_RWS_4" when the car has a remote sunroof, so its presence IS the
+    // sensor (no more fail-closed paramValueUse=="Y" check that hid the control on cars whose list
+    // omits that exact value). has() matches by case-insensitive substring, so "C_RWS_4" also
+    // tolerates suffixed variants, and UNKNOWN (nothing fetched yet, known=false) reads true via
+    // has()'s fail-open so the control isn't hidden before the list loads. ([sunroofConfirmed] kept
+    // for reference.)
+    // Sunshade: still fail CLOSED (see [sunshadeConfirmed]). The stock capability transform
+    // (com.zeekr.snc.iov.model.base.ModelTransformKt, VehicleFunctionBean switch) enables the
+    // sunshade ONLY when functionCode "remote_control_curtain_2" is present (sswitch_10). A car
+    // without the key omits it entirely, so a fail-open has() would wrongly show it on cars that
+    // lack the hardware.
+    val sunroof get() = has("C_RWS_4")
     val windows get() = has("remote_control_window")
     val sunshade get() = sunshadeConfirmed
     val engineRes get() = has("C_RES")
@@ -708,12 +731,14 @@ data class VehicleCapabilities(
     val fragrance get() = has("fragrance")
     val climate get() = has("climate")
     val seatHeat get() = has("seat_heating")
-    // Cooled seats — fail OPEN. A fail-CLOSED gate on functionCode "seat_ventilation"=Y wrongly hid
-    // this on cars (e.g. the 7GT) whose capability list doesn't carry that exact entry even though the
-    // hardware + control work fine. Show it when unknown, when ventilation is advertised, or when seat
-    // heating exists (ventilated-seat trims with heating also have cooling). A dead control on a bare
-    // model is better than a hidden one on a car that has it. ([seatCoolConfirmed] kept for reference.)
-    val seatCool get() = has("seat_ventilation") || seatHeat
+    // Cooled seats — presence gate on the capability the car actually reports. The per-VIN allow-list
+    // carries "seat_ventilation_level" when the car supports ventilated/cooled seats, so that code's
+    // presence IS the sensor (no more fail-open "|| seatHeat" workaround). has() matches by
+    // case-insensitive substring, so has("seat_ventilation") already catches "seat_ventilation_level";
+    // both are listed for clarity + robustness if has() ever tightens to exact match. UNKNOWN (nothing
+    // fetched yet, known=false) still reads true via has()'s fail-open, so the control isn't hidden
+    // before the list loads. ([seatCoolConfirmed] kept for reference.)
+    val seatCool get() = has("seat_ventilation_level") || has("seat_ventilation")
     val steeringHeat get() = has("steering_wheel_heating")
     val charging get() = has("V_RCS", "RCS")
     val glovebox get() = has("storageBox_codeLock", "T_ZAP", "ZAD")
@@ -734,8 +759,15 @@ object VehicleCapabilityParse {
             else -> null
         } ?: return VehicleCapabilities.UNKNOWN
         val beans = arr.mapNotNull { it as? JsonObject }
-        val codes = beans.mapNotNull { (it["functionCode"] as? JsonPrimitive)?.contentOrNull }
-            .filter { it.isNotBlank() }.toSet()
+        // Search across functionCode + paramCode + paramValueCode, not just functionCode: a feature's
+        // real key can live in ANY of them. e.g. cooled seats surface as paramValueCode
+        // "seat_ventilation_level" (NOT a functionCode), and the charge lid as paramValueCode
+        // "charging_cover" — gating only on functionCode wrongly hid both. has() substring-matches
+        // this union, so each feature getter finds its key wherever the car reports it.
+        val codes = beans.flatMap { o ->
+            listOf("functionCode", "paramCode", "paramValueCode")
+                .mapNotNull { (o[it] as? JsonPrimitive)?.contentOrNull }
+        }.filter { it.isNotBlank() }.toSet()
         if (codes.isEmpty()) return VehicleCapabilities.UNKNOWN
         // Roof features — POSITIVE confirmation only (fail closed). Mirrors the stock
         // ModelTransformKt VehicleFunctionBean switch:
@@ -917,7 +949,17 @@ data class ElectricStatusVo(
     val distanceToEmptyOnBatteryOnly: String? = null,
     /** Battery temperature regulation / preconditioning active. */
     val hvBatteryPreHeatingActive: Boolean? = null,
+    /** Average energy consumption (car-native unit, assume kWh/100km). Blank on some cars, so read
+     *  tolerantly; [averTraPowerConsumption] is the trip-window average used as a fallback. */
+    val averPowerConsumption: String? = null,
+    val averTraPowerConsumption: String? = null,
 ) {
+    /** Average energy consumption to surface, preferring the overall figure, then the trip window.
+     *  null when neither is reported (or it's a non-positive/garbage value). */
+    val avgConsumption: Double?
+        get() = (averPowerConsumption?.toDoubleOrNull() ?: averTraPowerConsumption?.toDoubleOrNull())
+            ?.takeIf { it > 0.0 }
+
     /** Charge-port (AC or DC flap) open. */
     val chargePortOpen: Boolean get() = chargeLidAcStatus == "1" || chargeLidDcAcStatus == "1"
 
@@ -1066,6 +1108,8 @@ object VehicleStatus {
                             chargeUAct = e.str("chargeUAct"),
                             distanceToEmptyOnBatteryOnly = e.str("distanceToEmptyOnBatteryOnly"),
                             hvBatteryPreHeatingActive = e.boolOf("hvBatteryPreHeatingActive"),
+                            averPowerConsumption = e.str("averPowerConsumption"),
+                            averTraPowerConsumption = e.str("averTraPowerConsumption"),
                         )
                     },
                     maintenanceStatus = a.obj("maintenanceStatus")?.let { m ->
