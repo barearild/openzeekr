@@ -166,21 +166,27 @@ class CarProximityController(
         Logx.d("carprox", "CarProximityController stopped")
     }
 
-    // ---------------- walk-away-lock enable/disable ----------------
+    // ---------------- walk-away-lock enable/disable (0x0151 CUST_REQ) ----------------
 
     /**
-     * Arming the car-side walk-away-lock comfort setting. NO-OP over BLE by design: the disassembly +
-     * the stock DK BLE trace (2026-09-19) show the stock app does NOT send the 0x0151 CUST_REQ
-     * TYPE_WALK_AWAY_LOCK over BLE at all - the switch is toggled via CLOUD/TSP
-     * (CustomControlType.CONTROL_TYPE_WALK_AWAY_LOCK) or the car's own menu, which the owner enables
-     * once. So sending 0x0151 here was redundant (the constant is defined but never sent by stock);
-     * we drop it to match stock exactly. We keep this hook (returns true) so the calibration + arming
-     * bookkeeping still run, and so a future CLOUD enable can slot in here. Unlock stays 100%
-     * phone-side ([ProximityController]).
-     * @return always true (nothing to send over BLE).
+     * Push the car-side walk-away-lock comfort setting to the vehicle over the DK BLE session. This
+     * is BLE, confirmed by the DEX call-chain (DK_CLOUD_CALIB_FINDINGS.md): DKManagementFragment ->
+     * sendCustomCmd(CONTROL_TYPE_WALK_AWAY_LOCK, byte[]{on?1:0}) -> 0x0151 CUST_REQ (type=2, GCM, ch2),
+     * resp 0x0152. There is NO cloud/TSP path (no serviceId/body). (An earlier native-lib pass wrongly
+     * guessed a cloud toggle; the DEX trace + our own prior RE agree it is 0x0151.) Readback =
+     * VehicleSafetyStatus.getAutomaticLockSwitch(). We never touch approach-UNLOCK (type=1): unlock
+     * stays 100% phone-side ([ProximityController]).
+     * @return true if the command left the phone.
      */
-    @Suppress("UNUSED_PARAMETER")
-    private suspend fun applyWalkAwayLock(enable: Boolean): Boolean = true
+    private suspend fun applyWalkAwayLock(enable: Boolean): Boolean {
+        val session = ble.session as? RealDkSession ?: return false
+        val ok = runCatching { session.sendCustomCommand(DkProtocol.CUST_TYPE_WALK_AWAY_LOCK, enable) }
+            .onFailure { Logx.w("carprox", "walk-away-lock ${if (enable) "enable" else "disable"} error: ${it.message}") }
+            .getOrDefault(false)
+        if (ok) Logx.d("carprox", "walk-away-lock ${if (enable) "ENABLED" else "DISABLED"} on car (0x0151 CUST_REQ)")
+        else Logx.w("carprox", "walk-away-lock ${if (enable) "enable" else "disable"} write failed - will retry next session")
+        return ok
+    }
 
     // ---------------- calibration ----------------
 
