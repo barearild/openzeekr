@@ -539,12 +539,16 @@ class ProximityController(
             try {
                 delay(LINK_LOSS_LOCK_DELAY_MS)   // give a genuine transient drop time to reconnect
                 if (ble.state.value == DkBleManager.State.SESSION_READY) {
-                    Logx.d("prox", "$reason: link back before cloud check — skip"); return@launch
+                    Logx.d("prox", "$reason: link back before cloud check - skip"); return@launch
                 }
                 val locked = runCatching { cloudIsLocked() }.getOrNull()
                 Logx.d("prox", "$reason: cloud lock check -> " +
                     (locked?.let { if (it) "LOCKED" else "unlocked" } ?: "unknown"))
                 if (locked == true) {
+                    // Decisive walk-away monitor line: the car was ALREADY locked by the time the link
+                    // dropped, so the car-side auto-lock (or a prior lock) handled it and the cloud
+                    // backstop is not needed. This is what confirms the car-side auto-lock fired.
+                    Logx.d("prox", "$reason: car already LOCKED on walk-away - car-side auto-lock (or a prior lock) got there first; no cloud lock needed")
                     _state.value = _state.value.copy(lastAction = "$reason · already locked ✓")
                     return@launch
                 }
