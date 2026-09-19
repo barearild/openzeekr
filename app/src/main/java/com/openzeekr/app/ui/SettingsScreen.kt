@@ -192,6 +192,20 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             OutlinedButton(onClick = { showHeroLab = true }, modifier = Modifier.fillMaxWidth()) {
                 Text("Hero lab (graphics test)")
             }
+            // Debug: dump the provisioned digital key (incl. the private key) to a JSON file so it can
+            // be reused in the standalone zeekr-dk-ble project without re-provisioning. Sensitive - the
+            // file holds the DK private key; it lands in the app's own external files dir (adb-pullable).
+            OutlinedButton(onClick = {
+                val json = deps.dkIdentity.exportCredentialJson()
+                status = if (json == null) "No provisioned key to export."
+                else runCatching {
+                    val f = java.io.File(ctx.getExternalFilesDir(null), "dk_credential.json")
+                    f.writeText(json)
+                    "Key exported to ${f.absolutePath}"
+                }.getOrElse { "Export failed: ${it.message}" }
+            }, modifier = Modifier.fillMaxWidth()) {
+                Text("Export digital key -> file (debug)")
+            }
         }
 
         if (!baked) {

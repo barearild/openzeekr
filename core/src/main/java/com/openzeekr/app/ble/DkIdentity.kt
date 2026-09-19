@@ -152,6 +152,26 @@ class DkIdentity private constructor(private val prefs: android.content.SharedPr
         prefs.edit().apply { CLONE_KEYS.forEach { k -> blob[k]?.let { putString(k, it) } } }.apply()
     }
 
+    /**
+     * Export the provisioned identity as a JSON string (the [exportCredentialBlob] map). Includes the
+     * DK PRIVATE key - sensitive; only move it to another device/app you own. Used to copy the working
+     * key into the standalone zeekr-dk-ble project so it can run BLE without re-provisioning (which
+     * needs the cloud/account and mints a different key). Null until provisioned.
+     */
+    fun exportCredentialJson(): String? {
+        val blob = exportCredentialBlob() ?: return null
+        val o = org.json.JSONObject()
+        blob.forEach { (k, v) -> o.put(k, v) }
+        return o.toString(2)
+    }
+
+    /** Import an identity previously written by [exportCredentialJson]. */
+    fun importCredentialJson(json: String) {
+        val o = org.json.JSONObject(json)
+        val map = o.keys().asSequence().associateWith { o.getString(it) }
+        importCredentialBlob(map)
+    }
+
     companion object {
         private const val FILE = "openzeekr_dk_identity"
         private const val K_DEVICE_ID = "device_id"
