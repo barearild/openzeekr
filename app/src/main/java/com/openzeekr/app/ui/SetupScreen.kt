@@ -231,12 +231,20 @@ fun SetupScreen(
                     color = Brand.faint, fontSize = 11.5.sp,
                 )
             }
-            // NOTE: the experimental CAR-side walk-away auto-lock toggle is intentionally hidden for now
-            // (it did nothing testable). The flag is force-disabled at startup in Deps, and the phone-side
-            // approach + the cloud out-of-range lock backstop below cover walk-away locking.
+            // Experimental CAR-side walk-away auto-lock: a redundant safety net that runs alongside the
+            // phone-side approach. When on, we upload the RSSI calibration so the car's own firmware can
+            // auto-LOCK on walk-away and we surface its 0x0159 events. Off by default; self-gated on this
+            // flag. Enable BLE logging (Settings > App) to watch the "carprox" traces while testing.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Car-side auto-lock (experimental)", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text("Let the car's own firmware lock on walk-away too, as a backup to the phone. Unverified.", color = Brand.muted, fontSize = 12.sp)
+                }
+                Switch(checked = cfg.carSideAutoLock, onCheckedChange = { on -> config.setCarSideAutoLock(on) }, colors = brandSwitchColors(Brand.energy))
+            }
             Text(
                 "Runs a low-power scan, then connects & unlocks over the BLE key. Uses a foreground " +
-                    "service — allow unrestricted background for reliability.",
+                    "service - allow unrestricted background for reliability.",
                 color = Brand.faint, fontSize = 11.sp,
             )
         }

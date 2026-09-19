@@ -32,10 +32,6 @@ class Deps(context: Context) {
         .also {
             com.openzeekr.app.util.Logx.setHttp(it.current().logHttp)
             com.openzeekr.app.util.Logx.setBle(it.current().logBle)
-            // The experimental CAR-side walk-away auto-lock is hidden/disabled for now. Force the flag
-            // off on every launch so a value persisted from a previous build can't keep it active while
-            // the UI toggle is gone. Re-enable by restoring the toggle + removing this line.
-            if (it.current().carSideAutoLock) it.setCarSideAutoLock(false)
         }
     val apiClient: ApiClient = ApiClient.get(config)
 
@@ -89,11 +85,12 @@ class Deps(context: Context) {
      * Car-side walk-away auto-lock — a PARALLEL, redundant safety net that runs ALONGSIDE the always-on
      * phone-side [proximity] (not instead of it). When config.carSideAutoLock is on it uploads RSSI
      * calibration so the car's own firmware can auto-LOCK on walk-away too, and surfaces the car's
-     * 0x0159 auto-lock events. Self-gates on the toggle, so starting it here is always safe.
+     * 0x0159 auto-lock events. Self-gates on the toggle, so starting it here is always safe: it idles
+     * until config.carSideAutoLock is turned on in Settings (Passive entry), so this is a no-op for
+     * users who leave it off.
      */
     val carProximity = CarProximityController(config, ble, appScope)
-        // NOT started for now — the car-side walk-away lock is hidden/disabled (force-off above). It also
-        // self-gates on config.carSideAutoLock, so leaving it unstarted is doubly safe. Re-.start() to revive.
+        .also { it.start() }
 
     /** Call after the base URL / sign algo changes so the HTTP client rebuilds. */
     fun onEndpointChanged() = apiClient.rebuild()
