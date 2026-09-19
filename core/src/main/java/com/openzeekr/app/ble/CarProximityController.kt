@@ -166,24 +166,21 @@ class CarProximityController(
         Logx.d("carprox", "CarProximityController stopped")
     }
 
-    // ---------------- walk-away-lock enable/disable (0x0151 CUST_REQ) ----------------
+    // ---------------- walk-away-lock enable/disable ----------------
 
     /**
-     * Push the car-side walk-away-lock comfort setting to the vehicle. This is BLE-DK-ONLY: the stock
-     * `sendCustomCmd(CONTROL_TYPE_WALK_AWAY_LOCK, [on/off])` has no cloud/TSP fallback — it maps to the
-     * 0x0151 CUST_REQ custom frame (type=0x02, data=[1|0]). We deliberately do NOT touch the
-     * approach-UNLOCK custom type (0x01): unlock stays 100% phone-side ([ProximityController]).
-     * @return true if the command left the phone.
+     * Arming the car-side walk-away-lock comfort setting. NO-OP over BLE by design: the disassembly +
+     * the stock DK BLE trace (2026-09-19) show the stock app does NOT send the 0x0151 CUST_REQ
+     * TYPE_WALK_AWAY_LOCK over BLE at all - the switch is toggled via CLOUD/TSP
+     * (CustomControlType.CONTROL_TYPE_WALK_AWAY_LOCK) or the car's own menu, which the owner enables
+     * once. So sending 0x0151 here was redundant (the constant is defined but never sent by stock);
+     * we drop it to match stock exactly. We keep this hook (returns true) so the calibration + arming
+     * bookkeeping still run, and so a future CLOUD enable can slot in here. Unlock stays 100%
+     * phone-side ([ProximityController]).
+     * @return always true (nothing to send over BLE).
      */
-    private suspend fun applyWalkAwayLock(enable: Boolean): Boolean {
-        val session = ble.session as? RealDkSession ?: return false
-        val ok = runCatching { session.sendCustomCommand(DkProtocol.CUST_TYPE_WALK_AWAY_LOCK, enable) }
-            .onFailure { Logx.w("carprox", "walk-away-lock ${if (enable) "enable" else "disable"} error: ${it.message}") }
-            .getOrDefault(false)
-        if (ok) Logx.d("carprox", "walk-away-lock ${if (enable) "ENABLED" else "DISABLED"} on car (0x0151 CUST_REQ)")
-        else Logx.w("carprox", "walk-away-lock ${if (enable) "enable" else "disable"} write failed — will retry next session")
-        return ok
-    }
+    @Suppress("UNUSED_PARAMETER")
+    private suspend fun applyWalkAwayLock(enable: Boolean): Boolean = true
 
     // ---------------- calibration ----------------
 

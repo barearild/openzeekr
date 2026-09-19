@@ -62,6 +62,10 @@ object DkProtocol {
     const val CMD_A2V_SMALL_CALIBRATION_DATA = 0x0172
     const val CMD_V2A_SMALL_CALIBRATION_DATA_RESP = 0x0173
     const val CMD_INVALID = 0xFFFF
+    /** Plaintext transport ACK the phone sends for a car->phone push (stock acks each 0x0121
+     *  VSTATUS_SYNC): body = nSeq(2) ts(4) ackedCmdId(2) status(2=0x1000), instType=INST_ACK(4),
+     *  on ch1-write, NOT GCM. Confirmed in the stock DK BLE trace 2026-09-19. */
+    const val CMD_A2V_ACK = 0xFFFE
 
     /** Short human name for a frame opcode, for readable BLE logs. Unmapped opcodes (e.g. the car's
      *  0x182 periodic push, which lives in the native DK lib and isn't modelled here) read as
@@ -80,6 +84,7 @@ object DkProtocol {
         CMD_A2V_RSSI_SYNC -> "RSSI_SYNC"; CMD_V2A_APPROACHLOCK_NOTIFY -> "APPROACHLOCK_NOTIFY"
         CMD_A2V_BIG_CALIBRATION_DATA -> "BIG_CALIB"; CMD_A2V_SMALL_CALIBRATION_DATA -> "SMALL_CALIB"
         CMD_V2A_SMALL_CALIBRATION_DATA_RESP -> "SMALL_CALIB_RESP"
+        CMD_A2V_ACK -> "ACK"
         else -> "unknown"
     }
 

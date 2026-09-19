@@ -2,7 +2,11 @@ package com.openzeekr.app.ble
 
 import com.openzeekr.app.util.Logx
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.security.KeyPair
@@ -40,6 +44,9 @@ class RealDkSession(
     private var appHandler: ((Int, ByteArray) -> Unit)? = null
 
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
+
+    /** Fire-and-forget scope for the transport ACK (onRawInbound is not a coroutine). */
+    private val ackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // One-shot waiter for [ping]: completed with the opcode of the NEXT inbound frame (before decrypt),
     // so ANY reply — proper 0x0121, an unsolicited push, or a NAK — resolves the liveness probe.
@@ -563,9 +570,30 @@ class RealDkSession(
             approachLockListeners.forEach { runCatching { it.invoke() } }
             return
         }
+        // 0x0121 VSTATUS_SYNC: the car pushes its status periodically and the stock app ACKs each one
+        // with a plaintext 0xFFFE frame (transport parity - confirmed in the stock DK BLE trace). We
+        // never used to ack; mirror stock so the car sees the phone actively processing its pushes.
+        if (cmdId == DkProtocol.CMD_V2A_VSTATUS_SYNC) {
+            ackScope.launch { runCatching { sendAck(DkProtocol.CMD_V2A_VSTATUS_SYNC) } }
+            // fall through: also hand the status tail to the app handler below
+        }
         // unsolicited (status / RPA challenge / result): hand the tail (after nSeq||ts) to the app
         val tail = if (body.size >= 6) body.copyOfRange(6, body.size) else body
         appHandler?.invoke(cmdId, tail)
+    }
+
+    /** Send the plaintext transport ACK for a car->phone push (stock acks 0x0121). Body =
+     *  nSeq(2) ts(4) ackedCmdId(2) status(2=0x1000); instType=INST_ACK; NOT GCM; ch1-write. */
+    private suspend fun sendAck(ackedCmdId: Int) {
+        if (!cryptoReady) return
+        val nSeq = DkPayload.nextSeq(); val ts = DkPayload.timestamp()
+        val tail = byteArrayOf(
+            ((ackedCmdId ushr 8) and 0xFF).toByte(), (ackedCmdId and 0xFF).toByte(),
+            0x10, 0x00,   // status 0x1000 = OK, as stock sends
+        )
+        val plain = DkPayload.wrap(nSeq, ts, tail)   // plaintext (0xFFFE is not in the GCM set)
+        val frame = DkFrame(DkProtocol.CMD_A2V_ACK, DkProtocol.INST_ACK, plain).encode()
+        transport.write(DkProtocol.CMD_A2V_ACK, frame)
     }
 
     // ---------------- helpers ----------------
