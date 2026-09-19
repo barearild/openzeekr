@@ -85,12 +85,11 @@ token of appreciation is genuinely welcome (never expected):
   (Ø kWh/100km) alongside the vehicle status.
 - **Mobile data usage.** See how much of your car's built-in eSIM data plan you've used this
   month, right inside the app.
-- **Scheduling UI (still broken).** Added UI elements for charge/departure scheduling. ⚠️ Saving
-  a schedule does **not** work yet — the screen is in, the commit path isn't.
+- **Charge & departure scheduling.** Set off-peak charging windows and departure / preconditioning
+  times. Saving now works - the app commits the schedule to the car and reads it back to confirm.
 - **Nicer climate UI.** Improved the UI for climate **cooling / heating**.
-- **Seat ventilation detection (currently broken).** While improving how seat ventilation is
-  detected, we broke it in this build. The intent — and the fix in progress — is for the UI to
-  reflect **only the options your specific car actually supports**.
+- **Seat ventilation detection fixed.** The controls now reflect **only the options your specific
+  car actually supports**, and seat ventilation is detected correctly again.
 
 ### 0.1.1
 - **Prevented log leakage when logging is off.** Debug logging is now truly silent unless
