@@ -40,10 +40,11 @@ object Logx {
     private val clock = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
     /** Areas that belong to the HTTP-logging category (gated by [httpOn]) - cloud request/response
-     *  and cloud-side results: transport, auth, vehicle status, control acks, FCM push. */
-    private val HTTP_TAGS = setOf("http", "login", "net", "session", "tsp", "push", "status", "ctl", "fcm")
-    /** Areas that belong to the BLE-logging category (gated by [bleOn]). */
-    private val BLE_TAGS = setOf("ble", "carprox", "dk", "lock", "motion", "provision", "prox", "svc")
+     *  and cloud-side results: transport, auth, vehicle status, FCM push. */
+    private val HTTP_TAGS = setOf("http", "login", "net", "session", "tsp", "push", "status", "fcm")
+    /** Areas that belong to the BLE-logging category (gated by [bleOn]) - the DK/BLE session,
+     *  proximity, and control dispatch ("ctl": BLE-first lock/unlock, so it reads next to prox/lock). */
+    private val BLE_TAGS = setOf("ble", "carprox", "dk", "lock", "motion", "provision", "prox", "svc", "ctl")
 
     /** HTTP-category gate, driven by the Settings "HTTP logging" switch; off by default until
      *  config is applied. When OFF, verbose [d] for HTTP areas is suppressed from BOTH logcat and
