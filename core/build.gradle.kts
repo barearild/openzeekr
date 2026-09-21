@@ -16,28 +16,62 @@ val secretsProps = Properties().apply {
 fun bakedSecret(key: String): String =
     (secretsProps.getProperty(key) ?: "").replace("\\", "\\\\").replace("\"", "\\\"")
 
+// ---- JNI native secrets: inject the genuinely-secret VALUES into a gitignored C header at
+//      build time, so they live in libozsecrets.so instead of a BuildConfig DEX string.
+// The committed C (src/main/cpp/ozsecrets.c) #includes this generated header; the header is
+// regenerated on every configure and is gitignored, so NO real secret is ever committed. Blank
+// when secrets.properties is absent (clean repo) -> app starts blank, configured in Settings.
+// NOTE: the RSA password_public_key is a PUBLIC key, so it stays in BuildConfig (see below) -
+//       nothing is gained by hiding a public key, matching the "leave public certs" rule.
+val nativeSecretKeys = listOf(
+    "HMAC_ACCESS_KEY", "HMAC_SECRET_KEY", "PROD_SECRET", "XCHANGER_SIGN_SECRET",
+    "OVERSEAS_ACCESS_KEY", "OVERSEAS_SECRET_KEY", "INBOX_AUTH_SECRET", "VIN_KEY", "VIN_IV",
+)
+run {
+    fun cEscape(s: String): String = s
+        .replace("\\", "\\\\").replace("\"", "\\\"")
+        .replace("\n", "\\n").replace("\r", "\\r")
+    val header = file("src/main/cpp/secrets_generated.h")
+    header.parentFile.mkdirs()
+    val text = buildString {
+        appendLine("// AUTO-GENERATED at build time from secrets.properties.")
+        appendLine("// DO NOT COMMIT and DO NOT EDIT - this file is gitignored and holds real values.")
+        appendLine("#ifndef OZ_SECRETS_GENERATED_H")
+        appendLine("#define OZ_SECRETS_GENERATED_H")
+        nativeSecretKeys.forEach { k ->
+            appendLine("#define OZ_SEC_$k \"${cEscape(secretsProps.getProperty(k) ?: "")}\"")
+        }
+        appendLine("#endif")
+    }
+    // Only rewrite when changed, so we don't needlessly invalidate the native build cache.
+    if (!header.exists() || header.readText() != text) header.writeText(text)
+}
+
 android {
     namespace = "com.openzeekr.core"
     compileSdk = 34
 
+    // Build the native secrets lib (libozsecrets.so). NOTE: ndkVersion must match an NDK installed
+    // under the SDK (Android Studio > SDK Manager > NDK), or change it to your installed version /
+    // remove this line to use AGP's default. An unavailable NDK version fails the native build.
+    ndkVersion = "27.0.12077973"
+
     defaultConfig {
         minSdk = 26
 
-        // ONLY the six/seven app-global secrets are baked (never the account).
-        buildConfigField("String", "SEC_HMAC_ACCESS_KEY", "\"${bakedSecret("HMAC_ACCESS_KEY")}\"")
-        buildConfigField("String", "SEC_HMAC_SECRET_KEY", "\"${bakedSecret("HMAC_SECRET_KEY")}\"")
+        // The genuinely-secret app-global values now live in the JNI native lib (libozsecrets.so),
+        // injected at build time from secrets.properties (see the header generation above and
+        // com.openzeekr.app.util.NativeSecrets). They are intentionally NOT BuildConfig strings.
+        // Only the RSA password_public_key stays in BuildConfig - it is a PUBLIC key, so hiding it
+        // in native would add no security (matches the "public certs/keys stay put" rule).
         buildConfigField("String", "SEC_PASSWORD_PUBLIC_KEY", "\"${bakedSecret("PASSWORD_PUBLIC_KEY")}\"")
-        buildConfigField("String", "SEC_PROD_SECRET", "\"${bakedSecret("PROD_SECRET")}\"")
-        buildConfigField("String", "SEC_VIN_KEY", "\"${bakedSecret("VIN_KEY")}\"")
-        buildConfigField("String", "SEC_VIN_IV", "\"${bakedSecret("VIN_IV")}\"")
-        buildConfigField("String", "SEC_XCHANGER_SIGN_SECRET", "\"${bakedSecret("XCHANGER_SIGN_SECRET")}\"")
-        // Overseas-app (Azure gateway) HMAC AK/SK — for the message inbox. Native
-        // (getNativeApplicationId / getNativeSecret in libenv.so), Frida-dumped per region/env.
-        buildConfigField("String", "SEC_OVERSEAS_ACCESS_KEY", "\"${bakedSecret("OVERSEAS_ACCESS_KEY")}\"")
-        buildConfigField("String", "SEC_OVERSEAS_SECRET_KEY", "\"${bakedSecret("OVERSEAS_SECRET_KEY")}\"")
-        // Inbox Authorization HS256 secret — signs the client-minted /overseas-app/* token
-        // (InboxAuthToken). String-obfuscated in the stock APK, so Frida-dumped at runtime.
-        buildConfigField("String", "SEC_INBOX_AUTH_SECRET", "\"${bakedSecret("INBOX_AUTH_SECRET")}\"")
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     compileOptions {

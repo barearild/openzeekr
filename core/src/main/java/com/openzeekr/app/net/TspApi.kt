@@ -100,6 +100,10 @@ interface TspApi {
     @GET("ms-vehicle-capability/api/v1.0/vehicle/function/model/info")
     suspend fun vehicleCapability(): BaseResponse<kotlinx.serialization.json.JsonElement>
 
+    // ---- connectivity data-plan usage (the car's eSIM "traffic volume"). VIN via X-VIN header. ----
+    @GET("ms-mno-service/api/v1.0/app/vehicle/data/usage/info")
+    suspend fun trafficReport(): BaseResponse<com.openzeekr.app.net.model.TrafficReport>
+
     // ---- remote-control live state (VIN via X-VIN header) ----
     // `data` is a flat-ish object BUT some values are arrays/objects (e.g. storageBoxStatus is
     // a JSON array), so it must NOT bind to Map<String,String> — that throws on the array and the

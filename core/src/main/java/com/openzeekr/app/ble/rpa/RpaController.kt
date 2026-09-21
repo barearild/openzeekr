@@ -273,7 +273,15 @@ class RpaController(
             DkOpcodes.CMD_V2A_RPA_CHALLENGE -> {
                 // Auto-answer the per-round anti-relay challenge. The session strips the
                 // nSeq/ts header, so payload = randX | randY | authStatus | …
-                if (payload.size >= 2) {
+                //
+                // Only answer a REAL (non-zero) challenge. While no maneuver is armed on
+                // the head unit the car streams a dummy challenge randX=randY=0x00 (verified
+                // in a stock :dkservice capture: every 0x0115 is "…6aaf771a 00 00 00"). The
+                // STOCK app does NOT answer these — across the whole idle capture it sends
+                // 0x0113 REQ_MODE and never a single 0x0116. We used to answer the dummy and
+                // the car NAK'd it 0x0116 100a. Match stock: ignore the dummy, answer only a
+                // live challenge. See dk-rpa-remote-parking.md.
+                if (payload.size >= 2 && (payload[0].toInt() != 0 || payload[1].toInt() != 0)) {
                     val x = payload[0].toInt() and 0xff
                     val y = payload[1].toInt() and 0xff
                     scope.launch {

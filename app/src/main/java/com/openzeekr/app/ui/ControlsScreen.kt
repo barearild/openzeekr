@@ -77,17 +77,17 @@ fun ControlsScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
         }
     }
 
-    fun fireDk(label: String, block: suspend () -> Boolean) =
-        fire(label) {
-            runCatching { block() }.fold({ CallResult.Ok(it) }, { CallResult.Err(it.message ?: "error") })
-        }
-
-    // Unified door control: use the instant BLE digital key when the session is
-    // connected, otherwise fall back to the cloud (TSP) command. One button.
+    // Unified door control: use the instant BLE digital key when the session is connected, and if the
+    // key path can't confirm (even after DkLockController's self-healing session refresh) fall back to
+    // the cloud (TSP) command, so a lock/unlock never silently no-ops. One button.
     fun door(lockIt: Boolean) {
         val name = if (lockIt) "Lock" else "Unlock"
-        if (bleReady) fireDk("$name (key)") { if (lockIt) deps.lock.lock() else deps.lock.unlock() }
-        else fire("$name (cloud)") { deps.control.send(if (lockIt) Command.LOCK else Command.UNLOCK) }
+        val cmd = if (lockIt) Command.LOCK else Command.UNLOCK
+        if (bleReady) fire(name) {
+            val viaKey = runCatching { if (lockIt) deps.lock.lock() else deps.lock.unlock() }.getOrDefault(false)
+            if (viaKey) CallResult.Ok("$name ok (key)") else deps.control.send(cmd)
+        }
+        else fire(name) { deps.control.send(cmd) }
     }
 
     // The grid shows cloud commands; Lock/Unlock live only in the unified quick
@@ -229,6 +229,8 @@ private fun VehicleStatusCard(deps: Deps) {
                             it.chargePowerW?.takeIf { w -> w > 0 }?.let { w -> "yes · %.1f kW".format(w / 1000) } ?: "yes"
                         else "no"
                     })
+                    // Only while charging, and only when the car reports an estimate (hidden otherwise).
+                    StatusRow("Time to full", electric?.timeToFullLabel)
                     StatusRow("Odometer", maint?.odometer?.let { "$it km" })
                     StatusRow("Interior temp", climate?.interiorTemp?.takeIf { it.isNotBlank() }?.let { "$it °C" })
                     StatusRow("Exterior temp", climate?.exteriorTemp?.takeIf { it.isNotBlank() }?.let { "$it °C" })

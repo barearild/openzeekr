@@ -47,7 +47,8 @@ class AccountLogin(private val store: ConfigStore) {
 
     // Pipe OkHttp's HEADERS-level log into our on-device ring buffer too. Level is flipped to
     // NONE when debug logging is off (via httpLogGate below), so nothing is formatted/logged then.
-    private val httpLog = okhttp3.logging.HttpLoggingInterceptor { m -> Logx.d("http", m) }
+    // Built via HttpLog so sensitive headers are redacted and body values are scrubbed to "***".
+    private val httpLog = HttpLog.interceptor()
     // Runs just before httpLog and sets its level from the debug-logging toggle.
     private val httpLogGate = okhttp3.Interceptor { chain ->
         httpLog.level = if (Logx.isHttpEnabled) okhttp3.logging.HttpLoggingInterceptor.Level.HEADERS
@@ -422,7 +423,9 @@ class AccountLogin(private val store: ConfigStore) {
         val ep = req.url.encodedPath.substringAfterLast('/')
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            Logx.d("http", "<- $ep HTTP ${resp.code} (${text.length}B): ${text.take(600)}")
+            // Scrub secret values (tokens, signatures, openId, vin, …) out of the raw response body
+            // before it reaches the on-device log - same redaction policy as the OkHttp logger.
+            Logx.d("http", HttpLog.scrub("<- $ep HTTP ${resp.code} (${text.length}B): ${text.take(600)}"))
             if (text.isBlank()) error("HTTP ${resp.code} empty body: ${req.url}")
             return json.parseToJsonElement(text).jsonObject
         }

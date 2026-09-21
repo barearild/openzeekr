@@ -19,6 +19,12 @@
 secrets.json
 zeekr_secrets.json
 secrets.properties
+# JNI-baked secrets: generated at build time from secrets.properties into the native lib,
+# holds REAL secret values, regenerated on every build - never commit.
+/core/src/main/cpp/secrets_generated.h
+# Log-decrypt PRIVATE key - decrypts copied logs; devs keep it OFFLINE, never commit.
+# (The public key, tools/log-decrypt/public_key.pem, is safe to ship/commit.)
+/tools/log-decrypt/private_key.pem
 # Stock Firebase project config for FCM push — client config from the stock APK, kept local
 # only (see secrets_firebase.xml.example). Absent = FCM auto-init skips, push disabled.
 secrets_firebase.xml

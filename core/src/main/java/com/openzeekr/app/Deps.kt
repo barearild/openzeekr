@@ -1,6 +1,7 @@
 package com.openzeekr.app
 
 import android.content.Context
+import com.openzeekr.app.ble.CalibrationTestController
 import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkIdentity
 import com.openzeekr.app.ble.DkLockController
@@ -64,9 +65,12 @@ class Deps(context: Context) {
         id.credential()?.let { ble.setCredential(it) }
     }
     val provisioning = DkProvisioning(config, dkIdentity, ble)
-    val lock = DkLockController(ble.session)
+    val lock = DkLockController(ble.session) { ble.refreshSession() }
     val phoneStatus = PhoneStatusProvider(appCtx)
     val rpa = RpaController(ble.session, appScope, phoneStatus::stateByte, rssi = ble::pollRemoteRssi)
+    /** BLE self-calibration test harness (0x0190-0x0199) + BLE lock/unlock, driven from the Parking tab.
+     *  Teaches the car THIS phone's RSSI/ranging model so passive entry / RPA localization can converge. */
+    val calibTest = CalibrationTestController(appCtx, ble, appScope)
     /** Wakelock-free motion state (still vs moving) for proximity cadence gating. */
     val motion = com.openzeekr.app.ble.MotionMonitor(appCtx)
     val proximity = ProximityController(

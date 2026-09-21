@@ -79,7 +79,7 @@ object WearKeyState {
 fun WearApp() {
     val context = LocalContext.current
     val ble = remember { DkBleManager.get(context) }
-    val lock = remember { DkLockController(ble.session) }
+    val lock = remember { DkLockController(ble.session) { ble.refreshSession() } }
     val scope = rememberCoroutineScope()
 
     val provisioned by WearKeyState.provisioned.collectAsState()

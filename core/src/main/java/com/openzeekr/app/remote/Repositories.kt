@@ -106,6 +106,11 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
         guarded { com.openzeekr.app.net.model.VehicleCapabilityParse.parse(client.api.vehicleCapability().data) }
     }
 
+    /** The car's connectivity data-plan usage (eSIM "traffic volume"). VIN via X-VIN header. */
+    suspend fun trafficReport(): CallResult<com.openzeekr.app.net.model.TrafficReport> = withContext(Dispatchers.IO) {
+        guarded { client.api.trafficReport().data ?: error("no data-usage data") }
+    }
+
     /**
      * Fetch the real vehicle status tree (lock/doors/SOC/range/climate/odometer/…).
      * A plain GET already returns real data; we heartbeat first (as with [send]) so

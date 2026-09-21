@@ -61,6 +61,20 @@ object DkProtocol {
     const val CMD_A2V_BIG_CALIBRATION_DATA = 0x0171
     const val CMD_A2V_SMALL_CALIBRATION_DATA = 0x0172
     const val CMD_V2A_SMALL_CALIBRATION_DATA_RESP = 0x0173
+    // ---- BLE self-calibration flow (0x0190-0x0199) — the stock 4-step distance self-cal ----
+    // The car computes a 200-byte coefficient table (0x0194) for THIS phone+session; the phone
+    // stores it and re-sends it verbatim (0x0198 table + 0x0199 model + 0x0196 PE mode) on each
+    // authed reconnect. All A2V frames ride GATT channel 2. 0x0194 + 0x0198 are PLAINTEXT on Zeekr.
+    const val CMD_A2V_CALIBRATION_START = 0x0190     // [type:1] -> 0x0191
+    const val CMD_V2A_CALIBRATION_RSP = 0x0191       // [errCode:1]
+    const val CMD_A2V_CALIBRATION_LOC_SEND = 0x0192  // [type/step:1] -> 0x0193
+    const val CMD_V2A_CALIBRATION_LOC_RSP = 0x0193   // [errCode:1]
+    const val CMD_V2A_RECEIVE_CALIBRATION = 0x0194   // [calib:200][hash:4] (plaintext on Zeekr)
+    const val CMD_A2V_SEND_CALIBRATION = 0x0195      // non-Zeekr model push (unused on Zeekr)
+    const val CMD_A2V_PE_MODE_REQ = 0x0196           // [mode:1] passive-entry/walk-away enable -> 0x0197
+    const val CMD_V2A_PE_MODE_RSP = 0x0197           // [errCode:1]
+    const val CMD_A2V_SELF_CALIBRATION_DATA = 0x0198 // [table:200] re-upload stored table (PLAINTEXT)
+    const val CMD_A2V_CALIBRATION_MODEL_ZEEKR = 0x0199 // [model:1] Zeekr auth-time model push (GCM)
     const val CMD_INVALID = 0xFFFF
     /** Plaintext transport ACK the phone sends for a car->phone push (stock acks each 0x0121
      *  VSTATUS_SYNC): body = nSeq(2) ts(4) ackedCmdId(2) status(2=0x1000), instType=INST_ACK(4),
@@ -84,6 +98,11 @@ object DkProtocol {
         CMD_A2V_RSSI_SYNC -> "RSSI_SYNC"; CMD_V2A_APPROACHLOCK_NOTIFY -> "APPROACHLOCK_NOTIFY"
         CMD_A2V_BIG_CALIBRATION_DATA -> "BIG_CALIB"; CMD_A2V_SMALL_CALIBRATION_DATA -> "SMALL_CALIB"
         CMD_V2A_SMALL_CALIBRATION_DATA_RESP -> "SMALL_CALIB_RESP"
+        CMD_A2V_CALIBRATION_START -> "CALIB_START"; CMD_V2A_CALIBRATION_RSP -> "CALIB_RSP"
+        CMD_A2V_CALIBRATION_LOC_SEND -> "CALIB_LOC_SEND"; CMD_V2A_CALIBRATION_LOC_RSP -> "CALIB_LOC_RSP"
+        CMD_V2A_RECEIVE_CALIBRATION -> "CALIB_RECEIVE"; CMD_A2V_SEND_CALIBRATION -> "CALIB_SEND"
+        CMD_A2V_PE_MODE_REQ -> "PE_MODE_REQ"; CMD_V2A_PE_MODE_RSP -> "PE_MODE_RSP"
+        CMD_A2V_SELF_CALIBRATION_DATA -> "SELF_CALIB_DATA"; CMD_A2V_CALIBRATION_MODEL_ZEEKR -> "CALIB_MODEL"
         CMD_A2V_ACK -> "ACK"
         else -> "unknown"
     }
@@ -135,11 +154,21 @@ object DkProtocol {
     fun isEncrypted(cmdId: Int): Boolean = when (cmdId) {
         CMD_A2V_SEND_DKEY, CMD_V2A_DK_VERIFY_STATUS,
         CMD_A2V_CONTROL, CMD_V2A_CMD_RECEIVED, CMD_V2A_RESULT,
-        CMD_A2V_RPA_REQ, CMD_V2A_RPA_STATUS, CMD_V2A_RPA_CHALLENGE, CMD_A2V_RPA_ANSWER,
-        CMD_V2A_RPA_SYNC, CMD_V2A_RPA_SYNC2, CMD_A2V_TRANS, CMD_V2A_VSTATUS_SYNC,
-        CMD_A2V_CUST_REQ, CMD_V2A_CUST_RESP, CMD_V2A_APPROACHLOCK_NOTIFY -> true
-        // NB: CMD_A2V_RSSI_SYNC (0x0158) is sent PLAINTEXT — the stock RSSI packer (p0/f0.b)
-        // returns the payload unencrypted (nSeq|ts|signal), unlike the other RPA frames.
+        // Phone->car RPA (REQ/ANSWER) IS GCM-encrypted (32B body = 16 ct + 16 tag, car ACKs succ).
+        CMD_A2V_RPA_REQ, CMD_A2V_RPA_ANSWER,
+        CMD_A2V_TRANS, CMD_V2A_VSTATUS_SYNC,
+        CMD_A2V_CUST_REQ, CMD_V2A_CUST_RESP, CMD_V2A_APPROACHLOCK_NOTIFY,
+        // Self-calibration flow: start/loc/PE-mode requests + their responses + the Zeekr model push
+        // are GCM. NOT here: 0x0194 RECEIVE (plaintext on Zeekr) and 0x0198 SELF_CALIB_DATA (plaintext).
+        CMD_A2V_CALIBRATION_START, CMD_V2A_CALIBRATION_RSP,
+        CMD_A2V_CALIBRATION_LOC_SEND, CMD_V2A_CALIBRATION_LOC_RSP,
+        CMD_A2V_PE_MODE_REQ, CMD_V2A_PE_MODE_RSP,
+        CMD_A2V_SEND_CALIBRATION, CMD_A2V_CALIBRATION_MODEL_ZEEKR -> true
+        // Car->phone RPA TELEMETRY is PLAINTEXT (verified at car, 2026-09-20): 0x114 STATUS,
+        // 0x115 CHALLENGE, 0x117 SYNC, 0x118 SYNC2 arrive as readable nSeq|ts|payload — GCM-decrypting
+        // them throws BAD_DECRYPT. Only 0x121 VSTATUS_SYNC (high-entropy) is encrypted. So the RPA
+        // read path (challenge -> 0x116 answer, sync -> prkgModIncln) must parse these as plaintext.
+        // NB: CMD_A2V_RSSI_SYNC (0x0158) is also PLAINTEXT (stock p0/f0.b returns it unencrypted).
         else -> false
     }
 
@@ -164,9 +193,22 @@ object DkProtocol {
      */
     fun isChannel2(cmdId: Int): Boolean = when (cmdId) {
         CMD_A2V_SMALL_CALIBRATION_DATA, CMD_V2A_SMALL_CALIBRATION_DATA_RESP,
-        CMD_A2V_CUST_REQ, CMD_V2A_CUST_RESP -> true
+        CMD_A2V_CUST_REQ, CMD_V2A_CUST_RESP,
+        // Self-calibration A2V frames all ride channel 2 (n0/a.g/i/t + n0/g.a1/c1 use ChnType.UUID2).
+        CMD_A2V_CALIBRATION_START, CMD_A2V_CALIBRATION_LOC_SEND, CMD_A2V_PE_MODE_REQ,
+        CMD_A2V_SEND_CALIBRATION, CMD_A2V_SELF_CALIBRATION_DATA, CMD_A2V_CALIBRATION_MODEL_ZEEKR -> true
         else -> false
     }
+
+    /** The self-calibration opcodes (0x0190-0x0199) — the stock 4-step distance self-cal flow. */
+    fun isSelfCalib(cmdId: Int): Boolean = cmdId in 0x0190..0x0199
+
+    // instType per the reversed DkCmd table (docs DK_BLE_PROTOCOL §6): 0x0190 CALIBRATION_START = REQ,
+    // 0x0192 CALIBRATION_LOC_SEND = CON, 0x0196 PE_MODE_REQ = REQ, 0x0198/0x0199 fire-and-forget = REQ.
+    // We tested 0x0190 as BOTH REQ (silent) and CON (silent): instType is NOT the blocker. The real
+    // diff is that stock sends 0x0190 TWICE (a mode-select then a start) with specific type bytes we
+    // never captured; we send it once with type=0, which the car does not recognize as a valid
+    // mode-select and drops silently. RealDkSession.instTypeFor() encodes the per-opcode instType.
 
     /**
      * Application-layer package size for the fragmented 0x0171 BIG-calibration upload

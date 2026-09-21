@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.2** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+**Version 0.1.3** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -67,6 +67,26 @@ token of appreciation is genuinely welcome (never expected):
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
 
 ## Changelog
+
+### 0.1.3
+- **Lock / unlock is now confirmed by the car, with self-healing.** The app waits for the car's
+  acknowledgement instead of assuming a sent command worked, and if the digital-key session has
+  gone stale it rebuilds the link and retries automatically - previously a lock/unlock could
+  silently do nothing until you toggled Bluetooth off and on.
+- **Handshake retries.** The BLE key handshake now re-tries the connect step when the car doesn't
+  answer the first time, instead of failing outright.
+- **Broader car discovery.** The connect scan is now unfiltered, which should fix the "can't find /
+  connect to the car" link issue (issue 1) for more models, e.g. the Zeekr X.
+- **Session refresh for a stale link.** A stale digital-key session is now recovered with a fresh
+  reconnect. This is an interim improvement over 0.1.2 and will likely change again in a later release.
+- **Logging is OFF by default.** A clean install no longer starts with logging enabled - you opt in
+  explicitly.
+- **Sanitized HTTP logs.** Cloud request/response logs now redact keys, tokens and other secrets.
+  (This still needs a full human review, which is not yet complete.)
+- **Encrypted log sharing.** The BLE log "Copy" button now encrypts the copied log, so sharing a log
+  on GitHub or elsewhere is safe and your car/account data isn't leaked by accident.
+- **Compile-time keys hardened.** The keys baked into the APK at build time now live inside a native
+  `.so` library instead of as plaintext strings in the APK.
 
 ### 0.1.2
 - **Region selection (beyond EU).** You can now pick your market — **EU / SEA / LA / ME** — in

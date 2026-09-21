@@ -116,6 +116,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     val cfg by deps.config.config.collectAsState()
     val caps by deps.capabilities.state.collectAsState()
     var info by remember { mutableStateOf<VehicleInfo?>(null) }
+    var traffic by remember { mutableStateOf<com.openzeekr.app.net.model.TrafficReport?>(null) }
     LaunchedEffect(Unit) {
         deps.capabilities.ensureLoaded()
         deps.vehicleState.refresh()
@@ -126,6 +127,12 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
                 if (nn != null && nn.isNotBlank() && deps.config.current().carNickname.isBlank())
                     deps.config.update { it.copy(carNickname = nn) }
             }
+            is CallResult.Err -> {}
+        }
+        // Connectivity data-plan usage (the car's eSIM "traffic volume"). Best-effort: hidden if the
+        // account/region doesn't return it.
+        when (val t = deps.control.trafficReport()) {
+            is CallResult.Ok -> traffic = t.value
             is CallResult.Err -> {}
         }
     }
@@ -229,7 +236,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
                 // Always open the sheet — charge limit, battery pre-conditioning (a PRE-charge
                 // action) and the charge-port control all live there, so it must be reachable when
                 // unplugged too, not only mid-charge.
-                ChargeCtl(charging, plugged, soc, powerKw, Modifier.weight(1f)) { showCharge = true }
+                ChargeCtl(charging, plugged, soc, powerKw, elec?.timeToFullyCharged, Modifier.weight(1f)) { showCharge = true }
                 Ctl(windowIcon, windowLabel, tint = windowTint, active = windowsOpen, modifier = Modifier.weight(1f)) { showWindows = true }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -255,6 +262,24 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Tyre("Rear L", maint?.tyreStatusDriverRear, cfg.pressureUnit, Modifier.weight(1f)); Tyre("Rear R", maint?.tyreStatusPassengerRear, cfg.pressureUnit, Modifier.weight(1f))
+        }
+
+        // Connectivity data plan (eSIM "traffic volume"). The car reports total/usage/remain
+        // already in GB (strings). Shown only when the account/region returns it.
+        traffic?.let { tr ->
+            val used = tr.usage?.toFloatOrNull()
+            val total = tr.total?.toFloatOrNull()
+            val remain = tr.remain?.toFloatOrNull()
+            if (used != null || total != null || remain != null) {
+                fun gb(v: Float?) = v?.let { "%.1f GB".format(it) } ?: "—"
+                SectionLabel("Connectivity data")
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatItem("Used", gb(used), MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+                    StatItem("Total", gb(total), MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+                    StatItem("Remaining", gb(remain),
+                        if (remain != null && remain < 1f) Brand.energy else Brand.good, Modifier.weight(1f))
+                }
+            }
         }
     }
 
@@ -334,7 +359,10 @@ private fun Ctl(icon: ImageVector, label: String, tint: Color = MaterialTheme.co
 }
 
 @Composable
-private fun ChargeCtl(charging: Boolean, plugged: Boolean, soc: Float?, powerKw: Double?, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun ChargeCtl(
+    charging: Boolean, plugged: Boolean, soc: Float?, powerKw: Double?,
+    timeToFullMin: Int? = null, modifier: Modifier = Modifier, onClick: () -> Unit,
+) {
     Column(modifier.clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(Modifier.size(60.dp), contentAlignment = Alignment.Center) {
@@ -353,9 +381,32 @@ private fun ChargeCtl(charging: Boolean, plugged: Boolean, soc: Float?, powerKw:
         }
         Text(
             when { charging -> powerKw?.let { "${fmt1(it)} kW · 1-phase" } ?: "Charging"; plugged -> "Plugged in"; else -> "Charge port" },
-            color = Brand.muted, fontSize = 11.sp, textAlign = TextAlign.Center,
+            // Match the lightning-bolt colour while charging (energy amber); muted otherwise.
+            color = if (charging) Brand.energy else Brand.muted, fontSize = 11.sp, textAlign = TextAlign.Center,
         )
+        // Live countdown to a full/limited charge, ticking down under the bolt (car reports minutes).
+        if (charging) chargeCountdown(timeToFullMin)?.let {
+            Text("$it to full", color = Brand.energy, fontSize = 10.5.sp,
+                fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
+        }
     }
+}
+
+/**
+ * A local countdown string for the remaining charge time. Anchors on the car's [totalMinutes]
+ * estimate and ticks down every second until the next status poll re-anchors it. Shows "H:MM" over
+ * an hour (updates each minute) and "M:SS" under an hour (visibly ticks). null when not charging /
+ * no estimate.
+ */
+@Composable
+private fun chargeCountdown(totalMinutes: Int?): String? {
+    if (totalMinutes == null || totalMinutes <= 0) return null
+    val anchorMs = remember(totalMinutes) { System.currentTimeMillis() }
+    var now by remember(totalMinutes) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(totalMinutes) { while (true) { delay(1000); now = System.currentTimeMillis() } }
+    val remaining = (totalMinutes * 60L - (now - anchorMs) / 1000L).coerceAtLeast(0L)
+    val h = remaining / 3600; val m = (remaining % 3600) / 60; val s = remaining % 60
+    return if (h > 0) "%d:%02d h".format(h, m) else "%d:%02d".format(m, s)
 }
 
 @Composable

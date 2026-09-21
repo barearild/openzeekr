@@ -1,6 +1,7 @@
 package com.openzeekr.app.config
 
 import android.annotation.SuppressLint
+import com.openzeekr.app.util.NativeSecrets
 import com.openzeekr.core.BuildConfig
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -155,6 +156,10 @@ data class SecretsConfig(
     val logHttp: Boolean = false,
     /** Collect + show the on-device BLE log (digital-key / proximity traffic: key material). */
     val logBle: Boolean = false,
+    /** Developer mode (enabled by tapping the version 10x in Settings). Gates in-development tools -
+     *  the Hero lab, Remote Parking and Smart calibration - so they aren't shown to normal users
+     *  between releases. Default off; a fresh/normal install never sees the dev tools. */
+    val devMode: Boolean = false,
     /** User-set display name for the car (shown in the top bar). Blank = use the model
      *  name. The cloud rename API (modify-vehicle / vehNickname) is wired separately. */
     val carNickname: String = "",
@@ -286,24 +291,26 @@ data class SecretsConfig(
          * repo build has these blank and exposes the full secret configuration.
          */
         val SECRETS_BAKED: Boolean =
-            BuildConfig.SEC_PROD_SECRET.isNotBlank() && BuildConfig.SEC_HMAC_SECRET_KEY.isNotBlank()
+            NativeSecrets.prodSecret().isNotBlank() && NativeSecrets.hmacSecretKey().isNotBlank()
 
         /**
-         * Initial config seeded from the gitignored `secrets.properties` via
-         * BuildConfig. Every value is empty when that file is absent (fresh
-         * clone / CI), so the app just starts blank and is set up in Settings.
+         * Initial config seeded from the gitignored `secrets.properties`. The genuinely-secret
+         * values are read from the JNI native lib ([NativeSecrets], libozsecrets.so) rather than
+         * BuildConfig; only the public RSA key stays in BuildConfig. Every value is empty when
+         * secrets.properties was absent at build time (fresh clone / CI), so the app just starts
+         * blank and is set up in Settings.
          */
         fun fromBuildDefaults(): SecretsConfig = SecretsConfig(
-            hmacAccessKey = BuildConfig.SEC_HMAC_ACCESS_KEY,
-            hmacSecretKey = BuildConfig.SEC_HMAC_SECRET_KEY,
+            hmacAccessKey = NativeSecrets.hmacAccessKey(),
+            hmacSecretKey = NativeSecrets.hmacSecretKey(),
             passwordPublicKey = BuildConfig.SEC_PASSWORD_PUBLIC_KEY,
-            prodSecret = BuildConfig.SEC_PROD_SECRET,
-            vinKey = BuildConfig.SEC_VIN_KEY,
-            vinIv = BuildConfig.SEC_VIN_IV,
-            xchangerSignSecret = BuildConfig.SEC_XCHANGER_SIGN_SECRET,
-            overseasAccessKey = BuildConfig.SEC_OVERSEAS_ACCESS_KEY,
-            overseasSecretKey = BuildConfig.SEC_OVERSEAS_SECRET_KEY,
-            inboxAuthSecret = BuildConfig.SEC_INBOX_AUTH_SECRET,
+            prodSecret = NativeSecrets.prodSecret(),
+            vinKey = NativeSecrets.vinKey(),
+            vinIv = NativeSecrets.vinIv(),
+            xchangerSignSecret = NativeSecrets.xchangerSignSecret(),
+            overseasAccessKey = NativeSecrets.overseasAccessKey(),
+            overseasSecretKey = NativeSecrets.overseasSecretKey(),
+            inboxAuthSecret = NativeSecrets.inboxAuthSecret(),
             // NOTE: email / password / vin / userId are intentionally NOT baked
             // in (see build.gradle.kts). They start blank and are entered on the
             // Settings screen, then persisted only in encrypted on-device prefs.

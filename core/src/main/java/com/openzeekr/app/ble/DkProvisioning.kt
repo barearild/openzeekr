@@ -55,10 +55,11 @@ class DkProvisioning(
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; isLenient = true }
     private val api: DkApi by lazy {
         // BODY-level logging into the on-device log so cert/key-list request +
-        // response bodies (incl. any 4xx error body) are visible — but only while debug
+        // response bodies (incl. any 4xx error body) are visible - but only while debug
         // logging is on. With it off the level is NONE, so the sensitive cert/key material
-        // is never even formatted into a string.
-        val httpLog = okhttp3.logging.HttpLoggingInterceptor { m -> Logx.d("http", m) }
+        // is never even formatted into a string. Built via HttpLog so sensitive headers are
+        // redacted and body values (digitalKey, signature, cmacKeyCert, …) are scrubbed to "***".
+        val httpLog = com.openzeekr.app.net.HttpLog.interceptor()
         val ok = OkHttpClient.Builder()
             .addInterceptor(HeaderInterceptor(store))
             .addInterceptor(SignInterceptor(store))

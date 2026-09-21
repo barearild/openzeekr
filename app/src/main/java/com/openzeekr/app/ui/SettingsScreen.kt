@@ -76,6 +76,8 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
     var confirmSignOut by remember { mutableStateOf(false) }
     // Which log category is pending a sensitive-data confirmation: "http", "ble", or null.
     var pendingLogEnable by remember { mutableStateOf<String?>(null) }
+    // Hidden developer-mode unlock: tap the version 10x (like Android's build-number trick).
+    var verTaps by remember { mutableStateOf(0) }
 
     fun set(update: (SecretsConfig) -> SecretsConfig) { cfg = update(cfg) }
     val loggedIn = liveCfg.accessToken.isNotBlank()
@@ -189,22 +191,25 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                 )
             }
             if (liveCfg.logHttp || liveCfg.logBle) LogViewer()
-            OutlinedButton(onClick = { showHeroLab = true }, modifier = Modifier.fillMaxWidth()) {
+            // In-development tool: gated behind developer mode (tap the version 10x in About) so it
+            // isn't shown to normal users between releases.
+            if (liveCfg.devMode) OutlinedButton(onClick = { showHeroLab = true }, modifier = Modifier.fillMaxWidth()) {
                 Text("Hero lab (graphics test)")
             }
-            // Debug: dump the provisioned digital key (incl. the private key) to a JSON file so it can
-            // be reused in the standalone zeekr-dk-ble project without re-provisioning. Sensitive - the
-            // file holds the DK private key; it lands in the app's own external files dir (adb-pullable).
+            // Debug: send a liveness ping (non-actuating 0x0110/0x0A) and report whether the car
+            // replied (it acks 0x0111). Verifies the DK COMMAND session is actually alive, not just
+            // the GATT link. Needs a live key session - connect on the Key tab first. The full reply
+            // frame is in the log above when BLE logging is on.
             OutlinedButton(onClick = {
-                val json = deps.dkIdentity.exportCredentialJson()
-                status = if (json == null) "No provisioned key to export."
-                else runCatching {
-                    val f = java.io.File(ctx.getExternalFilesDir(null), "dk_credential.json")
-                    f.writeText(json)
-                    "Key exported to ${f.absolutePath}"
-                }.getOrElse { "Export failed: ${it.message}" }
+                status = "Pinging vehicle…"
+                scope.launch {
+                    val ok = runCatching { deps.ble.session.ping(2_000L) }.getOrDefault(false)
+                    Logx.d("ble", "manual ping -> ${if (ok) "reply (command link alive)" else "no reply"}")
+                    status = if (ok) "Ping OK - the car replied (command link alive)."
+                    else "Ping: no reply - not connected, or the link is wedged (connect on the Key tab and retry)."
+                }
             }, modifier = Modifier.fillMaxWidth()) {
-                Text("Export digital key -> file (debug)")
+                Text("Ping vehicle (debug)")
             }
         }
 
@@ -223,7 +228,19 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
         SettingsCard {
             CardTitle("About")
             val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "—" }
-            InfoRow("Version", ver)
+            // Tap the version 10x to toggle developer mode (Hero lab / Remote Parking / Calibration).
+            Box(Modifier.fillMaxWidth().clickable {
+                if (!liveCfg.devMode) {
+                    verTaps++
+                    when {
+                        verTaps >= 10 -> { store.update { it.copy(devMode = true) }; verTaps = 0; status = "Developer mode ON" }
+                        verTaps >= 6 -> status = "${10 - verTaps} more taps to enable developer mode"
+                    }
+                }
+            }) { InfoRow("Version", ver) }
+            if (liveCfg.devMode) Box(Modifier.fillMaxWidth().clickable {
+                store.update { it.copy(devMode = false) }; verTaps = 0; status = "Developer mode off"
+            }) { InfoRow("Developer mode", "On - tap to turn off") }
             InfoRow("Build", if (baked) "private (keys baked)" else "clean (bring your own keys)")
             Spacer(Modifier.size(4.dp))
             Text(
@@ -462,6 +479,7 @@ private fun Field(label: String, value: String, secret: Boolean = false, support
 private fun LogViewer() {
     val lines by Logx.lines.collectAsState()
     val clipboard = LocalClipboardManager.current
+    var copyMsg by remember { mutableStateOf("") }
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Brand.surface2).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -469,10 +487,23 @@ private fun LogViewer() {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Logs (${lines.size})", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(Logx.dump())) }) { Text("Copy") }
-                OutlinedButton(onClick = { Logx.clear() }) { Text("Clear") }
+                // The copied log is ENCRYPTED with the developers' RSA public key, so a pasted log
+                // reveals nothing (tokens, VIN, key material). On any crypto failure copy NOTHING -
+                // never fall back to copying the plaintext.
+                OutlinedButton(onClick = {
+                    val blob = com.openzeekr.app.util.LogCrypto.encryptToBase64(Logx.dump())
+                    if (blob != null) {
+                        clipboard.setText(AnnotatedString(blob))
+                        copyMsg = "Copied - encrypted; only the developers can read it."
+                    } else {
+                        copyMsg = "Copy failed - nothing copied."
+                    }
+                }) { Text("Copy (encrypted)") }
+                OutlinedButton(onClick = { Logx.clear(); copyMsg = "" }) { Text("Clear") }
             }
         }
+        if (copyMsg.isNotBlank()) Text(copyMsg, color = Brand.muted, fontSize = 11.sp)
+        else Text("Copy exports an ENCRYPTED log only the developers can read.", color = Brand.faint, fontSize = 11.sp)
         if (lines.isEmpty()) Text("No log yet.", color = Brand.muted, fontSize = 12.sp)
         else Column {
             lines.takeLast(120).forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Brand.muted) }

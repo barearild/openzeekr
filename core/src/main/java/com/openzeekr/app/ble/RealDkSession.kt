@@ -92,13 +92,30 @@ class RealDkSession(
         // occupied (waking, or tearing down a stale session). Stock (n0/g) does NOT abort on
         // this: it keeps the BLE link, logs "EEC_busy Wait 2.5s ReStart", waits 0x9c4=2500ms
         // and re-sends CONNECT_CONFIRM. Match that exactly rather than disconnecting.
-        var err = connectConfirm(cred, rnd, connectKey, initState = 0)
+        // Send CONNECT_CONFIRM and await 0x0102. Two transient conditions are retried (matching the
+        // stock SDK's send-with-response behaviour) instead of failing the whole handshake:
+        //   - EEC_busy (0x100c): the DK module is momentarily busy -> wait 2.5s and re-send (up to 6x).
+        //   - NO 0x0102 at all (connectConfirm throws a stall): the module didn't answer the first
+        //     confirm (seen on a fresh/cold link by multiple testers) -> re-send a few times first.
+        var err: Int?
         var busyTries = 0
-        while (err == 0x100c && busyTries < 6) {
-            busyTries++
-            Logx.d("dk", "handshake 0/5 EEC_busy (BNCM busy) — wait 2.5s, ReStart (#$busyTries)")
-            delay(2500)
-            err = connectConfirm(cred, rnd, connectKey, initState = 0)
+        var stallTries = 0
+        while (true) {
+            try {
+                err = connectConfirm(cred, rnd, connectKey, initState = 0)
+            } catch (e: Exception) {
+                if (++stallTries > 3) throw e
+                Logx.d("dk", "handshake 0/5 no 0x0102 (stall #$stallTries) - re-send CONNECT_CONFIRM")
+                delay(1200)
+                continue
+            }
+            if (err == 0x100c && busyTries < 6) {
+                busyTries++
+                Logx.d("dk", "handshake 0/5 EEC_busy (BNCM busy) - wait 2.5s, ReStart (#$busyTries)")
+                delay(2500)
+                continue
+            }
+            break
         }
         // Branch exactly like the stock 0x0102 disposer (q0/q.a): the CAR's errCode alone
         // selects the path. initState is always 0 on the wire (isInitState() is hardcoded 0).
@@ -108,15 +125,15 @@ class RealDkSession(
         //        for this (dkId, deviceId); the cloud->vehicle key push hasn't landed on the car.
         val firstPair: Boolean = when (err) {
             0x1012 -> { Logx.d("dk", "handshake 0/5 authenticated (reconnect)"); false }
-            0x1011 -> { Logx.d("dk", "handshake 0/5 notAuthenticated (first-pair) — sending cert"); true }
+            0x1011 -> { Logx.d("dk", "handshake 0/5 notAuthenticated (first-pair) - sending cert"); true }
             else -> throw IllegalStateException(
                 "CONNECT_CONFIRM rejected: DK_STATUS errCode=0x%04x".format(err ?: 0) +
                 (if (err == 0x1010)
-                    " (EEC_confirmFailed) — the vehicle has NO registration for this key/device yet. " +
-                    "The cloud→vehicle key push hasn't reached the car. Wake/start the car so its DK " +
+                    " (EEC_confirmFailed) - the vehicle has NO registration for this key/device yet. " +
+                    "The cloud->vehicle key push hasn't reached the car. Wake/start the car so its DK " +
                     "module syncs its key list from the cloud, then retry."
                 else if (err == 0x100c)
-                    " (EEC_busy) — the car's DK module stayed busy after 6×2.5s retries. " +
+                    " (EEC_busy) - the car's DK module stayed busy after 6x2.5s retries. " +
                     "Another BLE session (the stock app's :dkservice, or a stale connection) is " +
                     "likely holding it. Force-stop the stock app and retry."
                 else " (unexpected)"))
@@ -379,6 +396,102 @@ class RealDkSession(
         return key
     }
 
+    // ---------------- custom command (walk-away lock / approach unlock) ----------------
+
+    /**
+     * Send a 0x0151 CUST_REQ custom command (the only wire form for walk-away-lock / approach-unlock).
+     * Body = nSeq(2) | ts(4) | type(1) | data(1), GCM, GATT channel 2. Fire-and-forget (car answers
+     * 0x0152 but the enable is idempotent). Requires a live session.
+     */
+    suspend fun sendCustomCommand(type: Byte, enable: Boolean): Boolean {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "cust cmd: session not ready"); return false }
+        val tail = byteArrayOf(type, if (enable) DkProtocol.CUST_ENABLE else DkProtocol.CUST_DISABLE)
+        val ok = send(DkProtocol.CMD_A2V_CUST_REQ, tail)
+        Logx.d("dk", "cust cmd type=0x%02x data=%d (0x0151, ch2) write=%s".format(type, if (enable) 1 else 0, ok))
+        return ok
+    }
+
+    // ---------------- self-calibration (0x0190-0x0199) ----------------
+    // The 4-step distance self-cal the stock DK-management screen drives. Primitives only; the step
+    // sequencing (which position, how many samples) lives in the caller (CalibrationTestController).
+    // All A2V frames ride channel 2 and use SELF_CALIB_INST_TYPE; GCM/plaintext per DkProtocol.
+
+    /** 0x0190 CALIBRATION_START [type] -> 0x0191 [errCode]. Returns the car's errCode (0 == OK), or -1. */
+    suspend fun calibStart(type: Byte): Int {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibStart: session not ready"); return -1 }
+        val rsp = runCatching { exchange(DkProtocol.CMD_A2V_CALIBRATION_START, byteArrayOf(type),
+            DkProtocol.CMD_V2A_CALIBRATION_RSP) }.getOrElse { Logx.w("dk", "calibStart: ${it.message}"); return -1 }
+        val err = errByteAt6(rsp)
+        Logx.d("dk", "calibStart type=$type -> 0x0191 errCode=$err")
+        return err
+    }
+
+    /** 0x0192 CALIBRATION_LOC_SEND [type/step] -> 0x0193 [errCode]. Returns errCode (0 == OK), or -1. */
+    suspend fun calibLoc(type: Byte): Int {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibLoc: session not ready"); return -1 }
+        val rsp = runCatching { exchange(DkProtocol.CMD_A2V_CALIBRATION_LOC_SEND, byteArrayOf(type),
+            DkProtocol.CMD_V2A_CALIBRATION_LOC_RSP) }.getOrElse { Logx.w("dk", "calibLoc: ${it.message}"); return -1 }
+        val err = errByteAt6(rsp)
+        Logx.d("dk", "calibLoc type=$type -> 0x0193 errCode=$err")
+        return err
+    }
+
+    /** 0x0196 PE_MODE_REQ [mode] -> 0x0197 [errCode] (passive-entry / walk-away enable). errCode or -1. */
+    suspend fun calibSetPeMode(mode: Byte): Int {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibSetPeMode: session not ready"); return -1 }
+        val rsp = runCatching { exchange(DkProtocol.CMD_A2V_PE_MODE_REQ, byteArrayOf(mode),
+            DkProtocol.CMD_V2A_PE_MODE_RSP) }.getOrElse { Logx.w("dk", "calibSetPeMode: ${it.message}"); return -1 }
+        val err = errByteAt6(rsp)
+        Logx.d("dk", "calibSetPeMode mode=$mode -> 0x0197 errCode=$err")
+        return err
+    }
+
+    /**
+     * Wait (up to [timeoutMs]) for the car to push the 0x0194 RECEIVE_CALIBRATION result: the
+     * 200-byte coefficient table + 4-byte hash it computed for this phone/session (plaintext on Zeekr).
+     * Returns (table, hash) or null on timeout. Call AFTER the measurement flow completes.
+     */
+    suspend fun calibAwaitTable(timeoutMs: Long): Pair<ByteArray, ByteArray>? {
+        val body = awaitFrame(DkProtocol.CMD_V2A_RECEIVE_CALIBRATION, timeoutMs) ?: run {
+            Logx.w("dk", "calibAwaitTable: no 0x0194 within ${timeoutMs}ms"); return null
+        }
+        // CalibrationReceivePayload: [6:206]=calib(200), [206:210]=hash(4) when body>=210; else short.
+        return if (body.size >= 210) {
+            val table = body.copyOfRange(6, 206); val hash = body.copyOfRange(206, 210)
+            Logx.d("dk", "calibAwaitTable: 0x0194 table=${table.size}B hash=${hexOf(hash)}"); table to hash
+        } else if (body.size >= 22) {
+            val table = body.copyOfRange(6, 22)
+            Logx.w("dk", "calibAwaitTable: 0x0194 SHORT variant (${table.size}B, no hash) — incomplete?"); table to ByteArray(0)
+        } else { Logx.w("dk", "calibAwaitTable: 0x0194 too short (${body.size}B)"); null }
+    }
+
+    /** 0x0198 SELF_CALIBRATION_DATA [table] — re-upload a stored 200-byte table (PLAINTEXT, ch2). No response. */
+    suspend fun calibSendSelfData(table: ByteArray): Boolean {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibSendSelfData: session not ready"); return false }
+        if (table.isEmpty()) { Logx.w("dk", "calibSendSelfData: empty table"); return false }
+        val ok = send(DkProtocol.CMD_A2V_SELF_CALIBRATION_DATA, table)
+        Logx.d("dk", "calibSendSelfData: 0x0198 table=${table.size}B (plaintext, ch2) write=$ok")
+        return ok
+    }
+
+    /** 0x0199 CALIBRATION_MODEL_ZEEKR [model] — the Zeekr auth-time model push (GCM, ch2). No response. */
+    suspend fun calibSendModel(model: Byte): Boolean {
+        if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibSendModel: session not ready"); return false }
+        val ok = send(DkProtocol.CMD_A2V_CALIBRATION_MODEL_ZEEKR, byteArrayOf(model))
+        Logx.d("dk", "calibSendModel: 0x0199 model=$model (GCM, ch2) write=$ok")
+        return ok
+    }
+
+    /** errCode = body[6] (1 byte) for the calibration rsp frames, or -1 if the body is too short. */
+    private fun errByteAt6(body: ByteArray): Int = if (body.size >= 7) body[6].toInt() and 0xFF else -1
+
+    /** Await the next inbound frame with opcode [expect] (no send); decrypted+wrapped body, or null. */
+    private suspend fun awaitFrame(expect: Int, timeoutMs: Long): ByteArray? {
+        val def = CompletableDeferred<ByteArray>()
+        pending[expect] = def
+        return try { withTimeoutOrNull(timeoutMs) { def.await() } } finally { pending.remove(expect) }
+    }
+
     // ---------------- frame I/O ----------------
 
     /** Build (auto nSeq/ts, 6-byte CMAC trailer for RPA, GCM if needed) and write; no wait. */
@@ -388,8 +501,22 @@ class RealDkSession(
         val fullTail = if (DkProtocol.needsCmac(cmdId)) tail + DkCrypto.aesCmac6(cmacKey(), tsBytes(ts) + tail) else tail
         val plain = DkPayload.wrap(nSeq, ts, fullTail)
         val body = if (DkProtocol.isEncrypted(cmdId)) DkCrypto.gcmEncrypt(sKey, iv, plain) else plain
-        val frame = DkFrame(cmdId, DkProtocol.INST_REQ, body).encode()
+        val frame = DkFrame(cmdId, instTypeFor(cmdId), body).encode()
         return transport.write(cmdId, frame)
+    }
+
+    /**
+     * instType byte for a phone->car frame, per the reversed DkCmd table (docs DK_BLE_PROTOCOL §6):
+     *  - RPA command frames (0x113/0x116) -> INST_CON (captured; car ACKs 0x1000).
+     *  - self-cal 0x0192 CALIBRATION_LOC_SEND -> INST_CON (the per-position ping-pong is a CON frame).
+     *  - everything else, INCLUDING 0x0190 CALIBRATION_START / 0x0196 PE_MODE_REQ / 0x0198 / 0x0199,
+     *    is INST_REQ. (We tried 0x0190 as CON too - the car is silent either way; the real diff is the
+     *    missing mode-select step + unknown type byte, not instType. See dk-selfcalib-test-harness.)
+     */
+    private fun instTypeFor(cmdId: Int): Int = when {
+        DkProtocol.needsCmac(cmdId) -> DkProtocol.INST_CON
+        cmdId == DkProtocol.CMD_A2V_CALIBRATION_LOC_SEND -> DkProtocol.INST_CON
+        else -> DkProtocol.INST_REQ
     }
 
     /** The 4-byte big-endian timestamp exactly as DkPayload.wrap serializes it (for the CMAC input). */
@@ -409,12 +536,12 @@ class RealDkSession(
         pending[expect] = def
         try {
             val body = if (encrypt) DkCrypto.gcmEncrypt(sKey, iv, plainBody) else plainBody
-            val frame = DkFrame(cmdId, DkProtocol.INST_REQ, body).encode()
+            val frame = DkFrame(cmdId, instTypeFor(cmdId), body).encode()
             if (!transport.write(cmdId, frame)) throw IllegalStateException("write failed for cmd ${hex(cmdId)}")
             // Name the stalled step in the error so a tester's screenshot alone tells us WHERE the
             // handshake died (e.g. "sent 0x103, no 0x104" = cert exchange never came back).
             return withTimeoutOrNull(timeoutMs) { def.await() }
-                ?: error("DK handshake stalled — sent ${hex(cmdId)}, no ${hex(expect)} reply within ${timeoutMs}ms")
+                ?: error("DK handshake stalled - sent ${hex(cmdId)}, no ${hex(expect)} reply within ${timeoutMs}ms")
         } finally {
             pending.remove(expect)
         }

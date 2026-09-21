@@ -316,11 +316,17 @@ class DkBleManager(base: Context) : DkTransport {
             val name = rec?.deviceName ?: runCatching { dev.name }.getOrNull()
             val uuids = rec?.serviceUuids
             if (seenAdvertisers.add(addr)) {
+                // Log EVERY unique advertiser (deduped by MAC) with the fields that identify a car:
+                // name, advertised service UUIDs, service-data UUIDs, and manufacturer company ids.
+                // This is what tells us how a non-matching car advertises so we can widen the match.
+                val svcData = rec?.serviceData?.keys?.joinToString { it.uuid.toString() } ?: "none"
+                val mfrIds = rec?.manufacturerSpecificData?.let { m ->
+                    if (m.size() == 0) "none" else (0 until m.size()).joinToString { "%04x".format(m.keyAt(it)) }
+                } ?: "none"
                 Logx.d("ble", "adv $addr rssi=${result.rssi} name=${name ?: "?"} " +
-                    "uuids=${uuids?.joinToString { it.uuid.toString() } ?: "none"} " +
-                    // Full raw advert bytes — needed to build the hardware ScanFilter (company id =
-                    // first 2B of the 0xFF mfr AD, then the constant/masked bytes) for a
-                    // PendingIntent offloaded scan that runs screen-off with the CPU asleep.
+                    "uuids=${uuids?.joinToString { it.uuid.toString() } ?: "none"} svcData=[$svcData] mfr=[$mfrIds] " +
+                    // Full raw advert bytes - lets us derive the hardware ScanFilter (company id +
+                    // constant/masked bytes) for the PendingIntent offloaded screen-off scan.
                     "raw=${rec?.bytes?.joinToString("") { "%02x".format(it) } ?: ""}")
             }
             // The DK broadcast-random rides a separate manufacturer-data PDU; capture it per-MAC
@@ -329,22 +335,30 @@ class DkBleManager(base: Context) : DkTransport {
                 rndByMac[addr] = it
                 Logx.d("ble", "broadcastRnd[$addr]=${it.joinToString("") { b -> "%02x".format(b) }}")
             }
-            val matchesName = name?.startsWith("Zeekr", ignoreCase = true) == true
-            // target = DK GATT service (not advertised); advTarget = the 0xFDFD the car DOES
-            // advertise in its primary packet — matching it means we don't depend on the
-            // scan-response name, which a screen-off scan can drop.
+            // Software match (the foreground scan is unfiltered): any ONE of these = our car.
+            // Loosened from startsWith("Zeekr") to contains, and added service-data + DK mfr id, so a
+            // car whose name/primary-UUID differ by region/firmware still matches.
+            val matchesName = name?.contains("zeekr", ignoreCase = true) == true
+            // target = DK GATT service (not advertised); advTarget = the 0xFDFD the car DOES advertise.
+            // A screen-off scan can drop the scan-response name, so don't depend on it alone.
             val matchesUuid = uuids?.any { it.uuid == target || it.uuid == advTarget } == true
-            if (matchesName || matchesUuid) {
+            val matchesSvcData = rec?.serviceData?.keys?.any { it.uuid == target || it.uuid == advTarget } == true
+            val matchesMfr = (rec?.manufacturerSpecificData?.indexOfKey(DK_MFR_COMPANY_ID) ?: -1) >= 0
+            if (matchesName || matchesUuid || matchesSvcData || matchesMfr) {
+                val why = when {
+                    matchesName -> "name '$name'"
+                    matchesUuid -> "service uuid"
+                    matchesSvcData -> "service-data uuid"
+                    else -> "mfr 0x%04x".format(DK_MFR_COMPANY_ID)
+                }
                 val rnd = rndByMac[addr]
                 if (rnd == null) {
-                    Logx.d("ble", "matched ${if (matchesName) "name '$name'" else "uuid"} $addr but no " +
-                        "broadcastRnd yet — waiting for the DK mfr-data advert…")
+                    Logx.d("ble", "matched $why $addr but no broadcastRnd yet - waiting for the DK mfr-data advert…")
                     return false
                 }
                 advBroadcastRnd = rnd
                 lastDevice = dev; lastRnd = rnd   // cache for a scan-free forced reconnect
-                Logx.d("ble", "match ${if (matchesName) "by name '$name'" else "by service uuid"} " +
-                    "rnd=${rnd.joinToString("") { "%02x".format(it) }} -> connecting $addr")
+                Logx.d("ble", "match by $why rnd=${rnd.joinToString("") { "%02x".format(it) }} -> connecting $addr")
                 stopScanInternal(scanner)
                 _state.value = State.CONNECTING
                 connectDevice(dev)
@@ -367,9 +381,14 @@ class DkBleManager(base: Context) : DkTransport {
             }
         }
         scanCb = cb
-        Logx.d("ble", "scanning (filtered 0xFDFD/0x06FE, ${if (useBatching) "batched ${REPORT_DELAY_MS}ms" else "immediate"}) " +
-            "— match by name Zeekr*, adv-uuid 0xFDFD, or DK service ${DkProtocol.SERVICE_UUID}")
-        scanner.startScan(carScanFilters(), settings, cb)
+        Logx.d("ble", "scanning (UNFILTERED, ${if (useBatching) "batched ${REPORT_DELAY_MS}ms" else "immediate"}) " +
+            "- match by name *zeekr*, adv-uuid 0xFDFD, DK service ${DkProtocol.SERVICE_UUID}, svcData or mfr 0x06FE. " +
+            "Every advertiser is logged so a car with different adv identifiers is still visible.")
+        // Foreground connect: scan UNFILTERED and match in software (see handleAdvert). The hardware
+        // 0xFDFD/0x06FE ScanFilter is kept ONLY for the offloaded background presence scan; on the
+        // foreground connect it risked hiding (and never logging) a car whose region/firmware
+        // advertises different identifiers - the "no DK device matched, nothing in the advert log" case.
+        scanner.startScan(null, settings, cb)
         scanJob = scope.launch {
             delay(SCAN_TIMEOUT_MS)
             if (_state.value == State.SCANNING) {
@@ -530,6 +549,29 @@ class DkBleManager(base: Context) : DkTransport {
         reasm1.reset(); reasm2.reset()
         lastRemoteRssi = null; rssiReadPending = false
         _state.value = State.IDLE
+    }
+
+    /**
+     * Bring up a FRESH DK session on demand - the programmatic equivalent of the user's manual
+     * "tap Bluetooth off then on" on the Key tab. Used to recover a session that has gone STALE while
+     * the GATT link stayed up: the car appears to time out its cert/handshake epoch after a while, so
+     * commands are silently ignored even though we never left SESSION_READY. Dropping the link forces
+     * the car to release the stale session; the reconnect runs a clean handshake (fresh rnd + GCM
+     * keys). Returns true once SESSION_READY, false on timeout. Requires a provisioned credential.
+     */
+    suspend fun refreshSession(timeoutMs: Long = 15_000L): Boolean {
+        if (!hasCredential) { Logx.w("ble", "refreshSession: no credential"); return false }
+        Logx.d("ble", "refreshSession: dropping the link for a fresh DK session")
+        disconnect()
+        delay(800) // let the stack settle and the car release the stale session before reconnecting
+        if (!reconnectLast()) connect(null)
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (_state.value == State.SESSION_READY) { Logx.d("ble", "refreshSession: SESSION_READY"); return true }
+            delay(200)
+        }
+        Logx.w("ble", "refreshSession: timed out in ${_state.value}")
+        return _state.value == State.SESSION_READY
     }
 
     // ---------------- GATT callbacks ----------------

@@ -18,6 +18,22 @@ data class BaseResponse<T>(
     val data: T? = null,
 )
 
+/**
+ * Vehicle connectivity data-plan usage (the car's eSIM, "traffic volume"), from
+ * GET ms-mno-service/api/v1.0/app/vehicle/data/usage/info. The stock app parses
+ * total/usage/remain straight to Float and renders them with a "GB" suffix, so the
+ * strings are already in GB. simStatus is the eSIM state; queryTimeMillis is when it
+ * was measured.
+ */
+@Serializable
+data class TrafficReport(
+    val total: String? = null,
+    val usage: String? = null,
+    val remain: String? = null,
+    val simStatus: Int = 0,
+    val queryTimeMillis: Long = 0,
+)
+
 // ------------------------------------------------------------------ control
 
 /** Mirrors ECARX `OperationScheduling`. */
@@ -953,6 +969,9 @@ data class ElectricStatusVo(
      *  tolerantly; [averTraPowerConsumption] is the trip-window average used as a fallback. */
     val averPowerConsumption: String? = null,
     val averTraPowerConsumption: String? = null,
+    /** The car's own estimate of MINUTES until the battery reaches its charge limit (stock
+     *  `timeToFullyCharged`). 0/absent when not charging or unknown. */
+    val timeToFullyCharged: Int? = null,
 ) {
     /** Average energy consumption to surface, preferring the overall figure, then the trip window.
      *  null when neither is reported (or it's a non-positive/garbage value). */
@@ -976,6 +995,14 @@ data class ElectricStatusVo(
         get() {
             val cs = chargerState?.toIntOrNull()
             return (cs != null && cs in CHARGING_STATES) || (chargePowerW ?: 0.0) > CHARGE_POWER_ON_W
+        }
+
+    /** Human "Xh Ym" / "Ym" estimate of time to a full/limited charge while charging, or null when
+     *  not charging or the car reports no estimate. */
+    val timeToFullLabel: String?
+        get() {
+            val m = timeToFullyCharged?.takeIf { it > 0 && chargingActive } ?: return null
+            return if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
         }
 
     /** Cable plugged in (charging or not). conn/dc in {1,2,3} = connected (isPluggedIn is dead). */
@@ -1110,6 +1137,7 @@ object VehicleStatus {
                             hvBatteryPreHeatingActive = e.boolOf("hvBatteryPreHeatingActive"),
                             averPowerConsumption = e.str("averPowerConsumption"),
                             averTraPowerConsumption = e.str("averTraPowerConsumption"),
+                            timeToFullyCharged = e.intOf("timeToFullyCharged"),
                         )
                     },
                     maintenanceStatus = a.obj("maintenanceStatus")?.let { m ->
