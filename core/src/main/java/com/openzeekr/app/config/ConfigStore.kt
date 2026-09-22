@@ -101,6 +101,12 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
     fun setRegion(code: String) = update { cur ->
         val prev = com.openzeekr.app.net.Region.byCode(cur.regionCode)
         val next = com.openzeekr.app.net.Region.byCode(code)
+        // Swap the 3 region-specific SIGNING secrets to the selected region's baked set (keyed by
+        // extractorRegion: EU/EM/SEA). Everything else (password key, vin, xchanger, overseas) is
+        // shared. `ifBlank { existing }` means: a baked build swaps to the region's keys, but a
+        // clean/unbaked build (or an un-extracted region) keeps whatever keys are already set - so we
+        // never wipe a user's manually-entered keys with a blank. See [[zeekr-regions]].
+        val na = com.openzeekr.app.util.NativeSecrets
         cur.copy(
             regionCode = next.code,
             baseUrl = next.tspBaseUrl,
@@ -109,6 +115,9 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
             projectId = next.projectId,
             snsRegion = next.snsRegion,
             countryCode = if (cur.countryCode == prev.countryCode) next.countryCode else cur.countryCode,
+            hmacAccessKey = na.hmacAccessKey(next.extractorRegion).ifBlank { cur.hmacAccessKey },
+            hmacSecretKey = na.hmacSecretKey(next.extractorRegion).ifBlank { cur.hmacSecretKey },
+            prodSecret = na.prodSecret(next.extractorRegion).ifBlank { cur.prodSecret },
         )
     }
 

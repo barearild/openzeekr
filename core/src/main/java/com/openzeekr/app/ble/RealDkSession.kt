@@ -28,10 +28,29 @@ import java.util.concurrent.ConcurrentHashMap
  * Session keys: shared = ECDH(ephemeralPriv, vehicleFactor) = X(32)||Y(32);
  *   AES-128-GCM key = X[0:16], static GCM IV = Y[0:12]. No CMAC (GCM tag + CRC16).
  */
+
+/**
+ * Thrown into any in-flight handshake waiter when the BLE link drops mid-handshake (see [reset]).
+ * It is a PLAIN exception, NOT a CancellationException, on purpose: a coroutine [CompletableDeferred]
+ * cancelled with a bare CancellationException surfaces to the UI as the obfuscated, useless
+ * "w0 was cancelled" (R8 renames the deferred's class). By completing waiters with this typed error
+ * instead, the user sees a real diagnosis and our own retry/backoff logic treats it as a handshake
+ * failure rather than mistaking it for structured cancellation. See GitHub issue #3.
+ */
+class DkLinkDropped : Exception(
+    "BLE link dropped during the key handshake - the car (or the phone's Bluetooth) closed the " +
+    "connection before the key exchange finished. This is usually the car's DK module resetting the " +
+    "link (a stale session, or it wasn't ready). Reconnect and retry; if it repeats, wake the car."
+)
+
 class RealDkSession(
     private val transport: DkTransport,
     private val credentialProvider: () -> DkCredential?,
     private val timeoutMs: Long = 8000,
+    /** TOFU pin of the vehicle cert per VIN. When set, the car must present the SAME cert it did at
+     *  first pair - binding the session to this specific car so a fake/relay car with any genuine
+     *  Geely cert can't complete the handshake and harvest the key. Null = CA+validity check only. */
+    private val certPins: DkTrust.VehicleCertPinStore? = null,
 ) : DkSession {
 
     override var isEstablished: Boolean = false
@@ -88,6 +107,13 @@ class RealDkSession(
                 "0x0101 connectKey can be derived")
         val connectKey = DkCrypto.deriveConnectKey(cred.vin, rnd)
         Logx.d("dk", "handshake 0/5 connect-confirm (0x0101) rnd=${hexOf(rnd)} …")
+        // Handshake diagnostics: dump the fields that go into CONNECT_CONFIRM so a "car never replies"
+        // report (silence on 0x0102) can be triaged - an empty/zero field points to a provisioning gap,
+        // and the VIN confirms the connectKey is derived from the right car. Sensitive, but the BLE log
+        // is encrypted on copy, and this only emits when BLE logging is on.
+        Logx.d("dk", "handshake diag: vin=${cred.vin} dkId=${hexOf(cred.dkIdBytes)} phoneId=${hexOf(cred.phoneId8)} " +
+            "phoneType=${hexOf(cred.phoneType3)} bigCalibHash=${hexOf(cred.bigCalibHash4)} " +
+            "smallCalibHash=${hexOf(cred.smallCalibHash4)} coefSmall=${cred.coefSmall.size}B")
         // The car's DK module can answer 0x100c EEC_busy ("BNCM Busy") when it's momentarily
         // occupied (waking, or tearing down a stale session). Stock (n0/g) does NOT abort on
         // this: it keeps the BLE link, logs "EEC_busy Wait 2.5s ReStart", waits 0x9c4=2500ms
@@ -104,7 +130,14 @@ class RealDkSession(
             try {
                 err = connectConfirm(cred, rnd, connectKey, initState = 0)
             } catch (e: Exception) {
-                if (++stallTries > 3) throw e
+                // Never swallow/retry a coroutine cancellation (structured cancel of our scope) nor a
+                // DkLinkDropped (the link dropped mid-confirm): rethrow both so they don't surface as a
+                // bogus "no 0x0102 after 3 tries" stall or the obfuscated "... was cancelled" error.
+                if (e is kotlinx.coroutines.CancellationException || e is DkLinkDropped) throw e
+                if (++stallTries > 3) throw IllegalStateException(
+                    "car received CONNECT_CONFIRM (0x0101) but sent NO 0x0102 reply after $stallTries tries - " +
+                    "it could not validate our confirm. Likely: wrong VIN-derived key, the digital key is not " +
+                    "registered on THIS car, or an unsupported confirm-code version for this model.", e)
                 Logx.d("dk", "handshake 0/5 no 0x0102 (stall #$stallTries) - re-send CONNECT_CONFIRM")
                 delay(1200)
                 continue
@@ -157,10 +190,12 @@ class RealDkSession(
             DkProtocol.CMD_V2A_SEND_VEHICLE_CERT)
         val carCert = parseCert(afterHeader(carCertBody))
         Logx.d("dk", "handshake 1/5 vehicle cert: ${carCert.subjectX500Principal.name.take(64)}")
-        // Authenticate the CAR before we ever release our digital key (0x010b): the vehicle cert
-        // must be signed by a real Geely CA. Stops a fake car (that knows the VIN) from completing
+        // Authenticate the CAR before we ever release our digital key (0x010b): the vehicle cert must
+        // be Geely-issued AND valid AND (when a pin store is wired) the SAME cert this car presented at
+        // first pair. Stops a fake/relay car - even one holding a genuine Geely cert - from completing
         // the session and harvesting the key. Throws → handshake aborts before any key material.
-        DkTrust.requireGeelyVehicleCert(carCert)
+        certPins?.let { DkTrust.requireTrustedAndPinned(carCert, cred.vin, it) }
+            ?: DkTrust.requireGeelyVehicleCert(carCert)
 
         // 2) ephemeral factor + signature  (sign over nSeq||ts||factor; cleartext)
         Logx.d("dk", "handshake 2/5 send factor+sig …")
@@ -179,12 +214,12 @@ class RealDkSession(
         deriveSession(vfBody, carCert)
         cryptoReady = true
         Logx.d("dk", "handshake 3/5 session keys derived (GCM ready)")
-        // DIAGNOSTIC: dump session key material so the 0x010c decrypt can be analysed offline.
-        Logx.d("dk", "DBG sKey=${hexOf(sKey)} iv=${hexOf(iv)} carFactorPt=${hexOf(vfBody.copyOfRange(6, 70))}")
+        // NOTE: the AES session key (sKey/iv) and the raw digitalKey are NEVER logged - dumping them
+        // to logcat / the on-device buffer was a dev-only diagnostic and is a key-material leak (the
+        // on-screen log renders plaintext even though the copied log is encrypted). Removed for release.
 
         // 4) register the digital key (GCM) + confirm
         Logx.d("dk", "handshake 4/5 send digital key …")
-        Logx.d("dk", "DBG dkey plaintext(${cred.digitalKey.size}B)=${hexOf(cred.digitalKey)}")
         runCatching {
             exchange(DkProtocol.CMD_A2V_SEND_DKEY, cred.digitalKey, DkProtocol.CMD_V2A_DK_VERIFY_STATUS)
         }.onFailure { Logx.w("dk", "SEND_DKEY: ${it.message}") }
@@ -367,7 +402,11 @@ class RealDkSession(
      */
     fun reset() {
         isEstablished = false; cryptoReady = false; cmacKeyCache = null
-        pending.values.forEach { it.cancel() }; pending.clear()
+        // Complete (don't bare-cancel) each in-flight waiter with a typed error. A bare .cancel()
+        // makes an awaiting handshake step throw a CancellationException whose obfuscated class name
+        // surfaces to the UI as "w0 was cancelled" (issue #3). DkLinkDropped is a plain exception, so
+        // it reads clearly AND is not mistaken for structured cancellation by our retry/backoff code.
+        pending.values.forEach { it.completeExceptionally(DkLinkDropped()) }; pending.clear()
     }
 
     /**

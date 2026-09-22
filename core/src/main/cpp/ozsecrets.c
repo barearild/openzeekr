@@ -49,6 +49,25 @@
 #ifndef OZ_SEC_VIN_IV
 #define OZ_SEC_VIN_IV ""
 #endif
+/* Per-region signing sets (SEA + EM). Blank -> the Kotlin side falls back to the EU/default set. */
+#ifndef OZ_SEC_SEA_HMAC_ACCESS_KEY
+#define OZ_SEC_SEA_HMAC_ACCESS_KEY ""
+#endif
+#ifndef OZ_SEC_SEA_HMAC_SECRET_KEY
+#define OZ_SEC_SEA_HMAC_SECRET_KEY ""
+#endif
+#ifndef OZ_SEC_SEA_PROD_SECRET
+#define OZ_SEC_SEA_PROD_SECRET ""
+#endif
+#ifndef OZ_SEC_EM_HMAC_ACCESS_KEY
+#define OZ_SEC_EM_HMAC_ACCESS_KEY ""
+#endif
+#ifndef OZ_SEC_EM_HMAC_SECRET_KEY
+#define OZ_SEC_EM_HMAC_SECRET_KEY ""
+#endif
+#ifndef OZ_SEC_EM_PROD_SECRET
+#define OZ_SEC_EM_PROD_SECRET ""
+#endif
 
 /*
  * JNI method names must match com.openzeekr.app.util.NativeSecrets exactly, so the
@@ -71,3 +90,9 @@ OZ_SECRET_FN(nOverseasSecretKey,  OZ_SEC_OVERSEAS_SECRET_KEY)
 OZ_SECRET_FN(nInboxAuthSecret,    OZ_SEC_INBOX_AUTH_SECRET)
 OZ_SECRET_FN(nVinKey,             OZ_SEC_VIN_KEY)
 OZ_SECRET_FN(nVinIv,              OZ_SEC_VIN_IV)
+OZ_SECRET_FN(nHmacAccessKeySea,   OZ_SEC_SEA_HMAC_ACCESS_KEY)
+OZ_SECRET_FN(nHmacSecretKeySea,   OZ_SEC_SEA_HMAC_SECRET_KEY)
+OZ_SECRET_FN(nProdSecretSea,      OZ_SEC_SEA_PROD_SECRET)
+OZ_SECRET_FN(nHmacAccessKeyEm,    OZ_SEC_EM_HMAC_ACCESS_KEY)
+OZ_SECRET_FN(nHmacSecretKeyEm,    OZ_SEC_EM_HMAC_SECRET_KEY)
+OZ_SECRET_FN(nProdSecretEm,       OZ_SEC_EM_PROD_SECRET)

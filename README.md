@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.3** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+**Version 0.1.4** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -67,6 +67,45 @@ token of appreciation is genuinely welcome (never expected):
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
 
 ## Changelog
+
+### 0.1.4
+- **Send a debug log as a file.** Settings now has a "Share" button that sends the encrypted log through
+  your email / share sheet as a file attachment. A full session log is far longer than the clipboard can
+  hold, so the old copy-paste route silently cut long logs off and made them unreadable - sharing a file
+  fixes that. (The log is still encrypted so only the developers can read it.)
+- **Shared accounts can create a key.** Provisioning no longer refuses to mint a digital key just because
+  the signed-in account isn't the registered car owner - it attempts the mint and lets the server decide,
+  so a second/shared account can set up its own key.
+- **Clearer error when the link drops mid-pairing.** A Bluetooth drop during the key handshake now shows a
+  plain "link dropped during the handshake" message instead of a cryptic obfuscated one.
+- **Works on 16 KB-page devices.** The native secrets library is now aligned for 16 KB memory pages, so it
+  loads correctly on newer devices (some Android 15+ phones). Previously it could fail to load there,
+  leaving the app unconfigured (unable to sign in).
+- **In-app update check.** OpenZeekr now checks GitHub on launch and tells you in Settings when a newer
+  release is available, with a one-tap link to download it (plus a manual "Check for updates" button).
+- **Stops retrying forever when a car won't pair.** If the car accepts the Bluetooth link but never
+  completes the digital-key handshake, the app no longer loops connect / fail / reconnect endlessly
+  (which drained the battery) - it now backs off automatically, while an explicit connect still retries
+  immediately.
+- **Better handshake diagnostics.** More detail is captured when the key handshake fails, and the
+  on-screen error now names the likely cause, to help pin down cars that won't pair (share the
+  encrypted log from Settings).
+- **Anti-relay / fake-car protection.** The car's certificate is now pinned to your car on first
+  pairing (and checked for validity), so a fake or relayed "car" - even one presenting a genuine
+  Geely certificate - can no longer complete the handshake and harvest your digital key.
+- **No key material in the log.** Removed leftover debug lines that wrote the AES session key and the
+  raw digital key into the log.
+- **Safer secrets export.** "Export" now copies your configuration to the clipboard instead of
+  displaying your password, tokens and keys on screen.
+- **Hardened the "send to car" link handling.** Shared map links are now only expanded over
+  http/https to public addresses (no internal / loopback targets).
+- **Southeast Asia (SEA) login.** Selecting the SEA region now uses SEA's own signing keys, so
+  accounts registered in SEA/Malaysia can sign in (previously the app signed every region's login
+  with the EU keys and SEA was rejected). LA / ME will follow once their keys are added.
+- **Watch stays usable when the phone isn't at the car.** The Wear OS app now only stands down while
+  the phone is *actually holding* the car's Bluetooth link (not merely when Lock-on-approach is
+  enabled), so you can still lock/unlock from the watch via the handover otherwise. Thanks to Jan
+  Compen for the report and patch.
 
 ### 0.1.3
 - **Lock / unlock is now confirmed by the car, with self-healing.** The app waits for the car's

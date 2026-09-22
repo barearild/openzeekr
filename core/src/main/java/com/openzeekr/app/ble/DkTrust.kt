@@ -142,16 +142,47 @@ FQ==
     }
 
     /**
-     * Throw unless [leaf] (the vehicle cert) is signed by a baked Geely PROD CA. If the trust store
-     * itself failed to load (which shouldn't happen), we log and ALLOW rather than brick the key —
-     * a genuinely untrusted cert is still rejected whenever the store is present.
+     * Throw unless [leaf] (the vehicle cert) is currently valid AND signed by a baked Geely PROD CA.
+     * FAILS CLOSED: an empty trust store means a broken build, and we refuse to release the digital
+     * key rather than skip validation (the old code allowed on an empty store - a fail-open hole).
      */
     fun requireGeelyVehicleCert(leaf: X509Certificate) {
         val store = cas
-        if (store.isEmpty()) { Logx.w("dk", "vehicle-cert trust store empty — skipping validation (FIXME)"); return }
+        check(store.isNotEmpty()) {
+            "vehicle-cert trust store failed to load - refusing to release the digital key"
+        }
+        // Reject an expired / not-yet-valid vehicle cert.
+        runCatching { leaf.checkValidity() }
+            .onFailure { error("vehicle cert is expired or not yet valid - refusing to release the digital key (${it.message})") }
         val issuer = store.firstOrNull { ca ->
             runCatching { leaf.verify(ca.publicKey); true }.getOrDefault(false)
-        } ?: error("vehicle cert is NOT issued by a Geely CA — refusing to release the digital key (possible fake car)")
-        Logx.d("dk", "vehicle cert verified — issued by '${issuer.subjectX500Principal.name.take(48)}' ✓")
+        } ?: error("vehicle cert is NOT issued by a Geely CA - refusing to release the digital key (possible fake car)")
+        Logx.d("dk", "vehicle cert verified - issued by '${issuer.subjectX500Principal.name.take(48)}' ✓")
     }
+
+    /** Per-car pin of the vehicle cert fingerprint (trust-on-first-use). Backed by prefs in the impl. */
+    interface VehicleCertPinStore {
+        fun get(vin: String): String?
+        fun put(vin: String, fingerprint: String)
+    }
+
+    /**
+     * Verify the vehicle cert is Geely-issued + valid ([requireGeelyVehicleCert]) AND is the SAME cert
+     * this car presented at first pair (TOFU pinning, keyed by VIN). Without the pin, a fake/relay car
+     * presenting ANY genuine Geely-issued cert would pass the CA check and harvest our digital key;
+     * pinning binds the session to this specific car. First trusted pairing pins; later mismatches throw.
+     */
+    fun requireTrustedAndPinned(leaf: X509Certificate, vin: String, pins: VehicleCertPinStore) {
+        requireGeelyVehicleCert(leaf)
+        val fp = sha256Hex(leaf.encoded)
+        when (val known = pins.get(vin)) {
+            null -> { pins.put(vin, fp); Logx.d("dk", "pinned vehicle cert for this car (first trusted pairing)") }
+            else -> check(known.equals(fp, ignoreCase = true)) {
+                "vehicle cert changed for this car - refusing to release the digital key (possible fake/relay car)"
+            }
+        }
+    }
+
+    private fun sha256Hex(b: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
 }

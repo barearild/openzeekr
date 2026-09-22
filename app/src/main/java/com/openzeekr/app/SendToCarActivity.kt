@@ -178,6 +178,10 @@ class SendToCarActivity : Activity() {
             var hop = 0
             while (hop < 6) {
                 hop++
+                // SSRF guard: this activity is exported and expands a caller-supplied URL BEFORE the
+                // user confirms, so only follow http/https to PUBLIC hosts - never a private, loopback,
+                // link-local or cloud-metadata target, checked on the initial URL and every redirect.
+                if (!isSafeHttpUrl(url)) { out.append("[blocked: non-public URL]\n"); break }
                 val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                     instanceFollowRedirects = false
                     connectTimeout = 6000; readTimeout = 6000
@@ -201,6 +205,22 @@ class SendToCarActivity : Activity() {
         }
         return out.toString()
     }
+
+    /** True only for an http/https URL whose host resolves entirely to PUBLIC addresses - blocks the
+     *  SSRF vectors (localhost, 127/10/172.16-31/192.168 private ranges, 169.254 link-local incl. the
+     *  cloud metadata IP, IPv6 loopback/ULA, multicast, wildcard). Any resolve failure = not safe. */
+    private fun isSafeHttpUrl(raw: String): Boolean = runCatching {
+        val u = java.net.URL(raw)
+        val scheme = u.protocol?.lowercase()
+        if (scheme != "http" && scheme != "https") return false
+        val host = u.host?.trim('[', ']') ?: return false
+        if (host.isBlank() || host.equals("localhost", ignoreCase = true)) return false
+        java.net.InetAddress.getAllByName(host).isNotEmpty() &&
+            java.net.InetAddress.getAllByName(host).all { a ->
+                !a.isLoopbackAddress && !a.isSiteLocalAddress && !a.isLinkLocalAddress &&
+                    !a.isAnyLocalAddress && !a.isMulticastAddress && a.hostAddress != "169.254.169.254"
+            }
+    }.getOrDefault(false)
 
     private companion object {
         // Ordered: the maps "data"/`@`/query markers point at the PLACE; the generic pair is a last

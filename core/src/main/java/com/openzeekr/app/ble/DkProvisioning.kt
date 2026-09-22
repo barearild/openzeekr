@@ -25,11 +25,12 @@ import retrofit2.http.Query
  * Reverse-engineered shared-account flow (the signed-in account may be a SHARED user):
  *   1. create-app-certificate   (enrol OUR CSR -> our leaf cert for our deviceId)
  *   2. key-list                 (signed userId+deviceId+vin -> dkId + shareStatus)
- *   3. share-key (receive-share) when shareStatus==1  -> binds THIS device to the key
+ *   3a. empty list  -> create-owner-blu-key mints THIS account's own key (owner OR shared:
+ *       Zeekr has no in-app "share a key" action, every account mints its own)
+ *   3b. existing entry not bound to us -> share-key/repush binds THIS device
  *   4. key-info                 (-> digitalKey, cmacKeyCert, coef*)
  * then persists the credential (DkIdentity) and arms the BLE session.
  *
- * Owner accounts instead create the key via create-owner-blu-key (proprietary="").
  * Every signed call signs the SAME message: ASCII userId+deviceId+vin, ECDSA-SHA256,
  * DER, base64(NO_WRAP). Reuses the app's signed TSP transport.
  */
@@ -80,9 +81,11 @@ class DkProvisioning(
     private fun ok(code: String?) = code == "000000"
 
     /**
-     * Run the full setup for this device. [owner] = true for the car owner's own
-     * account (creates the key), false for a shared account (receives a share).
-     * On success the BLE session is credentialed + ready to establish().
+     * Run the full setup for this device. [owner] = the vehicle-list isOwner flag; it now only
+     * tunes which existing key-list entry we pick and the shared-account receive/repush branch. It
+     * no longer decides whether we may MINT: an empty key-list always attempts create-owner-blu-key
+     * (owner or shared) and lets the server decide. On success the BLE session is credentialed +
+     * ready to establish().
      */
     suspend fun provision(owner: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
@@ -139,14 +142,21 @@ class DkProvisioning(
             var bookId: String? = null
             var shareStatus: Int? = null
             if (entry == null) {
-                if (!owner) error("no digital key shared to this account — the car owner must share it first")
-                // owner with no key yet -> create it
+                // Empty key-list = this account has no key on this car yet, so mint one. On Zeekr
+                // there is NO "share a key" action in the app (confirmed on a shared account), which
+                // means every account - owner OR shared - creates its OWN BLE key via
+                // create-owner-blu-key. So we no longer pre-gate on isOwner; we attempt the mint and
+                // let the server decide. If the cloud really does restrict non-owner minting it will
+                // return a specific code, which is far more useful than a client-side guess. (See
+                // [[dk-real-eu-api]]: shared acct can create keys.)
                 _state.value = State(Step.BIND)
-                Logx.d("provision", "step 3 create-owner-blu-key …")
+                Logx.d("provision", "step 3 create-owner-blu-key (owner=$owner, empty key-list) …")
                 val cr = createOwnerBluKeyWithRetry(deviceId, sig)
-                val od = cr.data ?: error("create-owner-blu-key: ${cr.code} ${cr.msg}")
+                val od = cr.data ?: error("create key failed: ${cr.code} ${cr.msg}" +
+                    if (!owner) " (this account is not the registered owner of the car - if the " +
+                        "cloud blocks non-owner minting, its error code shows here)" else "")
                 dkId = od.dkId; bookId = od.bookId
-                Logx.d("provision", "step 3 owner key created dkId=$dkId")
+                Logx.d("provision", "step 3 key created dkId=$dkId")
             } else {
                 dkId = entry.dkId; bookId = entry.bookId; shareStatus = entry.shareStatus
                 val ds = entry.dkStatus ?: -1
@@ -335,7 +345,8 @@ interface DkApi {
     @POST("$DKC/share-key")
     suspend fun shareKey(@Body body: ShareKeyReq): DkResp<kotlinx.serialization.json.JsonElement>
 
-    /** owner-side create (proprietary=""); not used on the shared path. */
+    /** Mint this account's own BLE key (proprietary=""). Used whenever the key-list is empty,
+     *  for owner AND shared accounts (Zeekr has no in-app key-sharing; each account mints its own). */
     @POST("$DKC/create-owner-blu-key")
     suspend fun createOwnerBluKey(@Body body: OwnerKeyReq): DkResp<KeyItem>
 

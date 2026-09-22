@@ -42,6 +42,20 @@ object NativeSecrets {
     fun vinKey(): String = guarded { nVinKey() }
     fun vinIv(): String = guarded { nVinIv() }
 
+    // ---- Per-region signing secrets (EU / EM / SEA). Only these 3 differ by region; everything
+    //      else is shared. A region whose set isn't baked falls back to the EU/default set - so
+    //      LA/ME (EM) work as today until EM is extracted, and a clean/unbaked build returns ""
+    //      everywhere (as before). Callers pass Region.extractorRegion ("EU"/"EM"/"SEA"). ----
+    fun hmacAccessKey(region: String): String =
+        regionValue(region, { nHmacAccessKeySea() }, { nHmacAccessKeyEm() }).ifBlank { hmacAccessKey() }
+    fun hmacSecretKey(region: String): String =
+        regionValue(region, { nHmacSecretKeySea() }, { nHmacSecretKeyEm() }).ifBlank { hmacSecretKey() }
+    fun prodSecret(region: String): String =
+        regionValue(region, { nProdSecretSea() }, { nProdSecretEm() }).ifBlank { prodSecret() }
+
+    private inline fun regionValue(region: String, sea: () -> String, em: () -> String): String =
+        when (region.uppercase()) { "SEA" -> guarded(sea); "EM" -> guarded(em); else -> "" }
+
     // ---- JNI bindings (implemented in ozsecrets.c). Names must not be renamed/stripped;
     //      see the -keep rule for com.openzeekr.app.util.NativeSecrets in proguard-rules.pro. ----
     private external fun nHmacAccessKey(): String
@@ -53,4 +67,10 @@ object NativeSecrets {
     private external fun nInboxAuthSecret(): String
     private external fun nVinKey(): String
     private external fun nVinIv(): String
+    private external fun nHmacAccessKeySea(): String
+    private external fun nHmacSecretKeySea(): String
+    private external fun nProdSecretSea(): String
+    private external fun nHmacAccessKeyEm(): String
+    private external fun nHmacSecretKeyEm(): String
+    private external fun nProdSecretEm(): String
 }

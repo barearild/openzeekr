@@ -11,3 +11,9 @@ add_library(ozsecrets SHARED ozsecrets.c)
 
 # The generated header lives next to this file (the source dir is already on the include path).
 target_include_directories(ozsecrets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# 16 KB page-size support (required by Google Play for Android 15+ from Nov 2025). Force the
+# ELF LOAD segments to a 16 KB max page size so the .so loads on 16 KB-page devices. NDK r27+
+# does this by default, but we set it explicitly so the alignment is correct regardless of the
+# NDK / AGP version doing the build. See developer.android.com/16kb-page-size.
+target_link_options(ozsecrets PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-z,common-page-size=16384")

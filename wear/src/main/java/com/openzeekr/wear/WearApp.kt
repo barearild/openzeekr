@@ -123,7 +123,11 @@ fun WearApp() {
     // The rule the user wants: if the phone is REACHABLE and has Lock-on-approach enabled, the
     // watch stands down entirely (regardless of whether the phone is currently at the car) —
     // approaching would let the phone grab the car and a watch handover would only fight it.
-    val standDown = phoneStatus?.let { it.present && it.proximityEnabled } == true
+    // Stand down ONLY when the phone has proximity enabled AND is actually holding the car's BLE link.
+    // `present` just means the phone is reachable over the Wear Data Layer - not that it's at the car -
+    // so proximity-armed-but-not-connected must still leave the watch usable (via the BLE handover).
+    // (Reported by Jan Compen, Galaxy Watch Ultra.)
+    val standDown = phoneStatus?.let { it.present && it.proximityEnabled && it.connected } == true
 
     fun act(lockIt: Boolean) {
         if (busy) return
@@ -132,8 +136,10 @@ fun WearApp() {
         scope.launch {
             val status = PhoneLink.queryStatus(context)
             val ok: Boolean? = when {
-                // Phone reachable + Lock-on-approach on: not our job. (Also enforced by disabled UI.)
-                status.present && status.proximityEnabled -> {
+                // Phone reachable + Lock-on-approach on AND actually holding the car link: leave it to
+                // the phone. If proximity is armed but the phone is NOT connected, fall through to the
+                // handover branch so the watch can still act. (Jan Compen's fix.)
+                status.present && status.proximityEnabled && status.connected -> {
                     phoneStatus = status
                     message = null
                     null
@@ -258,6 +264,7 @@ private fun rememberWearCar(): ImageBitmap? {
 /** One-tap: connect + run the DK handshake if we aren't already in a session, then act. */
 private suspend fun connectAndRun(ble: DkBleManager, lock: DkLockController, lockIt: Boolean): Boolean {
     if (ble.state.value != DkBleManager.State.SESSION_READY) {
+        ble.resetHandshakeBackoff() // user tapped the watch: an explicit connect must not be delayed
         ble.connect(null)
         val reached = withTimeoutOrNull(25_000L) {
             ble.state.first { it == DkBleManager.State.SESSION_READY || it == DkBleManager.State.ERROR }
@@ -271,8 +278,9 @@ private suspend fun connectAndRun(ble: DkBleManager, lock: DkLockController, loc
 private fun phoneStatusLine(s: PhoneLink.Status?): String = when {
     s == null -> "Checking phone…"
     !s.present -> "Standalone · phone not reachable"
-    s.proximityEnabled -> "Phone proximity active"
+    s.proximityEnabled && s.connected -> "Phone proximity active · car connected"
     s.connected -> "Phone holding car link"
+    s.proximityEnabled -> "Phone proximity armed · car not connected"
     else -> "Ready"
 }
 

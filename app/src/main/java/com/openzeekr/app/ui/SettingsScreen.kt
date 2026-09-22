@@ -1,5 +1,9 @@
 package com.openzeekr.app.ui
 
+import android.content.Intent
+import android.net.Uri
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -228,6 +232,7 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
         SettingsCard {
             CardTitle("About")
             val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "—" }
+            val update by deps.updateAvailable.collectAsState()
             // Tap the version 10x to toggle developer mode (Hero lab / Remote Parking / Calibration).
             Box(Modifier.fillMaxWidth().clickable {
                 if (!liveCfg.devMode) {
@@ -242,6 +247,19 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                 store.update { it.copy(devMode = false) }; verTaps = 0; status = "Developer mode off"
             }) { InfoRow("Developer mode", "On - tap to turn off") }
             InfoRow("Build", if (baked) "private (keys baked)" else "clean (bring your own keys)")
+            // In-app update check against the GitHub releases (runs once on launch; button re-checks).
+            update?.let { u ->
+                Box(Modifier.fillMaxWidth().clickable {
+                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                }) { InfoRow("Update available", "${u.version}  ↓ download") }
+            }
+            OutlinedButton(onClick = {
+                status = "Checking for updates…"
+                scope.launch {
+                    val u = deps.checkForUpdate()
+                    status = if (u != null) "Update ${u.version} is available - see the About section." else "You are on the latest version."
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Check for updates") }
             Spacer(Modifier.size(4.dp))
             Text(
                 "OpenZeekr is an independent clean-room research app for your own Zeekr. " +
@@ -418,15 +436,21 @@ private fun SecretsSection(cfg: SecretsConfig, set: ((SecretsConfig) -> SecretsC
 private fun importExport(store: com.openzeekr.app.config.ConfigStore, onChanged: () -> Unit) {
     var importText by remember { mutableStateOf("") }
     var msg by remember { mutableStateOf("") }
+    val clipboard = LocalClipboardManager.current
     SettingsCard {
         CardTitle("Import / Export")
         OutlinedTextField(
             value = importText, onValueChange = { importText = it },
-            label = { Text("Paste zeekr_secrets.json") }, modifier = Modifier.fillMaxWidth(), minLines = 3,
+            label = { Text("Paste zeekr_secrets.json to import") }, modifier = Modifier.fillMaxWidth(), minLines = 3,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { msg = store.importJson(importText).fold({ onChanged(); "Imported." }, { "Import failed: ${it.message}" }) }) { Text("Import") }
-            OutlinedButton(onClick = { importText = store.exportJson() }) { Text("Export") }
+            // Export copies to the clipboard instead of rendering the secrets on screen - the config
+            // holds your password, tokens and keys, and an on-screen dump is a shoulder-surf/screenshot leak.
+            OutlinedButton(onClick = {
+                clipboard.setText(AnnotatedString(store.exportJson()))
+                msg = "Copied to clipboard - it contains your password, tokens and keys, so paste it somewhere safe."
+            }) { Text("Export to clipboard") }
         }
         if (msg.isNotBlank()) Text(msg, color = Brand.muted, fontSize = 12.sp)
     }
@@ -479,6 +503,7 @@ private fun Field(label: String, value: String, secret: Boolean = false, support
 private fun LogViewer() {
     val lines by Logx.lines.collectAsState()
     val clipboard = LocalClipboardManager.current
+    val ctx = LocalContext.current
     var copyMsg by remember { mutableStateOf("") }
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Brand.surface2).padding(12.dp),
@@ -487,26 +512,64 @@ private fun LogViewer() {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Logs (${lines.size})", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // The copied log is ENCRYPTED with the developers' RSA public key, so a pasted log
-                // reveals nothing (tokens, VIN, key material). On any crypto failure copy NOTHING -
-                // never fall back to copying the plaintext.
+                // Share the ENCRYPTED log as a FILE via the system share sheet (email, Drive, etc.).
+                // This is the way to send us a log: a real session log is far longer than a clipboard
+                // or a text field will hold (they cap around ~20k chars and silently truncate, which
+                // makes the encrypted blob undecryptable). A file has no such limit. On any crypto
+                // failure share NOTHING - never fall back to the plaintext log.
+                OutlinedButton(onClick = {
+                    copyMsg = shareEncryptedLog(ctx)
+                }) { Text("Share") }
+                // Clipboard copy kept as a fallback for short logs; warns that long logs truncate.
                 OutlinedButton(onClick = {
                     val blob = com.openzeekr.app.util.LogCrypto.encryptToBase64(Logx.dump())
                     if (blob != null) {
                         clipboard.setText(AnnotatedString(blob))
-                        copyMsg = "Copied - encrypted; only the developers can read it."
+                        copyMsg = if (blob.length > 19_000)
+                            "Copied, but this log is long - the clipboard/paste may cut it off and " +
+                                "make it unreadable. Prefer \"Share (encrypted)\" to send it as a file."
+                        else "Copied - encrypted; only the developers can read it."
                     } else {
                         copyMsg = "Copy failed - nothing copied."
                     }
-                }) { Text("Copy (encrypted)") }
+                }) { Text("Copy") }
                 OutlinedButton(onClick = { Logx.clear(); copyMsg = "" }) { Text("Clear") }
             }
         }
         if (copyMsg.isNotBlank()) Text(copyMsg, color = Brand.muted, fontSize = 11.sp)
-        else Text("Copy exports an ENCRYPTED log only the developers can read.", color = Brand.faint, fontSize = 11.sp)
+        else Text("\"Share (encrypted)\" sends the log as a file only the developers can read - the best way to report a bug.", color = Brand.faint, fontSize = 11.sp)
         if (lines.isEmpty()) Text("No log yet.", color = Brand.muted, fontSize = 12.sp)
         else Column {
             lines.takeLast(120).forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Brand.muted) }
         }
     }
+}
+
+/**
+ * Encrypt the current log and hand it to the system share sheet as a FILE, so a non-technical
+ * tester can email/attach it. The file is written under cacheDir/exports/ (the path the existing
+ * FileProvider already exposes) and shared read-only via a content:// URI. Unlike a clipboard copy
+ * this has no length cap, so long logs stay intact (and therefore decryptable). Returns a short
+ * status string for the UI. Shares NOTHING on any crypto/IO failure - never the plaintext log.
+ */
+private fun shareEncryptedLog(ctx: android.content.Context): String {
+    val blob = com.openzeekr.app.util.LogCrypto.encryptToBase64(Logx.dump())
+        ?: return "Share failed - nothing shared."
+    return runCatching {
+        val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+        val file = File(dir, "openzeekr-log-$stamp.txt").apply { writeText(blob) }
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "OpenZeekr encrypted log $stamp")
+            putExtra(Intent.EXTRA_TEXT, "OpenZeekr encrypted debug log attached (readable only by the developers).")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(send, "Send encrypted log")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)  // launched from a non-Activity context
+        ctx.startActivity(chooser)
+        "Encrypted log ready to send - pick your email app."
+    }.getOrElse { "Share failed: ${it.message}" }
 }

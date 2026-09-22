@@ -26,6 +26,11 @@ fun bakedSecret(key: String): String =
 val nativeSecretKeys = listOf(
     "HMAC_ACCESS_KEY", "HMAC_SECRET_KEY", "PROD_SECRET", "XCHANGER_SIGN_SECRET",
     "OVERSEAS_ACCESS_KEY", "OVERSEAS_SECRET_KEY", "INBOX_AUTH_SECRET", "VIN_KEY", "VIN_IV",
+    // Per-region signing sets (only the 3 signing secrets differ by region; everything else is
+    // shared). The bare keys above are the EU/default set. SEA is extracted; EM (LA/ME) is wired
+    // but blank until extracted (`--region EM`), so LA/ME fall back to the EU set for now.
+    "SEA_HMAC_ACCESS_KEY", "SEA_HMAC_SECRET_KEY", "SEA_PROD_SECRET",
+    "EM_HMAC_ACCESS_KEY", "EM_HMAC_SECRET_KEY", "EM_PROD_SECRET",
 )
 run {
     fun cEscape(s: String): String = s

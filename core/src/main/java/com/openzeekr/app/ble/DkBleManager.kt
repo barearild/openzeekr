@@ -121,8 +121,17 @@ class DkBleManager(base: Context) : DkTransport {
     // ---- session (stable instance; reads the credential at establish() time) ----
     @Volatile private var credential: DkCredential? = null
 
+    /** Per-car vehicle-cert pins (trust-on-first-use), keyed by VIN. The fingerprint is the car's
+     *  PUBLIC cert hash (not secret), so plain prefs are fine. Binds the DK session to the specific
+     *  car that paired first, so a fake/relay car with any genuine Geely cert can't harvest the key. */
+    private val certPins = object : DkTrust.VehicleCertPinStore {
+        private val prefs = appContext.getSharedPreferences("dk_cert_pins", Context.MODE_PRIVATE)
+        override fun get(vin: String): String? = prefs.getString(vin, null)
+        override fun put(vin: String, fingerprint: String) { prefs.edit().putString(vin, fingerprint).apply() }
+    }
+
     /** Single stable session so Deps/controllers capture it once; needs a credential to establish(). */
-    val session: DkSession by lazy { RealDkSession(this, { credential }) }
+    val session: DkSession by lazy { RealDkSession(this, { credential }, certPins = certPins) }
 
     /** Provide provisioned key material (from cloud provisioning / import). */
     fun setCredential(cred: DkCredential) { credential = cred }
@@ -216,8 +225,26 @@ class DkBleManager(base: Context) : DkTransport {
 
     // ---------------- connect ----------------
 
+    // ---- handshake-failure backoff ----
+    // A car that accepts the GATT link but never completes the DK handshake (e.g. silently ignores
+    // CONNECT_CONFIRM) otherwise causes an endless connect -> 8s stall -> status-19 drop -> reconnect
+    // thrash (battery + log noise). After a few consecutive establish() failures we back off AUTO
+    // reconnects for a short, growing window; a user-initiated connect calls [resetHandshakeBackoff].
+    @Volatile private var handshakeFailStreak = 0
+    @Volatile private var handshakeBackoffUntilMs = 0L
+
+    private fun inHandshakeBackoff(): Boolean {
+        val left = handshakeBackoffUntilMs - System.currentTimeMillis()
+        if (left > 0) { Logx.d("ble", "handshake backoff active (${left / 1000}s left) - not auto-connecting"); return true }
+        return false
+    }
+
+    /** Clear the handshake-failure backoff so an explicit user connect isn't delayed. */
+    fun resetHandshakeBackoff() { handshakeFailStreak = 0; handshakeBackoffUntilMs = 0L }
+
     @SuppressLint("MissingPermission")
     fun connect(deviceMac: String?) {
+        if (inHandshakeBackoff()) return
         // Idempotent: a second connect() while we're already scanning/connecting/connected
         // would start a *new* scan on the shared scanner — which resets state to SCANNING and
         // nulls advBroadcastRnd out from under the live session. That's what made proximity +
@@ -266,6 +293,7 @@ class DkBleManager(base: Context) : DkTransport {
      */
     @SuppressLint("MissingPermission")
     fun reconnectLast(): Boolean {
+        if (inHandshakeBackoff()) return false
         val dev = lastDevice ?: return false
         when (_state.value) {
             State.SCANNING, State.CONNECTING, State.CONNECTED, State.SESSION_READY -> {
@@ -675,8 +703,24 @@ class DkBleManager(base: Context) : DkTransport {
             (session as RealDkSession).establish()
             Logx.d("ble", "DK session READY")
             setupRetries = 0 // clean session — clear the fast-retry budget
+            handshakeFailStreak = 0; handshakeBackoffUntilMs = 0L // handshake worked — clear the backoff
             _state.value = State.SESSION_READY
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // We were cancelled (abortSetup on a link drop, or scope shutdown) - NOT a handshake
+            // failure. Don't set a bogus "DK handshake: ... was cancelled" error and don't trip the
+            // backoff; the disconnect callback owns the resulting state. Rethrow to end the coroutine.
+            throw e
         } catch (e: Exception) {
+            // Count consecutive handshake failures and, past a threshold, back off AUTO reconnects for a
+            // growing window so a car that won't complete the DK handshake can't cause an endless
+            // connect/stall/drop/reconnect thrash. A user-initiated connect clears this (resetHandshakeBackoff).
+            handshakeFailStreak++
+            if (handshakeFailStreak >= HANDSHAKE_FAIL_THRESHOLD) {
+                val backoff = (HANDSHAKE_BACKOFF_BASE_MS shl (handshakeFailStreak - HANDSHAKE_FAIL_THRESHOLD))
+                    .coerceAtMost(HANDSHAKE_BACKOFF_MAX_MS)
+                handshakeBackoffUntilMs = System.currentTimeMillis() + backoff
+                Logx.w("ble", "DK handshake failed ${handshakeFailStreak}x - backing off auto-reconnect ${backoff / 1000}s")
+            }
             fail("DK handshake: ${e.message}")
         }
     }
@@ -765,6 +809,10 @@ class DkBleManager(base: Context) : DkTransport {
         // to beat the ~20 s offloaded presence scan). Exhausted → fall back to the scan path.
         private const val MAX_SETUP_RETRIES = 3
         private const val SETUP_RETRY_DELAY_MS = 900L
+        // Auto-reconnect backoff after repeated DK-handshake failures (car won't complete the handshake).
+        private const val HANDSHAKE_FAIL_THRESHOLD = 3
+        private const val HANDSHAKE_BACKOFF_BASE_MS = 30_000L
+        private const val HANDSHAKE_BACKOFF_MAX_MS = 120_000L
         @Volatile private var INSTANCE: DkBleManager? = null
         fun get(context: Context): DkBleManager =
             INSTANCE ?: synchronized(this) {
