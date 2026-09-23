@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.4** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+**Version 0.1.5** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -67,6 +67,12 @@ token of appreciation is genuinely welcome (never expected):
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
 
 ## Changelog
+
+### 0.1.5
+- **Send a diagnostic log from the login screen.** If sign-in fails during setup, a "Share diagnostic log"
+  button now appears right there, and the login attempt's network traffic is captured automatically - so a
+  tester who can't get past login (and therefore can't reach Settings) can still send us an encrypted log to
+  diagnose the failure.
 
 ### 0.1.4
 - **Send a debug log as a file.** Settings now has a "Share" button that sends the encrypted log through

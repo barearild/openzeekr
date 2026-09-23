@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -24,6 +25,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -31,6 +33,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import com.openzeekr.app.util.Logx
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -230,7 +234,20 @@ private fun LoginStep(deps: Deps) {
     var password by remember { mutableStateOf(cfg.password) }
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var shareMsg by remember { mutableStateOf("") }
     val loggedIn = cfg.accessToken.isNotBlank()
+    val ctx = LocalContext.current
+
+    // Capture HTTP logging while the login step is on screen, so a FAILED login (e.g. a rejected
+    // access key on a region whose keys we haven't nailed) is always in the buffer and the tester
+    // can Share it - they can't reach Settings to turn logging on, login fails before the app opens.
+    // Restore the prior runtime state on leave (respects the default-off privacy setting once the
+    // user is past onboarding). The share happens before leaving, so restoring is safe.
+    DisposableEffect(Unit) {
+        val prev = Logx.isHttpEnabled
+        Logx.setHttp(true)
+        onDispose { Logx.setHttp(prev) }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Log in", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -268,10 +285,28 @@ private fun LoginStep(deps: Deps) {
                     }
                 },
             ) {
-                if (busy) CircularProgressIndicator(Modifier.height(16.dp), strokeWidth = 2.dp)
-                else Text("Log in")
+                if (busy) Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary)
+                    Text("Logging in…")
+                } else Text("Log in")
             }
             if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.bodySmall)
+            // On a login failure, let the tester send us the captured login HTTP log as a file so we
+            // can see the exact request/headers/response (e.g. which access key + host was used).
+            if (status.startsWith("Login ✗")) {
+                OutlinedButton(onClick = { shareMsg = shareEncryptedLog(ctx) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Share diagnostic log")
+                }
+                Text(
+                    if (shareMsg.isNotBlank()) shareMsg
+                    else "Login failed? Tap to send us an encrypted diagnostic log (email it to the developer).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
@@ -305,8 +340,14 @@ private fun KeyStep(deps: Deps) {
                             scope.launch { deps.provisioning.provision(owner = deps.config.current().isOwner) }
                         },
                     ) {
-                        if (busy) CircularProgressIndicator(Modifier.height(16.dp), strokeWidth = 2.dp)
-                        else Text("Set up digital key")
+                        if (busy) Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary)
+                            Text("Setting up…")
+                        } else Text("Set up digital key")
                     }
                     prov.message?.let { Text("• $it", style = MaterialTheme.typography.bodySmall) }
                 }
