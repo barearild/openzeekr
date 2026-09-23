@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.5** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+**Version 0.1.6** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -67,6 +67,23 @@ token of appreciation is genuinely welcome (never expected):
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
 
 ## Changelog
+
+### 0.1.6
+- **Fixed: couldn't log back in after signing out.** Signing out cleared the saved VIN, but the app
+  wrongly treated a VIN as mandatory before it would even attempt login - so the sign-in was rejected
+  with "vin is required" (the VIN is actually obtained *during* login). You can now sign out and back in
+  normally.
+- **Southeast Asia / Australia login now works.** The region (now labelled **"Australia + SEA"**) was
+  reaching the wrong login endpoint and couldn't read the gateway's responses, so sign-in failed at the
+  very first step. It now uses SEA's correct user-center path and TSP signing, and decodes the SEA
+  gateway's (compressed) responses properly - so login completes all the way through to your vehicle list.
+  This finishes the SEA support that was only partial in earlier builds.
+- **More reliable response handling everywhere.** Compressed API responses are now always decoded
+  correctly (some regional gateways compress every response), which also prevents occasional garbled-data
+  errors on other calls.
+- **Faster reconnect when you're already parked at the car.** When the app comes up next to your car it
+  now reconnects directly to it instead of waiting on a fresh scan.
+- **Tidier notification counter** on the home screen.
 
 ### 0.1.5
 - **Send a diagnostic log from the login screen.** If sign-in fails during setup, a "Share diagnostic log"

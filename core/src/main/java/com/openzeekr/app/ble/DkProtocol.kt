@@ -154,6 +154,9 @@ object DkProtocol {
     fun isEncrypted(cmdId: Int): Boolean = when (cmdId) {
         CMD_A2V_SEND_DKEY, CMD_V2A_DK_VERIFY_STATUS,
         CMD_A2V_CONTROL, CMD_V2A_CMD_RECEIVED, CMD_V2A_RESULT,
+        // 0x0137 PAIRING_REQ is GCM (session key) on channel 1 - stock sends it every connect right
+        // after the handshake; its plaintext is nSeq|ts|pairData(23)|crc(2).
+        CMD_A2V_PAIRING_REQ,
         // Phone->car RPA (REQ/ANSWER) IS GCM-encrypted (32B body = 16 ct + 16 tag, car ACKs succ).
         CMD_A2V_RPA_REQ, CMD_A2V_RPA_ANSWER,
         CMD_A2V_TRANS, CMD_V2A_VSTATUS_SYNC,

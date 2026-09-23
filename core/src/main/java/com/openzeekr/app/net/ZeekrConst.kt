@@ -57,7 +57,9 @@ object ZeekrConst {
 
     /** DEFAULT_HEADERS for user-center (login) requests. */
     fun defaultHeaders(countryCode: String): Map<String, String> = linkedMapOf(
-        "accept-encoding" to "gzip",
+        // NB: do NOT set Accept-Encoding manually — OkHttp adds it and transparently DECOMPRESSES the
+        // response only when it owns the header. SEA's gateway (Server: CW/WAF) gzips every response;
+        // a manual header left the body as raw gzip bytes -> JSON parse failed. Let OkHttp handle it.
         "accept-language" to "en-AU",
         "app-authorization" to "1003",
         "app-code" to "32816dbd-ff17-47b7-e250-5dae7d9f8cd4",
@@ -81,7 +83,8 @@ object ZeekrConst {
 
     /** LOGGED_IN_HEADERS base for TSP (app-signed) requests. */
     fun loggedInHeaders(projectId: String, deviceId: String): Map<String, String> = linkedMapOf(
-        "Accept-Encoding" to "gzip",
+        // No manual Accept-Encoding — OkHttp adds it and transparently decompresses (see defaultHeaders).
+        // The X-SIGNATURE signs the request BODY, not headers, so this does not affect signing.
         "ACCEPT-LANGUAGE" to "en-GB",   // stock sends en-GB
         "AppId" to "ONEX97FB91F061405",
         "Content-Type" to "application/json; charset=UTF-8",

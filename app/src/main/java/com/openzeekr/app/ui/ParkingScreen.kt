@@ -127,9 +127,14 @@ private fun CalibrationPanel(calib: CalibrationTestController) {
                 color = if (cs.phase == CalibrationTestController.Phase.ERROR) Brand.crit else Brand.accent,
                 fontSize = 13.sp, fontWeight = FontWeight.Medium)
         }
-        // While walking, the current step prompt is in cs.message; offer the advance button.
+        // While walking, the current step prompt is in cs.message; offer the advance button - but lock it
+        // out and show a countdown while the car is measuring, so the user can't spam-tap mid-sample.
         if (cs.step in 1..cs.totalSteps) {
-            PrimaryButton("I'm in position — Continue", Modifier.fillMaxWidth()) { calib.advanceStep() }
+            if (cs.measuring) {
+                PrimaryButton("Measuring… ${cs.secondsLeft}s - hold still", Modifier.fillMaxWidth(), enabled = false) {}
+            } else {
+                PrimaryButton("I'm in position - Continue", Modifier.fillMaxWidth()) { calib.advanceStep() }
+            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -138,6 +143,15 @@ private fun CalibrationPanel(calib: CalibrationTestController) {
                 Modifier.weight(1f), enabled = !cs.busy,
             ) { calib.runCalibration() }
             GhostButton("Replay table", Modifier.weight(1f), enabled = cs.hasTable && !cs.busy) { calib.replayCalibration() }
+        }
+        // Brute-force the unreversed 0x0190 start type byte: sweep 0x00..0x0F and log which value (if
+        // any) makes the car answer 0x0191. Turn BLE logging on first, then Share the log.
+        GhostButton("Sweep 0x0190 type (brute force)", Modifier.fillMaxWidth(), enabled = !cs.busy, tint = Brand.energy) {
+            calib.probeStartTypes()
+        }
+        // Find the loc type the car ACCEPTS (errCode 0). Stand at position 1, hold still - ~10s/attempt.
+        GhostButton("Sweep 0x0192 loc type (at pos 1)", Modifier.fillMaxWidth(), enabled = !cs.busy, tint = Brand.energy) {
+            calib.probeLocTypes()
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             GhostButton("BLE Lock", Modifier.weight(1f), enabled = !cs.busy) { calib.lock() }

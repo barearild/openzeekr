@@ -74,6 +74,15 @@ class RealDkSession(
     // How long [control] waits for the optional 0x0112 result after the 0x0111 receipt ack.
     private val RESULT_WINDOW_MS = 600L
 
+    /**
+     * calibrationType(1) sent in the 0x0101 confirm. Stock sends 0x01 on every connect (it is the
+     * PERSISTED getCalibrationMode(vin), set when the 4-step smart-calibration is chosen) - it tells the
+     * car to expect the 4-position walk and finalize into a 0x0194 table. Default 1 so self-calibration
+     * finalizes (with 0, the car accepts positions 1-3 but returns errCode 8 at position 4, no table).
+     * Verified against stock's decrypted confirm (frida_confirm_dump.js, 2026-09-23). Tunable for probing.
+     */
+    @Volatile var calibrationType: Byte = 1
+
     // DEBUG: when set (during [probeControl]), every decrypted inbound frame is also handed here so
     // the probe can log exactly what the car sends back (opcode + body). Null in normal operation.
     @Volatile private var probeSink: ((Int, ByteArray) -> Unit)? = null
@@ -113,7 +122,12 @@ class RealDkSession(
         // is encrypted on copy, and this only emits when BLE logging is on.
         Logx.d("dk", "handshake diag: vin=${cred.vin} dkId=${hexOf(cred.dkIdBytes)} phoneId=${hexOf(cred.phoneId8)} " +
             "phoneType=${hexOf(cred.phoneType3)} bigCalibHash=${hexOf(cred.bigCalibHash4)} " +
-            "smallCalibHash=${hexOf(cred.smallCalibHash4)} coefSmall=${cred.coefSmall.size}B")
+            "smallCalibHash=${hexOf(cred.smallCalibHash4)} coefSmall=${cred.coefSmall.size}B coefBig=${cred.coefBig.size}B")
+        // Dump the actual coef bytes so we can tell a REAL per-phone coef from a degenerate/FFFF fallback
+        // (a prime suspect for the car rejecting the self-cal finalize at position 4). Not a secret - it's
+        // RF calibration for this phone/car - and the BLE log is encrypted on copy.
+        Logx.d("dk", "coefSmall=${hexOf(cred.coefSmall)}")
+        Logx.d("dk", "coefBig=${hexOf(cred.coefBig)}")
         // The car's DK module can answer 0x100c EEC_busy ("BNCM Busy") when it's momentarily
         // occupied (waking, or tearing down a stale session). Stock (n0/g) does NOT abort on
         // this: it keeps the BLE link, logs "EEC_busy Wait 2.5s ReStart", waits 0x9c4=2500ms
@@ -224,6 +238,16 @@ class RealDkSession(
             exchange(DkProtocol.CMD_A2V_SEND_DKEY, cred.digitalKey, DkProtocol.CMD_V2A_DK_VERIFY_STATUS)
         }.onFailure { Logx.w("dk", "SEND_DKEY: ${it.message}") }
 
+        // 4.5) PAIRING_REQ (0x0137) — stock sends this on EVERY connect, right after the digital-key
+        //   verify and before the coef upload. It registers/pairs this device with the car. openzeekr
+        //   never sent it: lock/unlock work without it, but the car will not FINALIZE a self-calibration
+        //   for an unpaired device (positions 1-3 record, position 4 returns errCode 8, no 0x0194 table).
+        //   The pairData plaintext normally comes from a stored file (native getPairDataJNI); a fresh
+        //   device with no file uses stock's own fallback: pairData = [0x7a] + 22 zeros (the
+        //   "request new pairing" marker), plus CRC-16/ARC (verified: CRC of stock's real pairData = its
+        //   on-wire crc). GCM on channel 1, INST_CON; fire-and-forget (car ACKs with 0xFFFE, no 0x0138).
+        runCatching { pairingReq() }.onFailure { Logx.w("dk", "pairingReq (0x0137): ${it.message}") }
+
         // 5) coef upload on channel 2 (plaintext) — optional (RPA/approach only)
         Logx.d("dk", "handshake 5/5 coef upload …")
         runCatching {
@@ -278,8 +302,14 @@ class RealDkSession(
             cred.phoneType3 +          // phoneType(3) = mobileCode bytes (stock p0/n)
             cred.bigCalibHash4 +       // bigCalibrationDataHash(4) = SHA256(coefBigParam)[0:4]
             cred.smallCalibHash4 +     // smallCalibrationDataHash(4) = SHA256(coefSmallParam)[0:4]
-            ByteArray(4) +             // selfCalibrationDataHash(4) — no <vin>_SELF_CALIBRATION_HASH file on first pair
-            byteArrayOf(0))            // calibrationType(1) = getCalibrationMode(vin) default 0
+            ByteArray(4) +             // selfCalibrationDataHash(4) = 0 — correct for us: our key has NO table
+                                       //   on the car yet (stock sends its existing table's hash, e.g. ca85b1e4).
+            byteArrayOf(calibrationType)) // calibrationType(1): stock sends 0x01 (getCalibrationMode(vin)=1, a
+                                       //   PERSISTED mode set when the 4-step smart-calibration is chosen). It
+                                       //   tells the car to expect the 4-position walk and FINALIZE. We were
+                                       //   sending 0 ("no mode") -> car accepted positions 1-3 but never entered
+                                       //   the finalize state at position 4 -> errCode 8, no 0x0194 table. Verified
+                                       //   by decrypting stock's 0x0101 confirm (frida_confirm_dump.js, 2026-09-23).
     }
 
     private fun deriveSession(vfBody: ByteArray, carCert: X509Certificate) {
@@ -455,21 +485,32 @@ class RealDkSession(
     // sequencing (which position, how many samples) lives in the caller (CalibrationTestController).
     // All A2V frames ride channel 2 and use SELF_CALIB_INST_TYPE; GCM/plaintext per DkProtocol.
 
-    /** 0x0190 CALIBRATION_START [type] -> 0x0191 [errCode]. Returns the car's errCode (0 == OK), or -1. */
-    suspend fun calibStart(type: Byte): Int {
+    /**
+     * 0x0190 CALIBRATION_START [type] -> 0x0191 [errCode]. Returns the car's errCode (0 == OK), or -1
+     * when the car sent no 0x0191 within [timeoutMs]. [timeoutMs] defaults to the session default but
+     * is overridable so the type-byte sweep ([CalibrationTestController.probeStartTypes]) can fail fast
+     * per candidate. errCode >= 0 means the car ANSWERED (the self-cal state machine engaged for us).
+     */
+    suspend fun calibStart(type: Byte, timeoutMs: Long = this.timeoutMs): Int {
         if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibStart: session not ready"); return -1 }
         val rsp = runCatching { exchange(DkProtocol.CMD_A2V_CALIBRATION_START, byteArrayOf(type),
-            DkProtocol.CMD_V2A_CALIBRATION_RSP) }.getOrElse { Logx.w("dk", "calibStart: ${it.message}"); return -1 }
+            DkProtocol.CMD_V2A_CALIBRATION_RSP, timeoutMs) }.getOrElse { Logx.w("dk", "calibStart: ${it.message}"); return -1 }
         val err = errByteAt6(rsp)
         Logx.d("dk", "calibStart type=$type -> 0x0191 errCode=$err")
         return err
     }
 
-    /** 0x0192 CALIBRATION_LOC_SEND [type/step] -> 0x0193 [errCode]. Returns errCode (0 == OK), or -1. */
-    suspend fun calibLoc(type: Byte): Int {
+    /**
+     * 0x0192 CALIBRATION_LOC_SEND [type/step] -> 0x0193 [errCode]. Returns errCode (0 == OK), or -1 on
+     * no 0x0193 within [timeoutMs]. The car SAMPLES RSSI at the position for up to ~10s before replying
+     * (stock UI: "maximum of 10 seconds"), so [timeoutMs] must exceed that - at-car capture 2026-09-23
+     * showed the 0x0193 landing ~8.1s after 0x0192, JUST past the old 8s default, so we were dropping
+     * real replies by ~50ms. Default kept short; [runCalibration] passes a generous window.
+     */
+    suspend fun calibLoc(type: Byte, timeoutMs: Long = this.timeoutMs): Int {
         if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibLoc: session not ready"); return -1 }
         val rsp = runCatching { exchange(DkProtocol.CMD_A2V_CALIBRATION_LOC_SEND, byteArrayOf(type),
-            DkProtocol.CMD_V2A_CALIBRATION_LOC_RSP) }.getOrElse { Logx.w("dk", "calibLoc: ${it.message}"); return -1 }
+            DkProtocol.CMD_V2A_CALIBRATION_LOC_RSP, timeoutMs) }.getOrElse { Logx.w("dk", "calibLoc: ${it.message}"); return -1 }
         val err = errByteAt6(rsp)
         Logx.d("dk", "calibLoc type=$type -> 0x0193 errCode=$err")
         return err
@@ -521,6 +562,25 @@ class RealDkSession(
         return ok
     }
 
+    /**
+     * 0x0137 PAIRING_REQ - registers/pairs this device with the car so it will FINALIZE self-calibration
+     * (positions 1-3 record without it, but position 4 returns errCode 8 and no 0x0194 table). Stock
+     * sends this on every connect, right after the digital-key verify. The pairData plaintext normally
+     * comes from a stored file (native getPairDataJNI); a fresh device with no file uses stock's own
+     * no-file fallback (p0/y): pairData = new byte[23] with [0]=0x7a (the "request new pairing" marker),
+     * rest zero, plus CRC-16/ARC(pairData) big-endian. Sent GCM on channel 1, INST_CON; the car ACKs
+     * with a 0xFFFE transport ack (no application 0x0138), so this is fire-and-forget.
+     */
+    private suspend fun pairingReq(): Boolean {
+        if (!cryptoReady) return false
+        val pairData = ByteArray(23).also { it[0] = 0x7a }       // no-file fallback (stock p0/y :cond_1)
+        val crc = DkCrypto.crc16(pairData)
+        val tail = pairData + byteArrayOf(((crc ushr 8) and 0xFF).toByte(), (crc and 0xFF).toByte())
+        val ok = send(DkProtocol.CMD_A2V_PAIRING_REQ, tail)
+        Logx.d("dk", "handshake 4.5/5 pairingReq 0x0137 pairData=${hexOf(pairData)} crc=%04x write=$ok".format(crc))
+        return ok
+    }
+
     /** errCode = body[6] (1 byte) for the calibration rsp frames, or -1 if the body is too short. */
     private fun errByteAt6(body: ByteArray): Int = if (body.size >= 7) body[6].toInt() and 0xFF else -1
 
@@ -555,6 +615,7 @@ class RealDkSession(
     private fun instTypeFor(cmdId: Int): Int = when {
         DkProtocol.needsCmac(cmdId) -> DkProtocol.INST_CON
         cmdId == DkProtocol.CMD_A2V_CALIBRATION_LOC_SEND -> DkProtocol.INST_CON
+        cmdId == DkProtocol.CMD_A2V_PAIRING_REQ -> DkProtocol.INST_CON   // stock sends 0x0137 as CON (wire: 013703)
         else -> DkProtocol.INST_REQ
     }
 
@@ -563,14 +624,14 @@ class RealDkSession(
         byteArrayOf((ts ushr 24).toByte(), (ts ushr 16).toByte(), (ts ushr 8).toByte(), ts.toByte())
 
     /** Send (auto nSeq/ts wrap) then await [expect]; returns the decrypted response body (incl nSeq||ts). */
-    private suspend fun exchange(cmdId: Int, tail: ByteArray, expect: Int): ByteArray {
+    private suspend fun exchange(cmdId: Int, tail: ByteArray, expect: Int, timeoutMs: Long = this.timeoutMs): ByteArray {
         val nSeq = DkPayload.nextSeq(); val ts = DkPayload.timestamp()
         val plain = DkPayload.wrap(nSeq, ts, tail)
-        return exchangeRaw(cmdId, plain, DkProtocol.isEncrypted(cmdId), expect)
+        return exchangeRaw(cmdId, plain, DkProtocol.isEncrypted(cmdId), expect, timeoutMs)
     }
 
     /** Send a pre-built payload body (already nSeq||ts||…); optionally GCM; await [expect]. */
-    private suspend fun exchangeRaw(cmdId: Int, plainBody: ByteArray, encrypt: Boolean, expect: Int): ByteArray {
+    private suspend fun exchangeRaw(cmdId: Int, plainBody: ByteArray, encrypt: Boolean, expect: Int, timeoutMs: Long = this.timeoutMs): ByteArray {
         val def = CompletableDeferred<ByteArray>()
         pending[expect] = def
         try {
@@ -595,8 +656,27 @@ class RealDkSession(
         } catch (e: Exception) {
             Logx.w("dk", "decrypt ${hex(cmdId)} failed: ${e.message} rawBody(${rawBody.size}B)=${hexOf(rawBody)}"); return
         }
+        // DIAGNOSTIC: 0x182 is the car's BNCM ranging telemetry (its measurement of THIS phone). It is
+        // fire-and-forget (no reply, like stock), but decrypting it with the session key shows what the
+        // car actually measures per calibration position - to tell whether the in-cabin finalize fails
+        // because the car reads us as "outside/weak" (a ranging issue) or despite good ranging (a gate).
+        if (cmdId == 0x182 && cryptoReady) {
+            val rng = runCatching { DkCrypto.gcmDecrypt(sKey, iv, rawBody) }.getOrNull()
+            Logx.d("dk", "0x182 ranging: plaintext=${rng?.let { hexOf(it) } ?: "(GCM decrypt failed - different key?)"} raw=${hexOf(rawBody)}")
+        }
         // Diagnostic tap (active only during a probeControl window): see every frame the car returns.
         probeSink?.invoke(cmdId, body)
+        // Transport parity: the car sends its CON-type pushes/responses expecting a plaintext 0xFFFE ACK
+        // that echoes the frame's own nSeq+ts. Stock ACKs 0x0121 (status), 0x0193 (calib loc rsp) and
+        // 0x0194 (calib table) - full BLE capture 2026-09-23. Fire it HERE, before the pending completion
+        // below returns early for awaited frames (0x0193): without the ACK the car stalls and never emits
+        // the 0x0194 table (this is a real gap in our calibration flow, not just cosmetic parity).
+        if (cmdId == DkProtocol.CMD_V2A_VSTATUS_SYNC ||
+            cmdId == DkProtocol.CMD_V2A_CALIBRATION_LOC_RSP ||
+            cmdId == DkProtocol.CMD_V2A_RECEIVE_CALIBRATION) {
+            val ackBody = body
+            ackScope.launch { runCatching { sendAck(cmdId, ackBody) } }
+        }
         pending[cmdId]?.let { it.complete(body); return }
         // Known handshake failures: fail the awaited step immediately (don't wait for timeout).
         val failFor = when (cmdId) {
@@ -609,28 +689,26 @@ class RealDkSession(
             pending[failFor.first]?.completeExceptionally(IllegalStateException(failFor.second))
             return
         }
-        // 0x0121 VSTATUS_SYNC: the car pushes its status periodically and the stock app ACKs each one
-        // with a plaintext 0xFFFE frame (transport parity - confirmed in the stock DK BLE trace). We
-        // never used to ack; mirror stock so the car sees the phone actively processing its pushes.
-        if (cmdId == DkProtocol.CMD_V2A_VSTATUS_SYNC) {
-            ackScope.launch { runCatching { sendAck(DkProtocol.CMD_V2A_VSTATUS_SYNC) } }
-            // fall through: also hand the status tail to the app handler below
-        }
+        // (0x0121 VSTATUS_SYNC and the calib CON responses are ACKed above, before the pending return.)
         // unsolicited (status / RPA challenge / result): hand the tail (after nSeq||ts) to the app
         val tail = if (body.size >= 6) body.copyOfRange(6, body.size) else body
         appHandler?.invoke(cmdId, tail)
     }
 
-    /** Send the plaintext transport ACK for a car->phone push (stock acks 0x0121). Body =
-     *  nSeq(2) ts(4) ackedCmdId(2) status(2=0x1000); instType=INST_ACK; NOT GCM; ch1-write. */
-    private suspend fun sendAck(ackedCmdId: Int) {
+    /** Send the plaintext transport ACK for a car->phone CON push (stock acks 0x0121, 0x0193, 0x0194).
+     *  Body = nSeq(2) ts(4) ackedCmdId(2) status(2=0x1000); instType=INST_ACK; NOT GCM; ch1-write.
+     *  CRITICAL: stock ECHOES the acked frame's OWN nSeq+ts (verified in the full BLE capture:
+     *  0x0193 nSeq=0001 ts=6ab3d534 -> ack fffe04 0001 6ab3d534 0193 1000), not a fresh seq. Pass the
+     *  acked frame's decrypted body so we copy its nSeq(2)+ts(4) prefix verbatim. */
+    private suspend fun sendAck(ackedCmdId: Int, ackedBody: ByteArray) {
         if (!cryptoReady) return
-        val nSeq = DkPayload.nextSeq(); val ts = DkPayload.timestamp()
+        val nSeqTs = if (ackedBody.size >= 6) ackedBody.copyOfRange(0, 6)
+            else DkPayload.wrap(DkPayload.nextSeq(), DkPayload.timestamp(), ByteArray(0))
         val tail = byteArrayOf(
             ((ackedCmdId ushr 8) and 0xFF).toByte(), (ackedCmdId and 0xFF).toByte(),
             0x10, 0x00,   // status 0x1000 = OK, as stock sends
         )
-        val plain = DkPayload.wrap(nSeq, ts, tail)   // plaintext (0xFFFE is not in the GCM set)
+        val plain = nSeqTs + tail                    // plaintext (0xFFFE is not in the GCM set)
         val frame = DkFrame(DkProtocol.CMD_A2V_ACK, DkProtocol.INST_ACK, plain).encode()
         transport.write(DkProtocol.CMD_A2V_ACK, frame)
     }

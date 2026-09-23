@@ -48,7 +48,13 @@ data class DkCredential(
     val bigCalibHash4: ByteArray by lazy { calibHash4(coefBig) }
     /** smallCalibrationDataHash(4) = SHA256(coefSmallParam bytes)[0:4]; zeros if empty. */
     val smallCalibHash4: ByteArray by lazy { calibHash4(coefSmall) }
-    /** phoneType(3) = mobileCode bytes (e.g. FFFFFF), padded/truncated to 3. */
+    /**
+     * phoneType(3) = hexStringToBytes(CalibrationData.getMobileCode()), else new byte[3] (zeros) ONLY when
+     * there is no CalibrationData at all (stock confirm builder, p0/n.smali:188-210). So a mobileCode of
+     * "FFFFFF" is sent as-is (FF FF FF) - stock does the same - and empty falls back to zeros. (Tested:
+     * forcing zeros for FFFFFF did NOT change the position-4 finalize, so phoneType is not the blocker
+     * unless stock's getMobileCode() differs from ours - capture pending.) padded/truncated to 3.
+     */
     val phoneType3: ByteArray by lazy { ByteArray(3) { if (it < mobileCode.size) mobileCode[it] else 0 } }
 
     private fun calibHash4(b: ByteArray): ByteArray =

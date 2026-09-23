@@ -195,7 +195,11 @@ data class SecretsConfig(
         if (hmacSecretKey.isBlank()) add("hmac_secret_key is required")
         if (passwordPublicKey.isBlank()) add("password_public_key is required")
         if (prodSecret.isBlank()) add("prod_secret is required")
-        if (vin.isBlank()) add("vin is required")
+        // NB: vin is NOT required here. It is a RESULT of login (fetched by the step-6 vehicle-list),
+        // not a prerequisite for it. signOut() clears vin, so requiring it made re-login impossible:
+        // the Settings "Sign in" saves the config first (replace()->check()), which threw "vin is
+        // required" before login could ever run. The DK/vehicle features that truly need a vin guard
+        // for it at their own call sites.
 
         // Overseas pair
         if (overseasAccessKey.isBlank() != overseasSecretKey.isBlank()) {
@@ -228,8 +232,16 @@ data class SecretsConfig(
 
     // ---- region-derived hosts (all hang off [azureHost] / [xchangerHost], seeded per region) ----
     private val azureBase: String get() = azureHost.trimEnd('/')
-    /** User-center (login) base, trailing slash (e.g. …/zeekr-cuc-idaas/). */
-    val usercenterUrl: String get() = "$azureBase/zeekr-cuc-idaas/"
+    /**
+     * User-center (login/IDaaS) base, trailing slash. The IDaaS tenant segment is REGION-SPECIFIC:
+     * EU uses `zeekr-cuc-idaas`, but SEA uses `zeekr-cuc-idaas-sea` (captured from the stock global app:
+     * `gateway-pub-hw-em-sg.zeekrlife.com/zeekr-cuc-idaas-sea/auth/checkUserV2`). Using the EU segment
+     * on SEA 404s the whole login at step 1. LA/ME segments are unverified - default to the EU form.
+     */
+    val usercenterUrl: String get() {
+        val seg = if (regionCode.equals("SEA", ignoreCase = true)) "zeekr-cuc-idaas-sea" else "zeekr-cuc-idaas"
+        return "$azureBase/$seg/"
+    }
     /** App-server base, trailing slash (e.g. …/overseas-app/). */
     val appServerUrl: String get() = "$azureBase/overseas-app/"
     /** Message-centre service root (no trailing slash) for FCM push registration. */

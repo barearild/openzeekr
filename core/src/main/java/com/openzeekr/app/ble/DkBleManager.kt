@@ -311,6 +311,43 @@ class DkBleManager(base: Context) : DkTransport {
         return true
     }
 
+    /**
+     * Engage from an OFFLOADED presence FIRST_MATCH: the hardware-filtered scan saw the car at [mac]
+     * with the CPU allowed to sleep. Screen-off the unfiltered ACTIVE scan is unreliable (Android
+     * starves app startScan callbacks), so it can sit in SCANNING for minutes without ever seeing the
+     * advert. A plain [connect] here would bail with "already SCANNING" and DROP this match - the root
+     * cause of the walk-up that never reconnects. The offloaded match is authoritative that the car is
+     * in range, so let it PREEMPT the stuck active scan and go straight to the cached device by its
+     * broadcast-random ([reconnectLast]); we do NOT need the active scan to re-capture the advert first.
+     *
+     * Race-safe: a link that's already CONNECTING/CONNECTED/SESSION_READY is left untouched (never tear
+     * down a healthy GATT, never open a second client - [connectDevice] also hard-dedupes on that).
+     */
+    @SuppressLint("MissingPermission")
+    fun engageFromPresence(mac: String?) {
+        when (_state.value) {
+            // Already bringing a link up or holding one: this FIRST_MATCH is redundant. Don't preempt a
+            // connect that's already in flight and don't tear down a live GATT.
+            State.CONNECTING, State.CONNECTED, State.SESSION_READY -> {
+                Logx.d("ble", "presence FIRST_MATCH ignored - already ${_state.value}")
+                return
+            }
+            State.SCANNING -> {
+                // A stuck/in-progress active scan holds the SCANNING state; cancel it so the connect
+                // below isn't dropped with "already SCANNING". We already know the car is in range from
+                // the offloaded match, so we don't need this scan to re-capture the advert.
+                adapter?.bluetoothLeScanner?.let { runCatching { stopScanInternal(it) } }
+                _state.value = State.IDLE   // reconnectLast/connect require a resting state
+                Logx.d("ble", "presence FIRST_MATCH -> preempting active scan, connect-by-MAC ${mac ?: "?"}")
+            }
+            else -> {}  // IDLE/ERROR: nothing to preempt - connect normally below
+        }
+        // Prefer the scan-free path: the cached BluetoothDevice keeps the RANDOM address type (a raw
+        // getRemoteDevice(mac) is treated as PUBLIC and times out) and its broadcast-random still
+        // derives the DK connect-confirm. Fall back to a fresh scan-connect if there's no cached device.
+        if (!reconnectLast()) runCatching { connect(null) }
+    }
+
     @SuppressLint("MissingPermission")
     private fun startScan(a: BluetoothAdapter, useBatching: Boolean = true) {
         val scanner = a.bluetoothLeScanner ?: run { fail("no LE scanner"); return }

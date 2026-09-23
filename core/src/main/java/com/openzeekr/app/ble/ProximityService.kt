@@ -77,7 +77,10 @@ class ProximityService : Service() {
                 // which takes the BluetoothDevice from the live ScanResult (correct address type).
                 Logx.d("svc", "presence: car in range (saw $mac) — engaging via scan-connect")
                 deps.ble.disarmPresenceScan()
-                runCatching { deps.ble.connect(null) } // wakelock follows state via manageWakeLock
+                // engageFromPresence (not connect): the offloaded match is authoritative, so it can
+                // PREEMPT a stuck screen-off active scan and connect straight to the cached device -
+                // otherwise connect() bails with "already SCANNING" and this match is dropped.
+                runCatching { deps.ble.engageFromPresence(mac) } // wakelock follows state via manageWakeLock
             }
             ACTION_ABSENT -> {
                 // MATCH_LOST — the offloaded scan lost the car. Nothing to do: manageWakeLock releases

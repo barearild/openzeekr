@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -64,6 +66,7 @@ import com.openzeekr.app.Deps
 import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkProvisioning
 import com.openzeekr.app.ui.theme.Brand
+import com.openzeekr.app.net.ReleaseInfo
 import kotlinx.coroutines.launch
 
 private enum class Tab(val label: String, val icon: ImageVector) {
@@ -120,6 +123,41 @@ fun AppRoot(deps: Deps) {
         if (prov.step == DkProvisioning.Step.DONE) com.openzeekr.app.wear.PhoneKeyPush.pushToWatches(pushCtx)
     }
 
+    // New-version prompt. The Settings "update available" row is easy to miss, so surface a dialog when
+    // a newer GitHub release than the installed build is found (deps.checkForUpdate runs at startup).
+    // Persist the dismissed version so we prompt ONCE per new release, not on every launch - and prompt
+    // again when an even newer one appears.
+    val update by deps.updateAvailable.collectAsState()
+    var updateDismissed by remember {
+        mutableStateOf(runCatching {
+            pushCtx.getSharedPreferences("oz_update", android.content.Context.MODE_PRIVATE)
+                .getString("dismissed_version", "") ?: ""
+        }.getOrDefault(""))
+    }
+    val dismissUpdate: (String) -> Unit = { v ->
+        updateDismissed = v
+        runCatching {
+            pushCtx.getSharedPreferences("oz_update", android.content.Context.MODE_PRIVATE)
+                .edit().putString("dismissed_version", v).apply()
+        }
+    }
+    update?.let { rel ->
+        if (rel.version != updateDismissed) {
+            UpdateAvailableDialog(
+                installed = deps.appVersion,
+                rel = rel,
+                onDownload = {
+                    runCatching {
+                        pushCtx.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(rel.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    dismissUpdate(rel.version)
+                },
+                onDismiss = { dismissUpdate(rel.version) },
+            )
+        }
+    }
+
     val bleState by deps.ble.state.collectAsState()
     val bleReady = bleState == DkBleManager.State.SESSION_READY || bleState == DkBleManager.State.CONNECTED
     val carName = cfg.carNickname.ifBlank { "My Zeekr" }
@@ -174,7 +212,9 @@ fun AppRoot(deps: Deps) {
                     Text(if (cfg.vin.isNotBlank()) "VIN ••••${cfg.vin.takeLast(3)}" else "Tap the pencil to name your car",
                         color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                // Notifications bell with unread badge.
+                // Notifications bell with unread-count badge. A rounded pill that always shows the number
+                // (grows for 2-3 digits), ringed in the bar's surface colour so it reads cleanly over the
+                // bell, and nudged onto the icon's top-right corner. Caps at "99+".
                 Box {
                     Icon(
                         Icons.Filled.NotificationsNone, "Messages", tint = MaterialTheme.colorScheme.onSurface,
@@ -182,14 +222,18 @@ fun AppRoot(deps: Deps) {
                     )
                     if (unread > 0) {
                         Box(
-                            Modifier.align(Alignment.TopEnd).padding(3.dp)
-                                .size(if (unread > 9) 17.dp else 9.dp)
-                                .clip(CircleShape).background(Brand.crit),
+                            Modifier.align(Alignment.TopEnd)
+                                .offset(x = 3.dp, y = (-1).dp)
+                                .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(Brand.crit)
+                                .border(1.5.dp, MaterialTheme.colorScheme.surface, RoundedCornerShape(9.dp))
+                                .padding(horizontal = 4.dp),
                             contentAlignment = Alignment.Center,
                         ) {
-                            if (unread > 9) Text(
+                            Text(
                                 if (unread > 99) "99+" else "$unread",
-                                color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold,
+                                color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1,
                             )
                         }
                     }
@@ -324,3 +368,23 @@ fun AppRoot(deps: Deps) {
 
 // Revolut tip link shown in the one-time support note. Replace with the real revolut.me handle.
 private const val REVOLUT_URL = "https://revolut.me/REPLACE_ME"
+
+/** Prompt shown once per new release when a newer GitHub build than [installed] is available. */
+@Composable
+private fun UpdateAvailableDialog(installed: String, rel: ReleaseInfo, onDownload: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Update available") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("OpenZeekr ${rel.version} is available. You have $installed.")
+                if (rel.notes.isNotBlank()) Text(
+                    rel.notes.trim().lines().filter { it.isNotBlank() }.take(8).joinToString("\n"),
+                    fontSize = 12.sp, color = Brand.muted,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDownload) { Text("Download") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Later") } },
+    )
+}

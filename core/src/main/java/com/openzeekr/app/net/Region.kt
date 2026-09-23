@@ -62,14 +62,20 @@ data class Region(
 
         // ---- Reconstructed from the stock host tables; UNVERIFIED (no car/account to test). ----
 
+        // VERIFIED against a real SEA login (2026-09-23). Endpoint/structure only - NO secret VALUES
+        // are committed here (users supply their own region keys):
+        //   usercenter path segment = zeekr-cuc-idaas-sea (see SecretsConfig.usercenterUrl); TSP host
+        //   sea-snc-tsp-api-gw, X-PROJECT-ID=ZEEKR_SEA; Client-Id/tenant already match ZeekrConst.
+        //   The TSP X-SIGNATURE uses the "EM" signing set (SEA rides EM's TSP infra), hence
+        //   extractorRegion=EM; the user-center HMAC keys are SEA-host-specific and entered by the user.
         val SEA = Region(
-            code = "SEA", displayName = "Southeast Asia (SEA)",
+            code = "SEA", displayName = "Australia + SEA",
             tspBaseUrl = "https://sea-snc-tsp-api-gw.zeekrlife.com",
             azureHost = "https://gateway-pub-hw-em-sg.zeekrlife.com",
             // host.txt APAC suffix .ecloudkr.com, ZEEKR gen2SingleAuthPrefix "https://api-zk".
             xchangerHost = "https://api-zk.ecloudkr.com",
             projectId = "ZEEKR_SEA", countryCode = "SG", snsRegion = "ap-southeast-1",
-            extractorRegion = "SEA", verified = false,
+            extractorRegion = "EM", verified = false,
         )
 
         val LA = Region(

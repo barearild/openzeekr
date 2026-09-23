@@ -422,7 +422,16 @@ class AccountLogin(private val store: ConfigStore) {
     private fun execRoot(client: OkHttpClient, req: Request): JsonObject? {
         val ep = req.url.encodedPath.substringAfterLast('/')
         client.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
+            // We set Accept-Encoding: gzip manually (to match stock), which DISABLES OkHttp's transparent
+            // gzip decompression - so a gzip response comes back as raw gzip bytes. The SEA gateway
+            // (Server: CW / WAF) gzips every response; EU's (APISIX) does not. Gunzip it ourselves when
+            // Content-Encoding says gzip, else the body is plain. Without this, JSON parse throws on SEA.
+            val raw = resp.body?.bytes() ?: ByteArray(0)
+            val gzip = resp.header("Content-Encoding")?.contains("gzip", ignoreCase = true) == true
+            val bytes = if (gzip && raw.isNotEmpty())
+                runCatching { java.util.zip.GZIPInputStream(raw.inputStream()).readBytes() }.getOrDefault(raw)
+            else raw
+            val text = String(bytes, Charsets.UTF_8)
             // Scrub secret values (tokens, signatures, openId, vin, …) out of the raw response body
             // before it reaches the on-device log - same redaction policy as the OkHttp logger.
             Logx.d("http", HttpLog.scrub("<- $ep HTTP ${resp.code} (${text.length}B): ${text.take(600)}"))

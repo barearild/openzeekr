@@ -48,6 +48,11 @@ class CalibrationTestController(
         /** Step 1..totalSteps while [runCalibration] walks the positions (0 = not stepping). */
         val step: Int = 0,
         val totalSteps: Int = 0,
+        /** True while the car is measuring the current position (0x0192 sent, awaiting 0x0193) - the UI
+         *  disables Continue and shows [secondsLeft] so the user can't spam-tap during the ~10s sample. */
+        val measuring: Boolean = false,
+        /** Countdown (s) shown while [measuring]; reaches 0 or ends early when the car answers. */
+        val secondsLeft: Int = 0,
     )
 
     private val _state = MutableStateFlow(State(hasTable = false))
@@ -89,6 +94,21 @@ class CalibrationTestController(
     /** Tester tapped "Continue" / "I'm in position" for the current calibration step. */
     fun advanceStep() { stepGate?.complete(Unit) }
 
+    /**
+     * The 0x0190 CALIBRATION_START type byte - the one value static RE could not recover (it lives in
+     * the stock UI, not the SDK). [runCalibration] sends this; [probeStartTypes] finds it by sweep.
+     * Settable from the UI so, once the sweep finds the value the car answers, Run uses it.
+     */
+    // The exact stock CALIBRATION_START sequence, from the FULL decrypted BLE capture (frida_ble_all.js,
+    // 2026-09-23, stock spoofed Pixel 6a): stock sends 0x0190 exactly ONCE with type=1, then 4x 0x0192
+    // types 1..4, then the car pushes 0x0194 (pos4 -> errCode 7 + 200B table). The earlier "double 0x0190"
+    // (startSelfCalibration 2 then 1) was misread from the btsnoop header-only log; an extra 0x0190
+    // desyncs the car's phase counter and is why our pos4 landed on errCode 8 (error) not 7 (finalize).
+    @Volatile var startType: Byte = 1       // 0x0190 start type (single), proven from the wire capture
+
+    // Stock walks 4 positions with loc types 1,2,3,4 (our types already match). See dk-selfcalib-test-harness.
+    @Volatile var stepCount: Int = 4
+
     // ---------------- run the real flow (capture a table under our key) ----------------
 
     /**
@@ -101,22 +121,32 @@ class CalibrationTestController(
         job = scope.launch {
             if (!ensureSession()) return@launch
             val session = realSession() ?: return@launch
-            setState { it.copy(phase = Phase.RUNNING, busy = true, message = "Starting calibration (0x0190)…", totalSteps = stepPrompts.size) }
-            // 0x0190 CALIBRATION_START (type 0 = begin the self-cal session).
-            val startErr = session.calibStart(0)
-            if (startErr != 0) {
-                // errCode -1 = the car sent NO 0x0191 at all (silent). Before, that meant a car-side
-                // capability gate - but that verdict predated the instType fix; the self-cal command
-                // frames now go out as SELF_CALIB_INST_TYPE (INST_CON). If it is STILL silent here,
-                // the gate is real; if it now answers, the old silence was just the wrong instType.
-                finishErr(if (startErr == -1)
-                    "Car ignored calibration start (no 0x0191). If still silent with INST_CON, this is a " +
-                    "real car-side DK3.0/ranging gate; if it now answers, the old silence was the instType."
-                else
-                    "Car rejected calibration start (0x0191 errCode=$startErr)."); return@launch
+            val steps = stepCount.coerceIn(1, stepPrompts.size)
+            setState { it.copy(phase = Phase.RUNNING, busy = true, message = "Resetting calibration (unlock/lock)…", totalSteps = steps) }
+            // Reproduce stock's EXACT pre-calibration sequence (frida_ble_all.js full decrypted capture,
+            // 2026-09-23): BEFORE any 0x0190, stock sends 0x0110 CONTROL UNLOCK (ctrl=0x01) then LOCK
+            // (ctrl=0x02) - a lock/unlock cycle that RESETS the car's calibration/proximity state to a
+            // clean baseline. This is the "reset previous calibration" step we were missing; without it the
+            // car carries stale state and the finalize (pos4) rejects with errCode 8 instead of 7.
+            runCatching { session.control(DkProtocol.CTRL_UNLOCK, 3000L) }
+                .onSuccess { Logx.d("carprox", "calib reset: 0x0110 UNLOCK -> $it") }
+                .onFailure { Logx.w("carprox", "calib reset UNLOCK failed: ${it.message}") }
+            delay(2500)   // stock waits ~3s between unlock and lock
+            runCatching { session.control(DkProtocol.CTRL_LOCK, 3000L) }
+                .onSuccess { Logx.d("carprox", "calib reset: 0x0110 LOCK -> $it") }
+                .onFailure { Logx.w("carprox", "calib reset LOCK failed: ${it.message}") }
+            delay(500)
+            // Then 0x0190 CALIBRATION_START exactly ONCE with type=1 (single start - see note on startType),
+            // then the 4x 0x0192 walk. NOT twice.
+            setState { it.copy(message = "Starting calibration (0x0190 type=1)…") }
+            val startErr = session.calibStart(startType)
+            Logx.d("carprox", "calib 0x0190 start type=0x%02x -> errCode=$startErr".format(startType.toInt() and 0xFF))
+            if (startErr < 0) {
+                finishErr("No 0x0191 reply to 0x0190 start. Check BLE log / connection."); return@launch
             }
+            setState { it.copy(message = "Started (0x0190 errCode $startErr) - walking positions…") }
             // Per-position measurement, user-paced. type byte = 1-based position index (see stepPrompts).
-            for (i in stepPrompts.indices) {
+            for (i in 0 until steps) {
                 val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
                 stepGate = gate
                 setState { it.copy(step = i + 1, message = stepPrompts[i]) }
@@ -125,8 +155,15 @@ class CalibrationTestController(
                     finishErr("Timed out waiting for position ${i + 1}."); return@launch
                 }
                 stepGate = null
-                setState { it.copy(message = "Measuring position ${i + 1}/${stepPrompts.size} (0x0192)…") }
-                val locErr = session.calibLoc((i + 1).toByte())
+                // Measuring: lock out Continue and run a 10s countdown so the user holds still and can't
+                // spam-tap. The car samples RSSI for up to ~10s before it sends 0x0193 (at-car: ~8.1s); we
+                // wait 15s so we don't drop the real reply. The countdown ends early when the car answers.
+                setState { it.copy(measuring = true, secondsLeft = 10,
+                    message = "Measuring position ${i + 1}/$steps - hold still…") }
+                val ticker = launch { for (s in 9 downTo 0) { delay(1000); setState { it.copy(secondsLeft = s) } } }
+                val locErr = session.calibLoc((i + 1).toByte(), 15_000)
+                ticker.cancel()
+                setState { it.copy(measuring = false, secondsLeft = 0) }
                 Logx.d("carprox", "self-cal position ${i + 1} -> 0x0193 errCode=$locErr")
                 delay(400) // let the car settle a beat between positions
             }
@@ -134,8 +171,8 @@ class CalibrationTestController(
             setState { it.copy(step = 0, message = "Waiting for the car to compute the table (0x0194)…") }
             val result = session.calibAwaitTable(30_000)
             if (result == null || result.first.size < 200) {
-                finishErr("The car did not return a full calibration table (0x0194). On a non-DK3.0 car " +
-                    "the self-cal often does not complete for a software key."); return@launch
+                finishErr("The car did not return a full calibration table (0x0194) yet - the per-position " +
+                    "type bytes or step count may need adjusting. Check the BLE log for what came back."); return@launch
             }
             val (table, hash) = result
             runCatching { tableFile.writeBytes(table); if (hash.isNotEmpty()) hashFile.writeBytes(hash) }
@@ -148,6 +185,94 @@ class CalibrationTestController(
                 message = "Calibration captured (${table.size}B) + finalised (PE errCode=$peErr). Now walk away " +
                     "to test auto-lock, or try Remote Parking.") }
             Logx.d("carprox", "self-cal captured ${table.size}B + finalised (PE=$peErr)")
+        }
+    }
+
+    // ---------------- brute-force: sweep the 0x0190 start type byte ----------------
+
+    /**
+     * Sweep the 0x0190 CALIBRATION_START [type] byte over [from]..[to] and log each result, to find the
+     * value the car engages on. This is the one value static RE could not recover (it lives only in the
+     * stock UI state machine). [calibStart] returns the car's 0x0191 errCode (>= 0 == the car ANSWERED)
+     * or -1 (no 0x0191 within the short probe window). A short [probeTimeoutMs] keeps a full 0..0x0F
+     * sweep to well under a minute even when most values are silent. Any answer = the self-cal state
+     * machine engages for our key at that value; the sweep then remembers it in [startType] so Run
+     * calibration uses it. The full inbound frame trace (incl. any non-0x191 reply) is in the BLE log -
+     * turn BLE logging on, run this, then Share the log.
+     */
+    fun probeStartTypes(from: Int = 0x00, to: Int = 0x0F, probeTimeoutMs: Long = 2500L) {
+        if (_state.value.busy) return
+        job = scope.launch {
+            if (!ensureSession()) return@launch
+            val session = realSession() ?: return@launch
+            val total = to - from + 1
+            setState { it.copy(phase = Phase.RUNNING, busy = true, step = 0, totalSteps = total,
+                message = "Sweeping 0x0190 type 0x%02x..0x%02x…".format(from, to)) }
+            Logx.d("carprox", "=== 0x0190 type sweep 0x%02x..0x%02x (probe=${probeTimeoutMs}ms) ===".format(from, to))
+            val answered = mutableListOf<Pair<Int, Int>>()   // (type, errCode)
+            for (t in from..to) {
+                setState { it.copy(step = t - from + 1,
+                    message = "0x0190 type=0x%02x (%d/%d)…".format(t, t - from + 1, total)) }
+                val err = session.calibStart(t.toByte(), probeTimeoutMs)
+                Logx.d("carprox", "sweep 0x0190 type=0x%02x -> %s".format(t,
+                    if (err >= 0) "0x0191 errCode=$err (ANSWERED)" else "silent"))
+                if (err >= 0) answered.add(t to err)
+                delay(500)   // let the car settle between attempts
+            }
+            val summary = if (answered.isEmpty())
+                "Swept 0x%02x..0x%02x - silent to every type. Widen the range, or check the BLE log for any non-0x191 reply.".format(from, to)
+            else {
+                // Remember the first value the car answered so Run calibration uses it.
+                startType = answered.first().first.toByte()
+                "GOT A REPLY: ".plus(answered.joinToString(", ") { "type=0x%02x->errCode=%d".format(it.first, it.second) })
+                    .plus(". Set start type=0x%02x for Run calibration.".format(answered.first().first))
+            }
+            setState { it.copy(phase = Phase.DONE, busy = false, step = 0, message = summary) }
+            Logx.d("carprox", "=== 0x0190 type sweep done: ${answered.size} reply(ies) ===")
+        }
+    }
+
+    /**
+     * Sweep the 0x0192 CALIBRATION_LOC_SEND [type] byte to find the value the car ACCEPTS (errCode 0).
+     * Frame-for-frame we already match stock (double 0x0190 then 4x 0x0192), yet positions return
+     * errCode = the type we send (1->1, 2->2, 3->3) and 8 for type 4 - and codes 1-8 all map to stock's
+     * FAILURE dialogs, so our loc types are being rejected. Stock's real loc type per position is inside
+     * the GCM-encrypted 0x0192 body (unreadable from the wire capture), so find it empirically: do the
+     * stock double-0x0190 start, then send 0x0192 with each type in [from]..[to] AT ONE spot and log the
+     * errCode. Any type returning 0 is the one the car accepts. Stand at position 1 (door handle) and
+     * hold still - the car samples ~10s per attempt, so this takes a bit. Turn BLE logging on + Share.
+     */
+    fun probeLocTypes(from: Int = 0x00, to: Int = 0x07, probeTimeoutMs: Long = 12_000L) {
+        if (_state.value.busy) return
+        job = scope.launch {
+            if (!ensureSession()) return@launch
+            val session = realSession() ?: return@launch
+            val total = to - from + 1
+            setState { it.copy(phase = Phase.RUNNING, busy = true, step = 0, totalSteps = total,
+                message = "Stand at position 1 and hold still - sweeping 0x0192 loc type…") }
+            // Stock reset (unlock/lock) + single 0x0190 start so the car is in measurement mode.
+            runCatching { session.control(DkProtocol.CTRL_UNLOCK, 3000L) }; delay(2000)
+            runCatching { session.control(DkProtocol.CTRL_LOCK, 3000L) }; delay(500)
+            session.calibStart(startType)
+            Logx.d("carprox", "=== 0x0192 loc-type sweep 0x%02x..0x%02x (after reset + single 0x0190) ===".format(from, to))
+            val accepted = mutableListOf<Pair<Int, Int>>()   // (type, errCode)
+            for (t in from..to) {
+                setState { it.copy(step = t - from + 1,
+                    measuring = true, secondsLeft = 10,
+                    message = "0x0192 loc type=0x%02x (%d/%d) - hold still…".format(t, t - from + 1, total)) }
+                val ticker = launch { for (s in 9 downTo 0) { delay(1000); setState { it.copy(secondsLeft = s) } } }
+                val err = session.calibLoc(t.toByte(), probeTimeoutMs)
+                ticker.cancel(); setState { it.copy(measuring = false, secondsLeft = 0) }
+                Logx.d("carprox", "sweep 0x0192 loc type=0x%02x -> %s".format(t,
+                    if (err >= 0) "0x0193 errCode=$err" else "silent"))
+                if (err == 0) accepted.add(t to err)
+                delay(400)
+            }
+            val summary = if (accepted.isEmpty())
+                "Swept loc 0x%02x..0x%02x - NO type returned errCode 0 (all rejected/echoed). It is likely not the type but the session/coef; check the BLE log.".format(from, to)
+            else "ACCEPTED (errCode 0): " + accepted.joinToString(", ") { "loc type=0x%02x".format(it.first) } + " - use these for the positions."
+            setState { it.copy(phase = Phase.DONE, busy = false, step = 0, message = summary) }
+            Logx.d("carprox", "=== 0x0192 loc-type sweep done: ${accepted.size} accepted ===")
         }
     }
 
