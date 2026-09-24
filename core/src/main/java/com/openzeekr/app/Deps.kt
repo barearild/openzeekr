@@ -22,8 +22,8 @@ import com.openzeekr.app.remote.VehicleStatusHolder
 import com.openzeekr.app.net.ReleaseInfo
 import com.openzeekr.app.net.UpdateChecker
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -107,7 +107,16 @@ class Deps(context: Context) {
                 ?.additionalVehicleStatus?.drivingSafetyStatus?.centralLockingStatus
                 ?.let { it == "1" }
         },
-    )
+    ).also { prox ->
+        lock.onLocked = { prox.resetArmedUnlocked("dk-lock") }
+        appScope.launch {
+            vehicleState.state.collect { s ->
+                if (s?.additionalVehicleStatus?.drivingSafetyStatus?.centralLockingStatus == "1") {
+                    prox.resetArmedUnlocked("vehicle-status-locked")
+                }
+            }
+        }
+    }
     /** Call after the base URL / sign algo changes so the HTTP client rebuilds. */
     fun onEndpointChanged() = apiClient.rebuild()
 }

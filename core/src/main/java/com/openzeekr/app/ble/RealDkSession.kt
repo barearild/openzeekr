@@ -274,8 +274,7 @@ class RealDkSession(
             throw IllegalStateException("0x0102 decrypt failed (wrong VIN or broadcastRnd?): ${e.message}")
         }
         val err = if (status.size >= 8) ((status[6].toInt() and 0xFF) shl 8) or (status[7].toInt() and 0xFF) else null
-        Logx.d("dk", "handshake 0/5 DK_STATUS (initState=$initState) errCode=${err?.let { "0x%04x".format(it) } ?: "?"} " +
-            "status=${hexOf(status)}")
+        Logx.d("dk", "handshake 0/5 DK_STATUS (initState=$initState) errCode=${err?.let { "0x%04x".format(it) } ?: "?"}")
         return err
     }
 

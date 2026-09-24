@@ -174,10 +174,7 @@ class AccountLogin(private val store: ConfigStore) {
                 // this SignInterceptor). Without X-SIGNATURE the server returns 1440 "验签签名不存在".
                 val bodyStr = buildJsonObject { put("authCode", xAuthCode) }.toString()
                 val ts = System.currentTimeMillis().toString()
-                val hfKey = cfg.xchangerSignSecret.ifBlank {
-                    Logx.w("login", "step 4b: xchanger_sign_secret not set — signature will fail (add it to secrets)")
-                    cfg.xchangerSignSecret
-                }
+                val hfKey = cfg.xchangerSignSecret.ifBlank { cfg.prodSecret }
                 val sig = hfSign(
                     signSecret = hfKey,
                     url = cfg.xchangerSessionUrl,
@@ -286,11 +283,13 @@ class AccountLogin(private val store: ConfigStore) {
             Logx.d("login", "userId from JWT=${jwtUserId ?: "(none)"}")
 
             // persist token+userId (+ account openId for the inbox HS256 token, see
-            // InboxAuthToken) BEFORE the vehicle-list call (it needs auth)
+            // InboxAuthToken) BEFORE the vehicle-list call (it needs auth). Discard plaintext
+            // password now that session tokens are acquired.
             store.update { it.copy(
                 accessToken = bearer,
                 userId = jwtUserId ?: userId ?: it.userId,
                 accountUuid = accountUuid ?: it.accountUuid,
+                password = "",
             ) }
 
             // 6. vehicle list -> VIN (first vehicle)

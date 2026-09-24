@@ -94,4 +94,6 @@ dependencies {
 
     // Wear Data Layer — clones the digital key to the paired watch on request.
     implementation("com.google.android.gms:play-services-wearable:18.2.0")
+
+    testImplementation("junit:junit:4.13.2")
 }
