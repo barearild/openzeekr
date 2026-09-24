@@ -293,18 +293,32 @@ class AccountLogin(private val store: ConfigStore) {
                 accountUuid = accountUuid ?: it.accountUuid,
             ) }
 
-            // 6. vehicle list -> VIN (first vehicle)
+            // 6. vehicle list -> ALL cars (multi-car switcher) + set the active VIN
             Logx.d("login", "step 6/6 vehicle-list …")
             runCatching {
                 val vehData = tspGetArray("$tsp${ZeekrConst.VEHLIST_URL}")
-                val first = vehData?.firstOrNull()?.jsonObject
-                val vin = first?.get("vin")?.jsonPrimitive?.contentOrNull
-                val isOwner = first?.get("isOwner")?.jsonPrimitive?.booleanOrNull ?: false
-                if (!vin.isNullOrBlank()) {
-                    store.update { it.copy(vin = vin, isOwner = isOwner) }
-                    Logx.d("login", "step 6/6 vehicle-list OK, vin=$vin isOwner=$isOwner")
+                val all = com.openzeekr.app.net.model.VehicleGarage.parseAll(
+                    vehData?.let { kotlinx.serialization.json.JsonArray(it) })
+                val refs = all.mapNotNull { v ->
+                    v.vin?.takeIf { it.isNotBlank() }?.let {
+                        com.openzeekr.app.config.VehicleRef(it, v.nickName ?: v.model ?: "", v.isOwner)
+                    }
+                }
+                if (refs.isNotEmpty()) {
+                    store.update { cur ->
+                        // Keep the currently-active car if it's still on the account, else the first.
+                        val active = refs.firstOrNull { it.vin == cur.vin } ?: refs.first()
+                        cur.copy(
+                            vehicles = refs,
+                            vin = active.vin,
+                            isOwner = active.isOwner,
+                            // Keep the user's custom name if the active car is unchanged, else use the server name.
+                            carNickname = if (cur.vin == active.vin && cur.carNickname.isNotBlank()) cur.carNickname else active.name,
+                        )
+                    }
+                    Logx.d("login", "step 6/6 vehicle-list OK, ${refs.size} car(s) on account")
                 } else {
-                    Logx.w("login", "step 6/6 vehicle-list returned no vin (enter it manually if needed)")
+                    Logx.w("login", "step 6/6 vehicle-list returned no vehicles (enter VIN manually if needed)")
                 }
             }.onFailure { Logx.w("login", "step 6/6 vehicle-list failed: ${it.message}") }
 

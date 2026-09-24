@@ -139,6 +139,22 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                     }
                 }
             } else {
+                // Check for cars other owners have shared with us and raise the accept dialog. Also a
+                // manual fallback if the auto-check missed one (e.g. invite arrived mid-session).
+                OutlinedButton(
+                    onClick = {
+                        status = "Checking for shared cars…"
+                        scope.launch {
+                            deps.refreshInvites()
+                            val n = deps.pendingInvites.value.size
+                            status = when {
+                                n > 0 -> "Found $n pending invitation(s) - see the prompt."
+                                else -> "No pending car-share invitations."
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Check for shared cars") }
                 OutlinedButton(
                     onClick = { confirmSignOut = true },
                     modifier = Modifier.fillMaxWidth(),

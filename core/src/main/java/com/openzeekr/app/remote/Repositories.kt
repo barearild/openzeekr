@@ -167,9 +167,28 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
      *  even on a session that logged in before that flag was captured. */
     suspend fun vehicleInfo(): CallResult<VehicleInfo?> = withContext(Dispatchers.IO) {
         guarded {
-            VehicleGarage.parse(client.api.vehicleList().data)?.also { info ->
-                if (info.isOwner != store.current().isOwner) store.update { it.copy(isOwner = info.isOwner) }
+            // needSharedCar=true so SHARED cars are included (needSharedCar=false returns an empty
+            // list for a shared-only account), and pick the entry matching the ACTIVE vin - not the
+            // first one - so switching cars shows the right model/colour on the hero card.
+            val vin = store.current().vin
+            val all = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data)
+            // Reconcile the garage on every refresh: this is where a share that ENDED (car dropped
+            // from the list) gets removed from the switcher, and if it was the active car the active
+            // VIN/name repoint to a surviving car - otherwise the top bar stays stuck on the removed
+            // car. Preserves custom names; no-op on an empty/failed fetch.
+            val refs = all.mapNotNull { v ->
+                v.vin?.takeIf { it.isNotBlank() }?.let {
+                    com.openzeekr.app.config.VehicleRef(it, v.nickName ?: v.model ?: "", v.isOwner)
+                }
             }
+            if (store.reconcileGarage(refs))
+                com.openzeekr.app.util.Logx.d("veh", "active car gone (share ended) -> repointed to …${store.current().vin.takeLast(4)}")
+            val activeVin = store.current().vin
+            val info = all.firstOrNull { it.vin == activeVin } ?: all.firstOrNull()
+            com.openzeekr.app.util.Logx.d("veh",
+                "vehicleInfo active vin=…${activeVin.takeLast(4)} -> model=${info?.model} color=${info?.colorName} " +
+                "(of ${all.size} car(s): ${all.joinToString { "${it.model}/…${it.vin?.takeLast(4)}" }})")
+            info?.also { if (it.isOwner != store.current().isOwner) store.update { c -> c.copy(isOwner = it.isOwner) } }
         }
     }
 
@@ -177,6 +196,68 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
     suspend fun renameVehicle(name: String, vehicleId: String? = null): CallResult<Unit> = withContext(Dispatchers.IO) {
         guarded { client.api.modifyVehicle(ModifyVehicleRequest(id = vehicleId, vehNickname = name)); Unit }
     }
+}
+
+/**
+ * Car-share invitations: accept (or decline) a car another owner shared with us, so the user no
+ * longer has to open the stock app. Cloud-only accept - it grants this account's cloud access to
+ * the car (status + remote control); the offline BLE digital key is provisioned separately.
+ */
+class ShareRepository(private val store: ConfigStore, private val client: ApiClient) {
+
+    /**
+     * Pending invitations addressed to this user (acceptlist, filtered to not-yet-accepted, unexpired).
+     * The server keys the list on the recipient's user id; we don't know for certain whether that's the
+     * JWT userId or the account uuid, so try userId first and fall back to accountUuid if it's empty.
+     */
+    suspend fun pending(): CallResult<List<com.openzeekr.app.net.model.ShareInvite>> = withContext(Dispatchers.IO) {
+        guarded {
+            val cfg = store.current()
+            val ids = listOf(cfg.userId, cfg.accountUuid).filter { it.isNotBlank() }.distinct()
+            if (ids.isEmpty()) return@guarded emptyList()
+            var all = emptyList<com.openzeekr.app.net.model.ShareInvite>()
+            for (id in ids) {
+                all = com.openzeekr.app.net.model.ShareInviteParse.parse(client.api.shareAcceptList(userId = id).data)
+                com.openzeekr.app.util.Logx.d("share", "acceptlist(userId=…${id.takeLast(6)}): ${all.size} entr(y/ies)")
+                if (all.isNotEmpty()) break
+            }
+            val pending = all.filter { it.isPending() }
+            com.openzeekr.app.util.Logx.d("share", "acceptlist total=${all.size} pending=${pending.size}" +
+                (if (all.isNotEmpty()) " [" + all.joinToString { "${it.model}/accepted=${it.acceptTime != null}" } + "]" else ""))
+            pending
+        }
+    }
+
+    /**
+     * Accept (or decline) an invitation. On accept we refresh the garage so the new car appears in
+     * the switcher and make it the ACTIVE car. Returns the invite's VIN on success (null if declined).
+     */
+    suspend fun respond(invite: com.openzeekr.app.net.model.ShareInvite, accept: Boolean): CallResult<String?> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                val uid = store.current().userId
+                val resp = client.api.shareAccept(
+                    com.openzeekr.app.net.model.ShareAcceptRequest(
+                        shareId = invite.shareId, toUserId = uid, isAccept = accept,
+                    )
+                )
+                // Success = success flag OR the standard "000000" code. Only treat a clearly-failed
+                // response (not successful AND a non-OK code) as an error.
+                val ok = resp.success || resp.code == null || resp.code == "000000"
+                if (!ok) throw IllegalStateException(resp.message ?: "accept failed (${resp.code})")
+                com.openzeekr.app.util.Logx.d("share", "${if (accept) "accepted" else "declined"} shareId=${invite.shareId}")
+                if (!accept) return@guarded null
+                // Pull the fresh list so the newly shared car enters the garage, then activate it.
+                val refs = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data).mapNotNull { v ->
+                    v.vin?.takeIf { it.isNotBlank() }?.let {
+                        com.openzeekr.app.config.VehicleRef(it, v.nickName ?: v.model ?: "", v.isOwner)
+                    }
+                }
+                store.reconcileGarage(refs)
+                invite.vin?.let { if (refs.any { r -> r.vin == it }) store.setActiveVehicle(it) }
+                invite.vin
+            }
+        }
 }
 
 /**

@@ -10,6 +10,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.Air
+import androidx.compose.material.icons.filled.Kitchen
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.ui.geometry.CornerRadius
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -117,8 +119,11 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     val caps by deps.capabilities.state.collectAsState()
     var info by remember { mutableStateOf<VehicleInfo?>(null) }
     var traffic by remember { mutableStateOf<com.openzeekr.app.net.model.TrafficReport?>(null) }
-    LaunchedEffect(Unit) {
-        deps.capabilities.ensureLoaded()
+    // Keyed on the ACTIVE vin so switching cars re-fetches identity (hero card model/colour),
+    // status, capabilities and traffic for the newly-selected car — not just once at first load.
+    LaunchedEffect(cfg.vin) {
+        info = null   // clear the previous car's identity so the hero card doesn't show it stale
+        deps.capabilities.reload()
         deps.vehicleState.refresh()
         when (val r = deps.control.vehicleInfo()) {
             is CallResult.Ok -> r.value?.let { vi ->
@@ -181,6 +186,10 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     var showClimate by remember { mutableStateOf(false) }
     var showWindows by remember { mutableStateOf(false) }
     var showTrunk by remember { mutableStateOf(false) }
+    var showFridge by remember { mutableStateOf(false) }
+    // Fridge (ZAE) has no reliable on/off readback, so keep an on-screen session state (like steer/vent).
+    var fridgeOn by remember { mutableStateOf(false) }
+    var fridgeTemp by remember { mutableStateOf(readFridgeTemp(ctx)) }
 
     // On success also kick a spaced status-refresh burst so the on-screen state (lock/windows/charge/
     // climate…) catches up once the car applies the command, instead of lagging to the next routine
@@ -226,32 +235,37 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         Divider()
 
         Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            // Quick actions - 2 x 4. Actuating tiles route through deps.vehicleControl (BLE-first, cloud
-            // fallback). Trunk is ALWAYS shown; the sheet offers Open/Close on a powered tailgate, else
-            // latch unlock/lock. The tile reflects the live open/closed state (trunkOpen).
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Ctl(if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen, if (locked) "Locked" else "Unlocked",
-                    tint = if (locked) Brand.good else Brand.energy, active = true, modifier = Modifier.weight(1f)) { door(!locked) }
-                Ctl(climateIcon, "Climate", tint = climateTint, active = acOn, modifier = Modifier.weight(1f)) { showClimate = true }
-                // Always open the sheet — charge limit, battery pre-conditioning (a PRE-charge
-                // action) and the charge-port control all live there, so it must be reachable when
-                // unplugged too, not only mid-charge.
-                ChargeCtl(charging, plugged, soc, powerKw, elec?.timeToFullyCharged, Modifier.weight(1f)) { showCharge = true }
-                Ctl(windowIcon, windowLabel, tint = windowTint, active = windowsOpen, modifier = Modifier.weight(1f)) { showWindows = true }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            // Quick actions - a 4-column grid that REFLOWS. Only supported tiles are emitted (per-VIN
+            // capabilities: fridge/frunk drop out when absent), then packed left-to-right into rows of
+            // 4 so there are no holes. A short final row is centred (half-weight spacers on each side)
+            // so its tiles keep the same 1/4 width instead of stretching. Actuating tiles route through
+            // deps.vehicleControl (BLE-first, cloud fallback). Trunk is ALWAYS shown; its sheet offers
+            // Open/Close on a powered tailgate, else latch unlock/lock, and reflects live state.
+            val tiles = buildList<@Composable RowScope.() -> Unit> {
+                add { Ctl(if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen, if (locked) "Locked" else "Unlocked",
+                    tint = if (locked) Brand.good else Brand.energy, active = true, modifier = Modifier.weight(1f)) { door(!locked) } }
+                add { Ctl(climateIcon, "Climate", tint = climateTint, active = acOn, modifier = Modifier.weight(1f)) { showClimate = true } }
+                // Always open the sheet — charge limit, battery pre-conditioning (a PRE-charge action)
+                // and the charge-port control all live there, so it must be reachable when unplugged too.
+                add { ChargeCtl(charging, plugged, soc, powerKw, elec?.timeToFullyCharged, Modifier.weight(1f)) { showCharge = true } }
+                add { Ctl(windowIcon, windowLabel, tint = windowTint, active = windowsOpen, modifier = Modifier.weight(1f)) { showWindows = true } }
                 // Combined locator: the ONE signal action the key session can fire directly (DK 0x03 =
                 // flash + honk together), so it's BLE-first (instant in range) with cloud fallback.
-                // Flash-only has NO BLE opcode, so it always goes via the cloud. (There is no
-                // honk-only action — the car only supports flash-only and flash+honk together.)
-                Ctl(Icons.Filled.Campaign, "Flash+Honk", modifier = Modifier.weight(1f)) { fire("Locate") { deps.vehicleControl.send(Command.FLASH_HORN) } }
-                Ctl(Icons.Filled.FlashOn, "Flash", modifier = Modifier.weight(1f)) { fire("Flash") { deps.vehicleControl.send(Command.FLASH) } }
-                Ctl(Icons.Filled.Luggage, if (trunkOpen) "Open" else "Trunk", tint = Brand.energy, active = trunkOpen, modifier = Modifier.weight(1f)) { showTrunk = true }
+                // Flash-only has NO BLE opcode, so it always goes via the cloud. (There is no honk-only
+                // action — the car only supports flash-only and flash+honk together.)
+                add { Ctl(Icons.Filled.Campaign, "Flash+Honk", modifier = Modifier.weight(1f)) { fire("Locate") { deps.vehicleControl.send(Command.FLASH_HORN) } } }
+                add { Ctl(Icons.Filled.FlashOn, "Flash", modifier = Modifier.weight(1f)) { fire("Flash") { deps.vehicleControl.send(Command.FLASH) } } }
+                add { Ctl(Icons.Filled.Luggage, if (trunkOpen) "Open" else "Trunk", tint = Brand.energy, active = trunkOpen, modifier = Modifier.weight(1f)) { showTrunk = true } }
+                if (caps.fridge) add { Ctl(Icons.Filled.Kitchen, "Fridge", tint = Brand.accent, active = fridgeOn, modifier = Modifier.weight(1f)) { showFridge = true } }
+                if (caps.frunk) add { Ctl(Icons.Filled.Inventory2, "Frunk", modifier = Modifier.weight(1f)) { fire("Frunk") { deps.vehicleControl.send(Command.FRONT_TRUNK) } } }
             }
-            // Frunk only when the car reports a powered hood (per-VIN); its own row so the grid stays 4-wide.
-            if (caps.frunk) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Ctl(Icons.Filled.Inventory2, "Frunk", modifier = Modifier.weight(1f)) { fire("Frunk") { deps.vehicleControl.send(Command.FRONT_TRUNK) } }
-                Spacer(Modifier.weight(1f)); Spacer(Modifier.weight(1f)); Spacer(Modifier.weight(1f))
+            tiles.chunked(4).forEach { rowTiles ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val pad = (4 - rowTiles.size) / 2f     // centre a short final row without stretching its tiles
+                    if (pad > 0f) Spacer(Modifier.weight(pad))
+                    rowTiles.forEach { tile -> tile() }
+                    if (pad > 0f) Spacer(Modifier.weight(pad))
+                }
             }
         }
 
@@ -281,6 +295,31 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
                 }
             }
         }
+
+        // Vehicle stats - odometer, next scheduled service (distance + time), and the 12 V auxiliary
+        // battery. All from maintenanceStatus in the live status; shown only when the car reports them.
+        maint?.let { m ->
+            val odo = m.odometer?.let { Units.distance(it.toDouble(), cfg.distanceUnit) }
+            val svcKm = m.distanceToService?.let { Units.distance(it.toDouble(), cfg.distanceUnit) }
+            val svcTime = m.daysToService?.let { d -> if (d >= 60) "~${d / 30} mo" else "$d days" }
+            val lvBatt = m.lowVoltageBattery
+            val volts = lvBatt?.let { "%.1f V".format(it) }
+            if (odo != null || svcKm != null || svcTime != null || volts != null) {
+                SectionLabel("Vehicle")
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatItem("Odometer", odo ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+                    // 12 V rests ~12.4-12.8 V (higher while the DC-DC is charging it); warn under ~11.9 V,
+                    // where a weak/flat aux battery can leave the car unable to wake or start.
+                    StatItem("12V battery", volts ?: "—",
+                        if (lvBatt != null && lvBatt < 11.9) Brand.energy else Brand.good,
+                        Modifier.weight(1f))
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatItem("Service in", svcKm ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+                    StatItem("Service due", svcTime ?: "—", MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+                }
+            }
+        }
     }
 
     if (showCharge) ChargeSheet(status, soc, powerKw, charging, plugged, elec,
@@ -304,6 +343,12 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
         trunkOpen = trunkOpen,
         onCmd = { c, label -> showTrunk = false; fire(label) { deps.vehicleControl.send(c) } },
         onDismiss = { showTrunk = false })
+    if (showFridge) FridgeSheet(
+        isOn = fridgeOn, initialTemp = fridgeTemp,
+        onTempChange = { t -> fridgeTemp = t; writeFridgeTemp(ctx, t) },
+        onSetOn = { on -> fridgeOn = on },
+        onCmd = { c, extra -> fireQuiet("Fridge") { deps.control.send(c, extra) } },
+        onDismiss = { showFridge = false })
 }
 
 @Composable
@@ -380,7 +425,9 @@ private fun ChargeCtl(
                 modifier = Modifier.size(if (charging) 18.dp else 24.dp))
         }
         Text(
-            when { charging -> powerKw?.let { "${fmt1(it)} kW · 1-phase" } ?: "Charging"; plugged -> "Plugged in"; else -> "Charge port" },
+            // Idle label hints that the sheet holds ALL the charge settings (limit, scheduled charging,
+            // battery pre-conditioning, port open/close), which users missed under the bare "Charge port".
+            when { charging -> powerKw?.let { "${fmt1(it)} kW · 1-phase" } ?: "Charging"; plugged -> "Plugged in"; else -> "Charge & more" },
             // Match the lightning-bolt colour while charging (energy amber); muted otherwise.
             color = if (charging) Brand.energy else Brand.muted, fontSize = 11.sp, textAlign = TextAlign.Center,
         )
@@ -517,7 +564,8 @@ private fun WindowsSheet(
                 }
             }
             if (sunshade) {
-                Text("Sunshade", color = Brand.muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                // Stock's English label for the sunshade (res sunshade_name) is "Sun-shield".
+                Text("Sun-shield", color = Brand.muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     GhostButton("Open", Modifier.weight(1f)) { onCmd(Command.SUNSHADE_OPEN, "Sunshade open") }
                     GhostButton("Close", Modifier.weight(1f), tint = Brand.good) { onCmd(Command.SUNSHADE_CLOSE, "Sunshade close") }
@@ -659,6 +707,69 @@ private fun ClimateSheet(
                 CabinActionButton(Icons.Filled.PowerSettingsNew, "Climate", acOn, Brand.good) {
                     if (acOn) onCmd(Command.CLIMATE_ZAF, listOf(ServiceParameter("AC", "false")))
                     else onCmd(Command.CLIMATE_ZAF, acOnParams())
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FridgeSheet(
+    isOn: Boolean,
+    initialTemp: Double,
+    onTempChange: (Double) -> Unit,
+    onSetOn: (Boolean) -> Unit,
+    onCmd: (Command, List<ServiceParameter>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var temp by remember { mutableStateOf(initialTemp) }
+    var on by remember { mutableStateOf(isOn) }
+    var constTemp by remember { mutableStateOf(true) }   // zae.model: constant-temperature (thermostat) hold
+    // Full ZAE ON param set; zae.temp is dot-decimal (Locale.US) or the car rejects a comma.
+    fun onParams() = listOf(
+        ServiceParameter("operation", "1"),
+        ServiceParameter("zae.model", if (constTemp) "1" else "0"),
+        ServiceParameter("zae.temp", String.format(java.util.Locale.US, "%.1f", temp)),
+    )
+    // Debounce: −/+ update the readout instantly, but send ONE ZAE command ~600 ms after the last change,
+    // and only while the fridge is ON (changing the setpoint while off just stores it for next power-on).
+    var dirty by remember { mutableStateOf(false) }
+    LaunchedEffect(temp, constTemp) {
+        onTempChange(temp)
+        if (!dirty || !on) return@LaunchedEffect
+        delay(600)
+        onCmd(Command.FRIDGE_ON, onParams())
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 22.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Refrigerator", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp))
+                    .background(Brush.verticalGradient(listOf(Color(0xFF141A1E), Color(0xFF0C1013)))).padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(Icons.Filled.Kitchen, null, tint = if (on) Brand.accent else Brand.faint, modifier = Modifier.size(30.dp))
+                Text("${temp.toInt()}°C", fontSize = 34.sp, fontWeight = FontWeight.Bold)
+                Text(if (on) (if (constTemp) "Holding target" else "Running") else "Off", color = Brand.muted, fontSize = 12.sp)
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Set the temperature (−6 to 50 °C)", color = Brand.muted, fontSize = 12.sp)
+                    Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        StepBtn("−") { if (temp > -6.0) { temp -= 1.0; dirty = true } }
+                        Text("${temp.toInt()}°C", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        StepBtn("+") { if (temp < 50.0) { temp += 1.0; dirty = true } }
+                    }
+                }
+                CabinActionButton(Icons.Filled.AcUnit, "Const. temp", constTemp, Brand.accent) {
+                    constTemp = !constTemp; if (on) dirty = true   // re-sends via the LaunchedEffect (constTemp is a key)
+                }
+                Spacer(Modifier.width(12.dp))
+                CabinActionButton(Icons.Filled.PowerSettingsNew, "Fridge", on, Brand.good) {
+                    on = !on; onSetOn(on)
+                    if (on) { dirty = true; onCmd(Command.FRIDGE_ON, onParams()) } else onCmd(Command.FRIDGE_OFF, emptyList())
                 }
             }
         }
@@ -889,5 +1000,19 @@ private fun writeTargetTemp(ctx: android.content.Context, t: Double) {
     runCatching {
         ctx.getSharedPreferences(CLIMATE_PREFS, android.content.Context.MODE_PRIVATE)
             .edit().putFloat(KEY_TARGET_TEMP, t.toFloat()).apply()
+    }
+}
+
+// Remembered fridge (ZAE) target temperature (°C). Like the A/C setpoint, the car doesn't report it,
+// so keep the last value. Default 5.0 (a normal fridge temp; the box also heats above the setpoint).
+private const val KEY_FRIDGE_TEMP = "fridge_temp_c"
+private fun readFridgeTemp(ctx: android.content.Context): Double = runCatching {
+    ctx.getSharedPreferences(CLIMATE_PREFS, android.content.Context.MODE_PRIVATE)
+        .getFloat(KEY_FRIDGE_TEMP, 5f).toDouble()
+}.getOrDefault(5.0)
+private fun writeFridgeTemp(ctx: android.content.Context, t: Double) {
+    runCatching {
+        ctx.getSharedPreferences(CLIMATE_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_FRIDGE_TEMP, t.toFloat()).apply()
     }
 }

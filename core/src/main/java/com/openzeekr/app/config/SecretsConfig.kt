@@ -25,6 +25,15 @@ import kotlinx.serialization.Serializable
  *     - prodSecret          -> the X-SIGNATURE signing secret (getSignSecret)
  *     - vinKey / vinIv      -> AES key/iv used to encrypt the VIN header
  */
+/** One vehicle on the account, for the multi-car switcher. [name] is the display label (server
+ *  nickname or model); [vin] keys the cloud calls when this car is active. */
+@Serializable
+data class VehicleRef(
+    val vin: String,
+    val name: String = "",
+    val isOwner: Boolean = false,
+)
+
 @SuppressLint("UnsafeOptInUsageError")
 @Serializable
 data class SecretsConfig(
@@ -54,7 +63,14 @@ data class SecretsConfig(
     // ---- account / vehicle ----
     val email: String = "",
     val password: String = "",
+    /** The ACTIVE vehicle's VIN. Every cloud call keys off this; the multi-car switcher just repoints
+     *  it (via [ConfigStore.setActiveVehicle]) to another entry in [vehicles], so all remote-control,
+     *  status and inbox calls follow the selected car. (The BLE digital key stays tied to whichever
+     *  car it was provisioned for - switching cars here does not move the key.) */
     val vin: String = "",
+    /** All vehicles on the account (from the login vehicle-list), for the car switcher. The [vin] above
+     *  is whichever of these is active. Empty on a single-car account (still works - [vin] is set). */
+    val vehicles: List<VehicleRef> = emptyList(),
     /** Whether this account owns the active vehicle (vehicle-list `isOwner`). Drives the
      *  provisioning path automatically: owner → create-owner-blu-key, shared → key-list. */
     val isOwner: Boolean = false,
@@ -323,7 +339,7 @@ data class SecretsConfig(
             overseasAccessKey = NativeSecrets.overseasAccessKey(),
             overseasSecretKey = NativeSecrets.overseasSecretKey(),
             inboxAuthSecret = NativeSecrets.inboxAuthSecret(),
-            // NOTE: email / password / vin / userId are intentionally NOT baked
+            // NOTE: email / password / vin / userId are intentionally NOT baked    
             // in (see build.gradle.kts). They start blank and are entered on the
             // Settings screen, then persisted only in encrypted on-device prefs.
         )

@@ -24,10 +24,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.Settings
@@ -163,6 +166,7 @@ fun AppRoot(deps: Deps) {
     val carName = cfg.carNickname.ifBlank { "My Zeekr" }
     var renaming by remember { mutableStateOf(false) }
     var draftName by remember { mutableStateOf("") }
+    var showCarMenu by remember { mutableStateOf(false) }   // multi-car switcher dropdown
 
     // Message center (charging done, abnormal parking, alarms, OTA, …) — a bell in the
     // top bar with an unread badge; opening it takes over the screen.
@@ -174,9 +178,20 @@ fun AppRoot(deps: Deps) {
                 is com.openzeekr.app.remote.CallResult.Ok -> unread = r.value
                 is com.openzeekr.app.remote.CallResult.Err -> {}
             }
+            deps.refreshInvites()   // cheap piggyback: catch an invite that arrived after login
         }
     }
     LaunchedEffect(loggedIn) { refreshUnread() }
+
+    // Car-share invitations addressed to us (a car someone shared) — surfaced as a dialog so the
+    // user can accept/decline in-app instead of opening the stock app. Held in Deps as a shared flow
+    // so both the auto-check here AND the manual "Check for shared cars" button in Settings drive the
+    // same dialog. Re-checked on login, when the app returns to the foreground, and after acting on one.
+    val invites by deps.pendingInvites.collectAsState()
+    var inviteBusy by remember { mutableStateOf(false) }
+    // Re-check on login and whenever the inbox unread is refreshed (which happens on the vehicle
+    // screen and after closing the inbox), so an invite that arrives after login still surfaces.
+    LaunchedEffect(loggedIn) { deps.refreshInvites() }
 
     if (showInbox) {
         InboxScreen(deps, onBack = { showInbox = false; refreshUnread() }, snackbar = snackbar)
@@ -203,9 +218,39 @@ fun AppRoot(deps: Deps) {
             ) {
                 BrandBadge(size = 36)
                 Spacer(Modifier.width(11.dp))
+                val multiCar = cfg.vehicles.size > 1
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(carName, fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // Car name — a tappable dropdown when the account has more than one car.
+                        Box {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                modifier = if (multiCar) Modifier.clickable { showCarMenu = true } else Modifier,
+                            ) {
+                                Text(carName, fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (multiCar) Icon(Icons.Filled.ArrowDropDown, "Switch car", tint = Brand.accent, modifier = Modifier.size(22.dp))
+                            }
+                            DropdownMenu(expanded = showCarMenu, onDismissRequest = { showCarMenu = false }) {
+                                cfg.vehicles.forEach { v ->
+                                    val active = v.vin == cfg.vin
+                                    val label = v.name.ifBlank { "VIN ••••${v.vin.takeLast(4)}" }
+                                    DropdownMenuItem(
+                                        text = { Text((if (active) "✓  " else "     ") + label, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal) },
+                                        onClick = {
+                                            showCarMenu = false
+                                            if (!active) {
+                                                deps.config.setActiveVehicle(v.vin)
+                                                // Reload status + capabilities for the newly-active car.
+                                                deps.vehicleState.refreshAfterCommand()
+                                                deps.capabilities.reload()
+                                                snackbar("Switched to $label")
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
                         Icon(Icons.Filled.Edit, "Rename car", tint = Brand.faint,
                             modifier = Modifier.size(15.dp).clickable { draftName = carName; renaming = true })
                     }
@@ -324,12 +369,66 @@ fun AppRoot(deps: Deps) {
             confirmButton = {
                 TextButton(onClick = {
                     val n = draftName.trim()
-                    deps.config.update { it.copy(carNickname = n) }
+                    // Rename the active car; also update its entry in the multi-car list so the name sticks per-car.
+                    deps.config.update { c ->
+                        c.copy(
+                            carNickname = n,
+                            vehicles = c.vehicles.map { if (it.vin == c.vin) it.copy(name = n) else it },
+                        )
+                    }
                     if (n.isNotBlank()) deps.appScope.launch { runCatching { deps.control.renameVehicle(n) } }
                     renaming = false
                 }) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+        )
+    }
+
+    // Pending car-share invitation — accept/decline the first one; the rest surface in turn.
+    invites.firstOrNull()?.let { invite ->
+        val respond: (Boolean) -> Unit = { accept ->
+            inviteBusy = true
+            deps.appScope.launch {
+                when (val r = deps.share.respond(invite, accept)) {
+                    is com.openzeekr.app.remote.CallResult.Ok -> {
+                        snackbar(if (accept) "Car added to your garage" else "Invitation declined")
+                        deps.pendingInvites.value = deps.pendingInvites.value.drop(1)
+                        if (accept) { deps.vehicleState.refresh(); deps.capabilities.reload() }
+                        deps.refreshInvites()
+                    }
+                    is com.openzeekr.app.remote.CallResult.Err -> snackbar("Couldn't respond: ${r.message}")
+                }
+                inviteBusy = false
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { if (!inviteBusy) deps.pendingInvites.value = deps.pendingInvites.value.drop(1) },   // dismiss = decide later
+            title = { Text("Car shared with you") },
+            text = {
+                Column {
+                    Text(
+                        buildString {
+                            append(invite.model ?: "A Zeekr")
+                            invite.vin?.let { append(" · VIN …").append(it.takeLast(4)) }
+                        },
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    invite.ownerName?.let { Text("Shared by $it", fontSize = 13.sp, color = Brand.muted) }
+                    invite.functionNames?.takeIf { it.isNotBlank() }
+                        ?.let { Text("Access: $it", fontSize = 13.sp, color = Brand.muted) }
+                    invite.endTime?.let {
+                        Text("Until ${formatShareDate(it)}", fontSize = 13.sp, color = Brand.muted)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Accepting adds it to your garage so you can see status and control it. " +
+                            "The offline Bluetooth key is set up separately from the Key tab.",
+                        fontSize = 12.sp, color = Brand.muted,
+                    )
+                }
+            },
+            confirmButton = { TextButton(enabled = !inviteBusy, onClick = { respond(true) }) { Text("Accept") } },
+            dismissButton = { TextButton(enabled = !inviteBusy, onClick = { respond(false) }) { Text("Decline") } },
         )
     }
 
@@ -368,6 +467,12 @@ fun AppRoot(deps: Deps) {
 
 // Revolut tip link shown in the one-time support note. Replace with the real revolut.me handle.
 private const val REVOLUT_URL = "https://revolut.me/REPLACE_ME"
+
+/** Share end/expiry epoch (ms, or seconds) -> short local date. Tolerates seconds-precision values. */
+private fun formatShareDate(epoch: Long): String {
+    val ms = if (epoch < 100_000_000_000L) epoch * 1000 else epoch   // treat 10-digit values as seconds
+    return java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(ms))
+}
 
 /** Prompt shown once per new release when a newer GitHub build than [installed] is available. */
 @Composable

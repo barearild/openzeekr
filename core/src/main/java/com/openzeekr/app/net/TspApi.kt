@@ -129,6 +129,21 @@ interface TspApi {
     @POST("ms-tsp-user-vehicle/api/v1/veh/owner/relation/modify-vehicle")
     suspend fun modifyVehicle(@Body body: ModifyVehicleRequest): BaseResponse<JsonObject>
 
+    // ---- car-share invitations (accept a car shared with us) ----
+    // acceptlist = shares addressed to this user; accept = accept/decline one. status/vehAccountId/
+    // startTime/endTime are optional filters we omit (we filter to pending client-side by acceptTime).
+    @GET("ms-tsp-user-vehicle/api/v2/veh/authorize/acceptlist")
+    suspend fun shareAcceptList(
+        @Query("userId") userId: String,
+        @Query("current") current: Int = 1,
+        @Query("pageSize") pageSize: Int = 50,
+    ): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    @POST("ms-tsp-user-vehicle/api/v2/veh/authorize/accept")
+    suspend fun shareAccept(
+        @Body body: com.openzeekr.app.net.model.ShareAcceptRequest,
+    ): BaseResponse<kotlinx.serialization.json.JsonElement>
+
     // ---- member inbox / message center ----
     // NOT on the TSP gateway — the inbox lives on the Geely overseas app-BFF host
     // (overseas-app.lynkco.com), so these take an absolute @Url (built by InboxRepository).

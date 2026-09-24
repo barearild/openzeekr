@@ -72,8 +72,14 @@ enum class Command(
     CLIMATE_ZAF("Climate", Category.CLIMATE, "ZAF", "start"),
     FRAGRANCE_ON("Fragrance On", Category.COMFORT, "RFD", "start"),
     FRAGRANCE_OFF("Fragrance Off", Category.COMFORT, "RFD", "stop", listOf(ServiceParameter("channel_id", "0"), ServiceParameter("level", "0"))),
-    FRIDGE_ON("Fridge On", Category.COMFORT, "ZAE", "start"),
-    FRIDGE_OFF("Fridge Off", Category.COMFORT, "ZAE", "stop"),
+    // ---- fridge / refrigerator ---- (serviceId ZAE, from Frideg{On,Off}CommandCreator in stock smali).
+    // A cool+heat console box. ON carries operation=1, a constant-temp mode flag (zae.model 1/0) and a
+    // target temp (zae.temp — a FLOAT string like "5.0"; whole-degree range ~ -6.0..50.0, dynamic per
+    // vehicle). OFF is just operation=0. zae.temp is overridable from the UI via extraParams (dedup keeps
+    // the last value, exactly like AC.temp). Gated by VehicleCapabilities.fridge.
+    FRIDGE_ON("Fridge On", Category.COMFORT, "ZAE", "start",
+        listOf(ServiceParameter("operation", "1"), ServiceParameter("zae.model", "1"), ServiceParameter("zae.temp", "5.0"))),
+    FRIDGE_OFF("Fridge Off", Category.COMFORT, "ZAE", "stop", listOf(ServiceParameter("operation", "0"))),
 
     // ---- engine / RES ---- (engStrtType=1 as a param; duration via operationScheduling=60s)
     ENGINE_START("Remote Start", Category.CLIMATE, "RES", "start", engStrtType = "1", durationSec = 60),

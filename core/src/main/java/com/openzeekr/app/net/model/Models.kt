@@ -315,24 +315,52 @@ data class VehicleInfo(
     val vehicleId: String?,
     /** Whether the logged-in account owns this car (drives the provisioning path). */
     val isOwner: Boolean = false,
+    /** The car's VIN (needed for multi-car: the active VIN keys every cloud call). */
+    val vin: String? = null,
 )
 
 /** Tolerant parse of the (shape-varying) vehicle-list `data`. */
 object VehicleGarage {
-    fun parse(data: JsonElement?): VehicleInfo? {
-        val v = firstVehicle(data) ?: return null
+    fun parse(data: JsonElement?): VehicleInfo? = firstVehicle(data)?.let { parseOne(it) }
+
+    /** Parse EVERY vehicle in the (shape-varying) list — for the multi-car switcher. */
+    fun parseAll(data: JsonElement?): List<VehicleInfo> =
+        allVehicles(data).mapNotNull { parseOne(it) }.filter { !it.vin.isNullOrBlank() }
+
+    private fun parseOne(v: JsonObject): VehicleInfo {
         fun s(k: String) = (v[k] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
         val ownerFlag = (v["isOwner"] as? JsonPrimitive)?.contentOrNull?.let {
             it.equals("true", ignoreCase = true) || it == "1"
         } ?: false
         return VehicleInfo(
-            model = s("modelName") ?: s("seriesName") ?: s("innerCode") ?: s("seriesCode"),
-            colorName = s("colorName") ?: materialColor(v),
+            // v4.0 vehicle-list carries the model as appModelCode ("CC1E"=7GT) / appInnerCode
+            // ("CX1E..."=7X), NOT modelName/seriesName - reading only the latter left model=null so
+            // CarCatalog fell back to the 7GT render for EVERY car. Prefer the real fields, keep the
+            // older names as fallbacks for other endpoints' shapes.
+            model = s("modelName") ?: s("seriesName") ?: s("appModelCode") ?: s("appInnerCode")
+                ?: s("innerCode") ?: s("seriesCode"),
+            colorName = s("colorName") ?: s("appColorCode") ?: s("colorCode") ?: materialColor(v),
             nickName = s("nickName") ?: s("vehicleNickname") ?: s("vehNickname") ?: s("remark"),
             photoUrl = s("vehiclePhotoBig") ?: s("vehicleListImgUrl") ?: s("vehiclePhotoSmall"),
             vehicleId = s("id") ?: s("vehicleId") ?: s("relationId"),
             isOwner = ownerFlag,
+            vin = s("vin"),
         )
+    }
+
+    /** All vehicle objects from the (shape-varying) data — array, {list|records|vehicleList}, or single. */
+    private fun allVehicles(data: JsonElement?): List<JsonObject> {
+        when (data) {
+            is JsonArray -> return data.mapNotNull { it as? JsonObject }
+            is JsonObject -> {
+                (data["list"] as? JsonArray ?: data["records"] as? JsonArray
+                    ?: data["vehicleList"] as? JsonArray)?.let { arr -> return arr.mapNotNull { it as? JsonObject } }
+                if (data.containsKey("vin") || data.containsKey("modelName") || data.containsKey("seriesName")) return listOf(data)
+                data.values.forEach { if (it is JsonArray) return it.mapNotNull { o -> o as? JsonObject } }
+            }
+            else -> {}
+        }
+        return emptyList()
     }
 
     private fun firstVehicle(data: JsonElement?): JsonObject? {
@@ -353,6 +381,82 @@ object VehicleGarage {
         val mats = v["vehicleMaterials"] as? JsonArray ?: return null
         return mats.mapNotNull { ((it as? JsonObject)?.get("materialName") as? JsonPrimitive)?.contentOrNull }
             .firstOrNull { it.isNotBlank() }
+    }
+}
+
+// -------------------------------------------------------------- car-share invitations
+// Accept a car another owner shared with us, without the stock app.
+//   GET  ms-tsp-user-vehicle/api/v2/veh/authorize/acceptlist  (userId,current,pageSize) -> GetAcceptListResultBean{ data:[ShareVehicleResultBean] }
+//   POST ms-tsp-user-vehicle/api/v2/veh/authorize/accept       body VehicleShareAcceptRequestBean
+// A ShareVehicleResultBean carries id(=shareId), vin, modelName/modelCode, owner*, status,
+// startTime/endTime/expireTime, acceptTime, functionNames. We treat an invite as PENDING when
+// acceptTime is null and it hasn't expired (avoids reversing the numeric status enum).
+
+/** One pending car-share invitation, flattened for the UI. */
+data class ShareInvite(
+    val shareId: String,
+    val vin: String?,
+    val model: String?,
+    val ownerName: String?,
+    val ownerContact: String?,
+    val functionNames: String?,
+    val startTime: Long?,
+    val endTime: Long?,
+    val expireTime: Long?,
+    val acceptTime: Long?,
+) {
+    /**
+     * Not yet accepted and not past its expiry -> actionable. The server sends these times in epoch
+     * SECONDS (e.g. expireTime=1790351437), so normalise to millis before comparing - a raw seconds
+     * value is ~1000x smaller than System.currentTimeMillis() and would always look "expired".
+     */
+    fun isPending(nowMs: Long = System.currentTimeMillis()): Boolean {
+        fun ms(t: Long?) = t?.let { if (it < 100_000_000_000L) it * 1000 else it }
+        val exp = ms(expireTime); val end = ms(endTime)
+        return acceptTime == null && (exp == null || exp > nowMs) && (end == null || end > nowMs)
+    }
+}
+
+/** Body for POST …/authorize/accept. shareDigtalkeyReq/realPickup* are omitted (cloud-only accept). */
+@Serializable
+data class ShareAcceptRequest(
+    val shareId: String,
+    val toUserId: String,
+    val isAccept: Boolean,
+)
+
+object ShareInviteParse {
+    /** Tolerant parse of GetAcceptListResultBean (data list of ShareVehicleResultBean). */
+    fun parse(data: JsonElement?): List<ShareInvite> {
+        val arr = when (data) {
+            is JsonArray -> data
+            is JsonObject -> (data["data"] as? JsonArray ?: data["list"] as? JsonArray
+                ?: data["records"] as? JsonArray ?: data.values.firstOrNull { it is JsonArray } as? JsonArray)
+            else -> null
+        } ?: return emptyList()
+        return arr.mapNotNull { it as? JsonObject }.mapNotNull { o ->
+            fun s(k: String) = (o[k] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+            fun l(k: String) = (o[k] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+            val id = s("id") ?: s("shareId") ?: return@mapNotNull null
+            // functionNames is often blank; the `function` array carries the granted scopes
+            // (digital-key, remote-control, view-vehicle-location, view-vehicle-album) - use it as the
+            // human-readable access list, prettified (hyphens -> spaces).
+            val funcList = (o["function"] as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.replace('-', ' ') }
+                ?.filter { it.isNotBlank() }?.joinToString(", ")?.takeIf { it.isNotBlank() }
+            ShareInvite(
+                shareId = id,
+                vin = s("vin"),
+                model = s("modelName") ?: s("vehicleName") ?: s("modelCode"),
+                ownerName = s("ownerName"),
+                ownerContact = s("ownerEmail") ?: s("ownerPhone"),
+                functionNames = s("functionNames") ?: funcList,
+                startTime = l("startTime"),
+                endTime = l("endTime"),
+                expireTime = l("expireTime"),
+                acceptTime = l("acceptTime"),
+            )
+        }
     }
 }
 
@@ -737,13 +841,22 @@ data class VehicleCapabilities(
     // sunshade ONLY when functionCode "remote_control_curtain_2" is present (sswitch_10). A car
     // without the key omits it entirely, so a fail-open has() would wrongly show it on cars that
     // lack the hardware.
-    val sunroof get() = has("C_RWS_4")
+    // Sunroof: stock's ModelTransformKt sets sunroofSupported from EITHER functionCode
+    // "C_RWS_4" (older cars) OR "remote_control_skylight_2" (newer, e.g. the 7X - presence-only).
+    // openzeekr only checked C_RWS_4, so the 7X's sunroof control was hidden. Match both.
+    val sunroof get() = has("C_RWS_4", "remote_control_skylight_2")
     val windows get() = has("remote_control_window")
     val sunshade get() = sunshadeConfirmed
     val engineRes get() = has("C_RES")
     val rpa get() = has("RPA")
     val sentry get() = has("sentry")
-    val fridge get() = has("refrigerator", "fridge")
+    // Fridge REMOTE CONTROL only: stock gates on functionCode "ZK_remote_fridge_control"
+    // (-> ZKRemoteFridgeControlSupported) and "ZK_remote_fridge_control_Advancer" + paramCode
+    // "refrigerator" (-> refrigeratorSupported). Do NOT match plain "fridge": the message_box
+    // codes ZK_fridge_fault_alarm / ZK_fridge_items_left_warning mean the car HAS a fridge (sends
+    // alarms) but say nothing about remote control - matching them showed a dead fridge tile on a
+    // 7X that only reports those alarms (2026-09-24).
+    val fridge get() = has("ZK_remote_fridge_control", "refrigerator")
     val fragrance get() = has("fragrance")
     val climate get() = has("climate")
     val seatHeat get() = has("seat_heating")
@@ -1033,6 +1146,12 @@ data class MaintenanceStatusVo(
     val tyreStatusDriverRear: String? = null,
     val tyreStatusPassenger: String? = null,
     val tyreStatusPassengerRear: String? = null,
+    /** Kilometres until the next scheduled service (maintenanceStatus.distanceToService). */
+    val distanceToService: Int? = null,
+    /** Days until the next scheduled service (maintenanceStatus.daysToService). */
+    val daysToService: Int? = null,
+    /** 12 V auxiliary (low-voltage) battery, in volts (maintenanceStatus.mainBatteryStatus.voltage). */
+    val lowVoltageBattery: Double? = null,
 )
 
 @Serializable
@@ -1147,6 +1266,9 @@ object VehicleStatus {
                             tyreStatusDriverRear = m.str("tyreStatusDriverRear"),
                             tyreStatusPassenger = m.str("tyreStatusPassenger"),
                             tyreStatusPassengerRear = m.str("tyreStatusPassengerRear"),
+                            distanceToService = m.intOf("distanceToService"),
+                            daysToService = m.intOf("daysToService"),
+                            lowVoltageBattery = m.obj("mainBatteryStatus")?.dblOf("voltage"),
                         )
                     },
                     runningStatus = a.obj("runningStatus")?.let { r ->

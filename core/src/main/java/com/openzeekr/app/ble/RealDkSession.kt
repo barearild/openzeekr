@@ -74,15 +74,6 @@ class RealDkSession(
     // How long [control] waits for the optional 0x0112 result after the 0x0111 receipt ack.
     private val RESULT_WINDOW_MS = 600L
 
-    /**
-     * calibrationType(1) sent in the 0x0101 confirm. Stock sends 0x01 on every connect (it is the
-     * PERSISTED getCalibrationMode(vin), set when the 4-step smart-calibration is chosen) - it tells the
-     * car to expect the 4-position walk and finalize into a 0x0194 table. Default 1 so self-calibration
-     * finalizes (with 0, the car accepts positions 1-3 but returns errCode 8 at position 4, no table).
-     * Verified against stock's decrypted confirm (frida_confirm_dump.js, 2026-09-23). Tunable for probing.
-     */
-    @Volatile var calibrationType: Byte = 1
-
     // DEBUG: when set (during [probeControl]), every decrypted inbound frame is also handed here so
     // the probe can log exactly what the car sends back (opcode + body). Null in normal operation.
     @Volatile private var probeSink: ((Int, ByteArray) -> Unit)? = null
@@ -238,15 +229,11 @@ class RealDkSession(
             exchange(DkProtocol.CMD_A2V_SEND_DKEY, cred.digitalKey, DkProtocol.CMD_V2A_DK_VERIFY_STATUS)
         }.onFailure { Logx.w("dk", "SEND_DKEY: ${it.message}") }
 
-        // 4.5) PAIRING_REQ (0x0137) — stock sends this on EVERY connect, right after the digital-key
-        //   verify and before the coef upload. It registers/pairs this device with the car. openzeekr
-        //   never sent it: lock/unlock work without it, but the car will not FINALIZE a self-calibration
-        //   for an unpaired device (positions 1-3 record, position 4 returns errCode 8, no 0x0194 table).
-        //   The pairData plaintext normally comes from a stored file (native getPairDataJNI); a fresh
-        //   device with no file uses stock's own fallback: pairData = [0x7a] + 22 zeros (the
-        //   "request new pairing" marker), plus CRC-16/ARC (verified: CRC of stock's real pairData = its
-        //   on-wire crc). GCM on channel 1, INST_CON; fire-and-forget (car ACKs with 0xFFFE, no 0x0138).
-        runCatching { pairingReq() }.onFailure { Logx.w("dk", "pairingReq (0x0137): ${it.message}") }
+        // NOTE: openzeekr does NOT send 0x0137 PAIRING_REQ. An experimental attempt (0.1.6) to send it
+        //   on every connect with a FABRICATED "request new pairing" pairData CORRUPTED the car's stored
+        //   pairing for the device - breaking entry/start and poisoning re-provision. The real pairData
+        //   is native-derived (getPairDataJNI) and cannot be faked. Removed. Stock's 0x0137 is unrelated
+        //   to whether the car will complete a normal DK session (lock/unlock/start work without it).
 
         // 5) coef upload on channel 2 (plaintext) — optional (RPA/approach only)
         Logx.d("dk", "handshake 5/5 coef upload …")
@@ -302,14 +289,10 @@ class RealDkSession(
             cred.phoneType3 +          // phoneType(3) = mobileCode bytes (stock p0/n)
             cred.bigCalibHash4 +       // bigCalibrationDataHash(4) = SHA256(coefBigParam)[0:4]
             cred.smallCalibHash4 +     // smallCalibrationDataHash(4) = SHA256(coefSmallParam)[0:4]
-            ByteArray(4) +             // selfCalibrationDataHash(4) = 0 — correct for us: our key has NO table
-                                       //   on the car yet (stock sends its existing table's hash, e.g. ca85b1e4).
-            byteArrayOf(calibrationType)) // calibrationType(1): stock sends 0x01 (getCalibrationMode(vin)=1, a
-                                       //   PERSISTED mode set when the 4-step smart-calibration is chosen). It
-                                       //   tells the car to expect the 4-position walk and FINALIZE. We were
-                                       //   sending 0 ("no mode") -> car accepted positions 1-3 but never entered
-                                       //   the finalize state at position 4 -> errCode 8, no 0x0194 table. Verified
-                                       //   by decrypting stock's 0x0101 confirm (frida_confirm_dump.js, 2026-09-23).
+            ByteArray(4) +             // selfCalibrationDataHash(4) — no <vin>_SELF_CALIBRATION_HASH file on first pair
+            byteArrayOf(0))            // calibrationType(1) = getCalibrationMode(vin) default 0. (An experimental
+                                       //   0x01 in 0.1.6 fired on every connect; reverted to 0 with the 0x0137
+                                       //   change to return the handshake to the known-good 0.1.5 behavior.)
     }
 
     private fun deriveSession(vfBody: ByteArray, carCert: X509Certificate) {
@@ -562,24 +545,6 @@ class RealDkSession(
         return ok
     }
 
-    /**
-     * 0x0137 PAIRING_REQ - registers/pairs this device with the car so it will FINALIZE self-calibration
-     * (positions 1-3 record without it, but position 4 returns errCode 8 and no 0x0194 table). Stock
-     * sends this on every connect, right after the digital-key verify. The pairData plaintext normally
-     * comes from a stored file (native getPairDataJNI); a fresh device with no file uses stock's own
-     * no-file fallback (p0/y): pairData = new byte[23] with [0]=0x7a (the "request new pairing" marker),
-     * rest zero, plus CRC-16/ARC(pairData) big-endian. Sent GCM on channel 1, INST_CON; the car ACKs
-     * with a 0xFFFE transport ack (no application 0x0138), so this is fire-and-forget.
-     */
-    private suspend fun pairingReq(): Boolean {
-        if (!cryptoReady) return false
-        val pairData = ByteArray(23).also { it[0] = 0x7a }       // no-file fallback (stock p0/y :cond_1)
-        val crc = DkCrypto.crc16(pairData)
-        val tail = pairData + byteArrayOf(((crc ushr 8) and 0xFF).toByte(), (crc and 0xFF).toByte())
-        val ok = send(DkProtocol.CMD_A2V_PAIRING_REQ, tail)
-        Logx.d("dk", "handshake 4.5/5 pairingReq 0x0137 pairData=${hexOf(pairData)} crc=%04x write=$ok".format(crc))
-        return ok
-    }
 
     /** errCode = body[6] (1 byte) for the calibration rsp frames, or -1 if the body is too short. */
     private fun errByteAt6(body: ByteArray): Int = if (body.size >= 7) body[6].toInt() and 0xFF else -1
@@ -615,7 +580,6 @@ class RealDkSession(
     private fun instTypeFor(cmdId: Int): Int = when {
         DkProtocol.needsCmac(cmdId) -> DkProtocol.INST_CON
         cmdId == DkProtocol.CMD_A2V_CALIBRATION_LOC_SEND -> DkProtocol.INST_CON
-        cmdId == DkProtocol.CMD_A2V_PAIRING_REQ -> DkProtocol.INST_CON   // stock sends 0x0137 as CON (wire: 013703)
         else -> DkProtocol.INST_REQ
     }
 

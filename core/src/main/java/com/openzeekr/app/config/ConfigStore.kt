@@ -83,9 +83,49 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
     fun signOut() = update {
         it.copy(
             email = "", password = "", accessToken = "", userId = "", accountUuid = "",
-            vin = "", carNickname = "",
+            vin = "", carNickname = "", vehicles = emptyList(),
             deviceIdentifier = "", appInstanceId = "",
         )
+    }
+
+    /**
+     * Switch the ACTIVE car (multi-car). Repoints [SecretsConfig.vin]/isOwner/carNickname to the
+     * chosen entry in [SecretsConfig.vehicles], so every cloud call (status, remote-control, inbox)
+     * follows the selected car. No-op if the VIN isn't in the list. NOTE: this does NOT move the BLE
+     * digital key - that stays provisioned for whichever car it was set up on; switching here is for
+     * the cloud features. Callers should refresh vehicle status afterward.
+     */
+    fun setActiveVehicle(vin: String) = update { cur ->
+        val v = cur.vehicles.firstOrNull { it.vin == vin } ?: return@update cur
+        cur.copy(vin = v.vin, isOwner = v.isOwner, carNickname = v.name.ifBlank { cur.carNickname })
+    }
+
+    /**
+     * Reconcile the stored garage with the authoritative vehicle-list from the server. Adds newly
+     * shared cars, DROPS cars that are gone (e.g. a share that just ended), and preserves the user's
+     * per-car custom names. If the currently-active VIN is no longer on the account (its share ended
+     * while it was selected), the active car is repointed to the first surviving car so the top-bar
+     * name/VIN don't stay stuck on the removed car. No-op when [fresh] is empty (treat an empty/failed
+     * fetch as "unknown", never wipe the garage). Returns true if the active VIN changed.
+     */
+    fun reconcileGarage(fresh: List<VehicleRef>): Boolean {
+        if (fresh.isEmpty()) return false
+        val before = _config.value.vin
+        update { cur ->
+            // Keep custom names: for each server car, reuse the stored name if the user renamed it.
+            val merged = fresh.map { f ->
+                val prior = cur.vehicles.firstOrNull { it.vin == f.vin }
+                if (prior != null && prior.name.isNotBlank() && prior.name != f.name) f.copy(name = prior.name) else f
+            }
+            val active = merged.firstOrNull { it.vin == cur.vin } ?: merged.first()
+            cur.copy(
+                vehicles = merged,
+                vin = active.vin,
+                isOwner = active.isOwner,
+                carNickname = if (cur.vin == active.vin && cur.carNickname.isNotBlank()) cur.carNickname else active.name,
+            )
+        }
+        return _config.value.vin != before
     }
 
     /**

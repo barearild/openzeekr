@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.6** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+**Version 0.1.7** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -67,6 +67,28 @@ token of appreciation is genuinely welcome (never expected):
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
 
 ## Changelog
+
+### 0.1.7
+- **Critical fix - reverted a 0.1.6 change that could break your digital key.** 0.1.6 included an
+  experimental Bluetooth "pairing" step that was sent on every connection; it could corrupt the car's
+  stored pairing for your phone, so entry/start stopped working and re-provisioning failed. That step
+  is removed and the key handshake is back to the proven 0.1.5 behaviour. **If 0.1.6 broke your key:**
+  update to 0.1.7, remove the OpenZeekr digital key from the official Zeekr app (Digital keys → remove),
+  then re-provision in OpenZeekr. **Do not run 0.1.6.**
+- **Multiple cars on one account.** Switch between all your cars - owned and shared - from the car-name
+  dropdown at the top. The dashboard, status and controls follow the selected car, and each car can be
+  renamed. Fixes the hero card sometimes showing the wrong car's model/colour after switching.
+- **Accept a shared car without the official app.** When someone shares a car with you, OpenZeekr now
+  shows an Accept / Decline prompt (owner, model, access and expiry). There's also a "Check for shared
+  cars" button in Settings. When a share ends, the car drops out of the switcher automatically.
+- **Fridge / cool-box control** (on/off + target temperature) and **Sun-shield** (rear sunshade)
+  open/close, for cars that have them.
+- **New vehicle stats:** odometer, distance and time to the next service, and the 12 V battery voltage.
+- The charge tile is now **"Charge & more"** so it's clearer it opens all the charge settings (limit,
+  scheduled charging, battery pre-conditioning, port). The quick-action grid also lays out more cleanly
+  when a car doesn't have every control.
+- Includes the 0.1.6 improvements below (SEA/Australia login, sign-out/back-in fix, gzip response
+  handling, faster reconnect).
 
 ### 0.1.6
 - **Fixed: couldn't log back in after signing out.** Signing out cleared the saved VIN, but the app
