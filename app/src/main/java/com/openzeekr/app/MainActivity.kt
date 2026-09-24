@@ -18,4 +18,9 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onPause() {
+        super.onPause()
+        com.openzeekr.app.nfc.NfcTagWriter.stopListening(this)
+    }
 }

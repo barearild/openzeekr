@@ -104,9 +104,7 @@ class SendToCarActivity : Activity() {
 
         // 2) A Google Maps link — usually a SHORT maps.app.goo.gl with no coords in the text. Follow
         //    its redirects and scan the resolved URL(s)/body for the place coordinates.
-        candidates.firstOrNull {
-            it.startsWith("http") && ("goo.gl" in it || "google." in it || "maps." in it || "/maps" in it)
-        }?.let { link ->
+        candidates.firstOrNull { isTrustedMapsUrl(it) }?.let { link ->
             val expanded = expandUrl(link)
             Logx.d("sendToCar", "expanded ${link.take(90)} -> ${expanded.length} chars")
             coordsInText(expanded)?.let { (lat, lon) -> return Destination(lat, lon, label(candidates), "", "") }
@@ -170,13 +168,15 @@ class SendToCarActivity : Activity() {
     }
 
     /** Follow a (short) maps link's redirects and return the URL chain + a slice of the final body,
-     *  so [coordsInText] can find the place coordinates that the short link hides. */
+     *  so [coordsInText] can find the place coordinates that the short link hides. Strictly validates
+     *  domains on every hop to prevent SSRF / arbitrary outbound fetching. */
     private fun expandUrl(start: String): String {
+        if (!isTrustedMapsUrl(start)) return start
         val out = StringBuilder(start).append('\n')
         var url = start
         runCatching {
             var hop = 0
-            while (hop < 6) {
+            while (hop < 4) {
                 hop++
                 // SSRF guard: this activity is exported and expands a caller-supplied URL BEFORE the
                 // user confirms, so only follow http/https to PUBLIC hosts - never a private, loopback,
@@ -184,7 +184,7 @@ class SendToCarActivity : Activity() {
                 if (!isSafeHttpUrl(url)) { out.append("[blocked: non-public URL]\n"); break }
                 val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                     instanceFollowRedirects = false
-                    connectTimeout = 6000; readTimeout = 6000
+                    connectTimeout = 5000; readTimeout = 5000
                     requestMethod = "GET"
                     setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android)")
                 }
@@ -193,8 +193,13 @@ class SendToCarActivity : Activity() {
                 val loc = conn.getHeaderField("Location")
                 if (code in 300..399 && loc != null) {
                     out.append(loc).append('\n')
-                    url = if (loc.startsWith("http")) loc else java.net.URL(java.net.URL(url), loc).toString()
+                    val nextUrl = if (loc.startsWith("http")) loc else java.net.URL(java.net.URL(url), loc).toString()
                     conn.disconnect()
+                    if (!isTrustedMapsUrl(nextUrl)) {
+                        Logx.w("sendToCar", "expandUrl: redirect to untrusted target stopped ($nextUrl)")
+                        break
+                    }
+                    url = nextUrl
                 } else {
                     runCatching { conn.inputStream.bufferedReader().use { it.readText() } }
                         .getOrNull()?.let { out.append(it.take(40000)) }
@@ -222,7 +227,28 @@ class SendToCarActivity : Activity() {
             }
     }.getOrDefault(false)
 
-    private companion object {
+    companion object {
+        /** Validates whether a URL belongs strictly to a trusted Google Maps host. */
+        fun isTrustedMapsUrl(urlString: String): Boolean {
+            val uri = runCatching { java.net.URI(urlString) }.getOrNull()
+                ?: runCatching { Uri.parse(urlString)?.let { java.net.URI(it.toString()) } }.getOrNull()
+                ?: return false
+            val scheme = uri.scheme?.lowercase() ?: return false
+            if (scheme != "http" && scheme != "https") return false
+            val host = uri.host?.lowercase() ?: return false
+
+            // Reject loopback, intranet, and IPv4/IPv6 addresses
+            if (host == "localhost" || host.startsWith("127.") || host.startsWith("10.") ||
+                host.startsWith("192.168.") || host.contains(':') ||
+                host.matches(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$"))) return false
+
+            return host == "maps.app.goo.gl" ||
+                host == "goo.gl" ||
+                host == "maps.google.com" ||
+                host.endsWith(".google.com") ||
+                host.startsWith("maps.google.") ||
+                Regex("^(?:(?:www|maps)\\.)?google\\.[a-z]{2,4}(?:\\.[a-z]{2})?$").matches(host)
+        }
         // Ordered: the maps "data"/`@`/query markers point at the PLACE; the generic pair is a last
         // resort (≥2 decimals, so it ignores zoom levels / version-like numbers).
         private val coordPatterns = listOf(

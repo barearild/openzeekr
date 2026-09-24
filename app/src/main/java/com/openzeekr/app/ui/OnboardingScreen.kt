@@ -278,7 +278,7 @@ private fun LoginStep(deps: Deps) {
                     store.update { it.copy(email = email, password = password) }
                     scope.launch {
                         status = when (val r = deps.auth.login()) {
-                            is CallResult.Ok -> "Login ✓"
+                            is CallResult.Ok -> { password = ""; "Login ✓" }
                             is CallResult.Err -> "Login ✗ ${r.message}"
                         }
                         busy = false
