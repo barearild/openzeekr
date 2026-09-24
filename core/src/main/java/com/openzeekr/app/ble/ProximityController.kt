@@ -256,7 +256,7 @@ class ProximityController(
         // held so keepConnected's aggressive foreground reconnect can run before you reach the car.
         // Otherwise let go — the offloaded presence scan owns the wakelock from here (parked-still).
         farAsleep = false
-        _wakeLockNeeded.value = walkAwayArmed || motion.state.value == MotionMonitor.Motion.MOVING
+        _wakeLockNeeded.value = walkAwayArmed || lockJob?.isActive == true || motion.state.value == MotionMonitor.Motion.MOVING
         nextIntervalMs = MONITOR_MID_MS
     }
 
@@ -500,33 +500,46 @@ class ProximityController(
         // A pending unlock loop is now moot (we've decided you're leaving) — stop it fighting us.
         needToUnlock = false; unlockJob?.cancel(); unlockJob = null
         lockJob = scope.launch {
-            lastTriggerMs = System.currentTimeMillis()   // start the action cooldown
-            var confirmed = false
-            var attempt = 0
-            while (isActive && attempt < MAX_LOCK_ATTEMPTS) {
-                attempt++
-                if (ble.state.value != DkBleManager.State.SESSION_READY &&
-                    !awaitState(setOf(DkBleManager.State.SESSION_READY), LOCK_SESSION_WAIT_MS)) {
-                    // No live session this round — kick a reconnect to the known car and try the next attempt.
-                    if (!ble.reconnectLast()) runCatching { ble.connect(null) }
-                    continue
+            val wl = acquireSafetyWakelock()
+            try {
+                lastTriggerMs = System.currentTimeMillis()   // start the action cooldown
+                var confirmed = false
+                var attempt = 0
+                while (isActive && attempt < MAX_LOCK_ATTEMPTS) {
+                    attempt++
+                    if (ble.state.value != DkBleManager.State.SESSION_READY &&
+                        !awaitState(setOf(DkBleManager.State.SESSION_READY), LOCK_SESSION_WAIT_MS)) {
+                        // No live session this round — kick a reconnect to the known car and try the next attempt.
+                        if (!ble.reconnectLast()) runCatching { ble.connect(null) }
+                        continue
+                    }
+                    val r = runCatching { ble.session.control(DkProtocol.CTRL_LOCK, LOCK_ACK_TIMEOUT_MS) }
+                        .getOrDefault(ControlResult.WRITE_FAILED)
+                    Logx.d("prox", "$reason: BLE lock attempt #$attempt -> $r")
+                    if (r == ControlResult.CONFIRMED) { confirmed = true; break }
+                    resetLink()   // write-fail / no-response / reject → clear the wedge and retry
+                    delay(UNLOCK_RETRY_DELAY_MS)
                 }
-                val r = runCatching { ble.session.control(DkProtocol.CTRL_LOCK, LOCK_ACK_TIMEOUT_MS) }
-                    .getOrDefault(ControlResult.WRITE_FAILED)
-                Logx.d("prox", "$reason: BLE lock attempt #$attempt -> $r")
-                if (r == ControlResult.CONFIRMED) { confirmed = true; break }
-                resetLink()   // write-fail / no-response / reject → clear the wedge and retry
-                delay(UNLOCK_RETRY_DELAY_MS)
+                if (!confirmed) {
+                    Logx.w("prox", "$reason: BLE lock unconfirmed after $attempt attempts — falling back to CLOUD lock")
+                    val cloud = runCatching { cloudLock() }.getOrDefault(false)
+                    Logx.d("prox", "$reason: cloud lock -> ${if (cloud) "ok" else "FAILED"}")
+                    _state.value = _state.value.copy(lastAction = "$reason · ${if (cloud) "cloud-locked ✓" else "LOCK FAILED ✗"}")
+                } else {
+                    _state.value = _state.value.copy(lastAction = "$reason · locked ✓")
+                }
+            } finally {
+                releaseSafetyWakelock(wl)
+                lockJob = null
             }
-            if (!confirmed) {
-                Logx.w("prox", "$reason: BLE lock unconfirmed after $attempt attempts — falling back to CLOUD lock")
-                val cloud = runCatching { cloudLock() }.getOrDefault(false)
-                Logx.d("prox", "$reason: cloud lock -> ${if (cloud) "ok" else "FAILED"}")
-                _state.value = _state.value.copy(lastAction = "$reason · ${if (cloud) "cloud-locked ✓" else "LOCK FAILED ✗"}")
-            } else {
-                _state.value = _state.value.copy(lastAction = "$reason · locked ✓")
-            }
-            lockJob = null
+        }
+    }
+
+    /** Reset the auto-unlock latch so the next approach can trigger unlock. */
+    fun resetArmedUnlocked(reason: String) {
+        if (armedUnlocked) {
+            Logx.d("prox", "armedUnlocked reset to false ($reason)")
+            armedUnlocked = false
         }
     }
 
@@ -556,6 +569,7 @@ class ProximityController(
                     // backstop is not needed. This is what confirms the car-side auto-lock fired.
                     Logx.d("prox", "$reason: car already LOCKED on walk-away - car-side auto-lock (or a prior lock) got there first; no cloud lock needed")
                     _state.value = _state.value.copy(lastAction = "$reason · already locked ✓")
+                    armedUnlocked = false
                     return@launch
                 }
                 val ok = runCatching { cloudLock() }.getOrDefault(false)

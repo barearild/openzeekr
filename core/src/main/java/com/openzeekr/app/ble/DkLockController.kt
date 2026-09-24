@@ -20,6 +20,9 @@ class DkLockController(
     private val refresh: suspend () -> Boolean = { false },
 ) {
 
+    /** Callback invoked whenever a lock command is confirmed (e.g. to reset proximity latches). */
+    var onLocked: (() -> Unit)? = null
+
     /** VehicleCtrlCmd.UNLOCK over DK (confirmed, with one self-healing retry). */
     suspend fun unlock(): Boolean = actuate(DkOpcodes.CTRL_UNLOCK, "UNLOCK")
 
@@ -39,7 +42,10 @@ class DkLockController(
         if (!ensureSession()) { Logx.w("lock", "$label: no live session (refresh failed)"); return false }
         var r = runCatching { session.control(ctrl, ACK_TIMEOUT_MS) }.getOrElse { ControlResult.WRITE_FAILED }
         Logx.d("lock", "$label -> $r")
-        if (r == ControlResult.CONFIRMED) return true
+        if (r == ControlResult.CONFIRMED) {
+            if (ctrl == DkOpcodes.CTRL_LOCK) onLocked?.invoke()
+            return true
+        }
         if (r == ControlResult.REJECTED) { Logx.w("lock", "$label rejected by the car"); return false }
         // NO_RESPONSE / WRITE_FAILED: the session went stale (car timed out its handshake epoch while
         // the GATT stayed up). Rebuild a fresh session and retry once.
@@ -47,7 +53,9 @@ class DkLockController(
         if (!refresh()) { Logx.w("lock", "$label: session refresh failed"); return false }
         r = runCatching { session.control(ctrl, ACK_TIMEOUT_MS) }.getOrElse { ControlResult.WRITE_FAILED }
         Logx.d("lock", "$label (after refresh) -> $r")
-        return r == ControlResult.CONFIRMED
+        val success = r == ControlResult.CONFIRMED
+        if (success && ctrl == DkOpcodes.CTRL_LOCK) onLocked?.invoke()
+        return success
     }
 
     /**

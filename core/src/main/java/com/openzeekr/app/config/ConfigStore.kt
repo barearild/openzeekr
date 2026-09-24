@@ -18,9 +18,9 @@ import java.util.UUID
  * Supports import/export of the exact `zeekr_secrets.json` shape so an existing
  * dump can be loaded, and the current config saved back out.
  */
-class ConfigStore private constructor(private val prefs: SharedPreferences) {
+class ConfigStore internal constructor(private val prefs: SharedPreferences) {
 
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true }
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true; coerceInputValues = true }
 
     private val _config = MutableStateFlow(load())
     val config: StateFlow<SecretsConfig> = _config.asStateFlow()
@@ -37,10 +37,23 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
         return loaded.let(::backfillBakedSecrets)
             .let(::ensureDeviceId)
             .let(::migrateDebugLogging)
+            .let(::sanitizeStoredPassword)
             .apply {
                 // Log validation failures but allow loading (catches bad baked secrets).
                 validate().forEach { Logx.w("config", "Load validation warning: $it") }
             }
+    }
+
+    /**
+     * Clear any legacy plaintext password stored at rest if an access token is already held.
+     */
+    private fun sanitizeStoredPassword(cfg: SecretsConfig): SecretsConfig {
+        if (cfg.accessToken.isNotBlank() && cfg.password.isNotBlank()) {
+            val sanitized = cfg.copy(password = "")
+            prefs.edit().putString(KEY_CONFIG, json.encodeToString(SecretsConfig.serializer(), sanitized)).apply()
+            return sanitized
+        }
+        return cfg
     }
 
     /**
@@ -219,11 +232,14 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
             // the EU default and silently clobber the user's selected region. Region is changed only
             // through setRegion() / the Settings picker.
         )
-        merged.check() // Strict validation for user-initiated import
+        if (!merged.secretsValid) {
+            val errors = merged.validate().filterNot { it == "vin is required" }
+            if (errors.isNotEmpty()) throw IllegalArgumentException(errors.first())
+        }
         persist(merged)
     }
 
-    fun exportJson(): String = json.encodeToString(SecretsConfig.serializer(), _config.value)
+    fun exportJson(): String = json.encodeToString(SecretsConfig.serializer(), _config.value.copy(password = ""))
 
     companion object {
         private const val FILE = "openzeekr_secure_config"

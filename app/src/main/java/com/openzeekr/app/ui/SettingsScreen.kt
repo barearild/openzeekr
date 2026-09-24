@@ -18,12 +18,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Nfc
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -34,7 +37,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +81,8 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
     var status by remember { mutableStateOf("") }
     var showHeroLab by remember { mutableStateOf(false) }
     var confirmSignOut by remember { mutableStateOf(false) }
+    var confirmExportDk by remember { mutableStateOf(false) }
+    var showNfcDialog by remember { mutableStateOf(false) }
     // Which log category is pending a sensitive-data confirmation: "http", "ble", or null.
     var pendingLogEnable by remember { mutableStateOf<String?>(null) }
     // Hidden developer-mode unlock: tap the version 10x (like Android's build-number trick).
@@ -229,6 +236,41 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             }, modifier = Modifier.fillMaxWidth()) {
                 Text("Ping vehicle (debug)")
             }
+            // Debug: dump the provisioned digital key (incl. the private key) to a JSON file so it can
+            // be reused in the standalone zeekr-dk-ble project without re-provisioning. Sensitive - the
+            // file holds the DK private key; it lands in the app's own external files dir (adb-pullable).
+            val exportFile = remember(status) { java.io.File(ctx.getExternalFilesDir(null), "dk_credential.json") }
+            OutlinedButton(onClick = { confirmExportDk = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Export digital key -> file (debug)")
+            }
+            if (exportFile.exists()) {
+                OutlinedButton(
+                    onClick = {
+                        if (exportFile.delete()) status = "Exported key file deleted."
+                        else status = "Failed to delete file."
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Delete exported dk_credential.json", color = Brand.crit)
+                }
+            }
+        }
+
+        SettingsCard {
+            CardTitle("NFC Tag Key (Samsung TecTile / Sticker)")
+            Text(
+                "You can use any standard NFC sticker (such as a Samsung TecTile or NTAG213/215) as a physical tap-to-unlock / lock key. Stick it on your B-pillar, door mirror, or windshield corner.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Brand.muted,
+            )
+            Button(
+                onClick = { showNfcDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.Nfc, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Program NFC Sticker")
+            }
         }
 
         if (!baked) {
@@ -347,6 +389,95 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
             },
             dismissButton = {
                 androidx.compose.material3.TextButton(onClick = { pendingLogEnable = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (confirmExportDk) {
+        val exportFile = java.io.File(ctx.getExternalFilesDir(null), "dk_credential.json")
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmExportDk = false },
+            title = { Text("⚠️ Export Private Digital Key?") },
+            text = {
+                Text(
+                    "WARNING: This exports your unencrypted digital key credentials — INCLUDING YOUR PRIVATE CRYPTOGRAPHIC KEY — to a plain text JSON file on external storage:\n\n" +
+                    "${exportFile.absolutePath}\n\n" +
+                    "Anyone with access to your device files or ADB could use this key to clone your digital key and unlock your car.\n\n" +
+                    "Only export for offline debugging, and ensure you delete the file immediately afterwards.",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    confirmExportDk = false
+                    val json = deps.dkIdentity.exportCredentialJson()
+                    status = if (json == null) "No provisioned key to export."
+                    else runCatching {
+                        exportFile.writeText(json)
+                        "Key exported to ${exportFile.absolutePath}"
+                    }.getOrElse { "Export failed: ${it.message}" }
+                }) { Text("I understand the risks, Export", color = Brand.crit) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { confirmExportDk = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showNfcDialog) {
+        val activity = ctx as? android.app.Activity
+        var nfcStatus by remember { mutableStateOf("Ready — hold sticker flat against back of phone…") }
+        var nfcError by remember { mutableStateOf<String?>(null) }
+        var nfcDone by remember { mutableStateOf(false) }
+
+        DisposableEffect(Unit) {
+            if (activity != null) {
+                com.openzeekr.app.nfc.NfcTagWriter.startListening(
+                    activity = activity,
+                    uriString = com.openzeekr.app.nfc.NfcTagWriter.URI_TOGGLE,
+                    onSuccess = {
+                        nfcDone = true
+                        nfcStatus = "Success! NFC Tag programmed."
+                        status = "NFC Tag programmed successfully ✓"
+                        com.openzeekr.app.nfc.NfcTagWriter.stopListening(activity)
+                    },
+                    onError = { err ->
+                        nfcError = err
+                        com.openzeekr.app.nfc.NfcTagWriter.stopListening(activity)
+                    },
+                )
+            } else {
+                nfcError = "Cannot attach NFC listener to activity."
+            }
+            onDispose {
+                if (activity != null) {
+                    com.openzeekr.app.nfc.NfcTagWriter.stopListening(activity)
+                }
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { showNfcDialog = false },
+            icon = { Icon(Icons.Filled.Nfc, null, tint = if (nfcDone) Brand.good else MaterialTheme.colorScheme.primary) },
+            title = { Text(if (nfcDone) "Tag Programmed!" else "Program NFC Sticker") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        if (nfcDone)
+                            "Your sticker is now programmed with OpenZeekr! You can stick it anywhere on your car (e.g. driver B-pillar, mirror, or windshield corner) to tap and lock/unlock."
+                        else
+                            "Hold your Samsung TecTile or NFC sticker flat against the back of your phone near the camera / NFC antenna."
+                    )
+                    if (nfcError != null) {
+                        Text(nfcError!!, color = Brand.crit, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Text(nfcStatus, color = if (nfcDone) Brand.good else Brand.accent, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showNfcDialog = false }) {
+                    Text(if (nfcDone) "Done" else "Cancel")
+                }
             },
         )
     }

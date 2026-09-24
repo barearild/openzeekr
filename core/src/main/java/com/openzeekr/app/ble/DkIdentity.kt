@@ -153,10 +153,12 @@ class DkIdentity private constructor(private val prefs: android.content.SharedPr
     }
 
     /**
-     * Export the provisioned identity as a JSON string (the [exportCredentialBlob] map). Includes the
-     * DK PRIVATE key - sensitive; only move it to another device/app you own. Used to copy the working
-     * key into the standalone zeekr-dk-ble project so it can run BLE without re-provisioning (which
-     * needs the cloud/account and mints a different key). Null until provisioned.
+     * Export the provisioned identity as a JSON string (the [exportCredentialBlob] map).
+     *
+     * SECURITY WARNING: This export includes the unencrypted P-256 EC PRIVATE KEY ([K_PRIV])
+     * and vehicle digital key material. Storing this output on external storage or unencrypted media
+     * allows full cloning of the digital vehicle key. Only use in secure development/debugging
+     * environments and ensure files created from this output are promptly deleted. Null until provisioned.
      */
     fun exportCredentialJson(): String? {
         val blob = exportCredentialBlob() ?: return null

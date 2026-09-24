@@ -515,6 +515,21 @@ class DkBleManager(base: Context) : DkTransport {
     @Volatile var presenceArmed: Boolean = false
         private set
 
+    /** Pre-seed device and advert random from an offloaded presence ScanResult so the foreground
+     *  connect does not stall waiting for redundant packets. */
+    fun feedPresenceScanResult(result: ScanResult) {
+        val dev = result.device ?: return
+        val addr = dev.address ?: return
+        val rec = result.scanRecord
+        parseBroadcastRnd(rec?.bytes)?.let { rnd ->
+            rndByMac[addr] = rnd
+            advBroadcastRnd = rnd
+            lastDevice = dev
+            lastRnd = rnd
+            Logx.d("ble", "pre-seeded broadcastRnd[$addr]=${rnd.joinToString("") { b -> "%02x".format(b) }} from presence scan")
+        }
+    }
+
     /**
      * Arm a HARDWARE-OFFLOADED presence scan: the Bluetooth controller watches for the car's
      * advert (same [carScanFilters]) with the CPU asleep and wakes us via [BleScanReceiver] on
@@ -535,10 +550,10 @@ class DkBleManager(base: Context) : DkTransport {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
             .apply {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    // Edge-triggered: notify once when found, once when lost (STICKY = must be seen a
-                    // few times before "found"/"lost" to debounce flapping at the range edge).
+                    // Edge-triggered: notify immediately when found (AGGRESSIVE = early trigger on range entry),
+                    // once when lost.
                     setCallbackType(ScanSettings.CALLBACK_TYPE_FIRST_MATCH or ScanSettings.CALLBACK_TYPE_MATCH_LOST)
-                    setMatchMode(ScanSettings.MATCH_MODE_STICKY)
+                    setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
                     setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
                 }
             }
