@@ -24,6 +24,17 @@ class NfcActionActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Security gate: require an authentic NFC subsystem tag dispatch.
+        // Rejects explicit/unauthorized intents sent by other apps on the device.
+        val actionStr = intent.action
+        val hasTag = intent.hasExtra(android.nfc.NfcAdapter.EXTRA_TAG)
+        if (actionStr != android.nfc.NfcAdapter.ACTION_NDEF_DISCOVERED || !hasTag) {
+            Logx.w("nfc", "Rejected non-NFC invocation of NfcActionActivity: action=$actionStr hasTag=$hasTag")
+            finish()
+            return
+        }
+
         val deps = (application as App).deps
         val uri = intent.data
         val host = uri?.host?.lowercase() ?: "toggle"
