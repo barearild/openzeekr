@@ -82,6 +82,7 @@ fun ControlsScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
     // the cloud (TSP) command, so a lock/unlock never silently no-ops. One button.
     fun door(lockIt: Boolean) {
         val name = if (lockIt) "Lock" else "Unlock"
+        if (lockIt) deps.proximity.resetArmedUnlocked("ui-lock-button")
         val cmd = if (lockIt) Command.LOCK else Command.UNLOCK
         if (bleReady) fire(name) {
             val viaKey = runCatching { if (lockIt) deps.lock.lock() else deps.lock.unlock() }.getOrDefault(false)

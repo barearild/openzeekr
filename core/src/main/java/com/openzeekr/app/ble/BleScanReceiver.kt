@@ -48,6 +48,7 @@ class BleScanReceiver : BroadcastReceiver() {
             }
             else -> {
                 // FIRST_MATCH (or ALL_MATCHES fallback): the car just came into range.
+                best?.let { runCatching { DkBleManager.get(context).feedPresenceScanResult(it) } }
                 Logx.d("ble", "presence FIRST_MATCH mac=${mac ?: "?"} rssi=${rssi ?: "?"} — waking to connect")
                 ProximityService.notifyPresent(context, mac)
             }
