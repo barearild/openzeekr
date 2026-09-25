@@ -144,19 +144,13 @@ class DkProvisioning(
             var bookId: String? = null
             var shareStatus: Int? = null
             if (entry == null) {
-                // Empty key-list = this account has no key on this car yet, so mint one. On Zeekr
-                // there is NO "share a key" action in the app (confirmed on a shared account), which
-                // means every account - owner OR shared - creates its OWN BLE key via
-                // create-owner-blu-key. So we no longer pre-gate on isOwner; we attempt the mint and
-                // let the server decide. If the cloud really does restrict non-owner minting it will
-                // return a specific code, which is far more useful than a client-side guess. (See
-                // [[dk-real-eu-api]]: shared acct can create keys.)
+                if (!owner) {
+                    error("Shared account has no digital key shared by the owner. Please open the official Zeekr app on the owner's phone and share a digital key with this account first.")
+                }
                 _state.value = State(Step.BIND)
                 Logx.d("provision", "step 3 create-owner-blu-key (owner=$owner, empty key-list) …")
                 val cr = createOwnerBluKeyWithRetry(deviceId, sig)
-                val od = cr.data ?: error("create key failed: ${cr.code} ${cr.msg}" +
-                    if (!owner) " (this account is not the registered owner of the car - if the " +
-                        "cloud blocks non-owner minting, its error code shows here)" else "")
+                val od = cr.data ?: error("create key failed: ${cr.code} ${cr.msg}")
                 dkId = od.dkId; bookId = od.bookId
                 Logx.d("provision", "step 3 key created dkId=$dkId")
             } else {
