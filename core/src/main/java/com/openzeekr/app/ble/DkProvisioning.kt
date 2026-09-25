@@ -112,6 +112,8 @@ class DkProvisioning(
                         out = certResp.data?.cert ?: error("create-app-certificate: ${certResp.code} ${certResp.msg}")
                         break
                     } catch (e: retrofit2.HttpException) {
+                        val body = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
+                        Logx.w("provision", "create-app-certificate HTTP ${e.code()} (body=$body)")
                         if (e.code() == 401) {
                             last = e
                             Logx.w("provision", "step 1: 401 account-active-elsewhere (079021) — retry $attempt/4 …")
@@ -248,7 +250,14 @@ class DkProvisioning(
             Logx.d("provision", "=== provision DONE dkId=$dkId ===")
             _state.value = State(Step.DONE, "dkId=$dkId" + (shareStatus?.let { " shareStatus=$it" } ?: " (owner)"))
             Unit
-        }.onFailure { Logx.e("provision", "=== provision FAILED ===", it); _state.value = State(Step.ERROR, it.message) }
+        }.onFailure {
+            val errDetail = if (it is retrofit2.HttpException) {
+                val errBody = runCatching { it.response()?.errorBody()?.string() }.getOrNull()
+                "HTTP ${it.code()}${if (!errBody.isNullOrBlank()) ": $errBody" else ""}"
+            } else it.message ?: "Unknown error"
+            Logx.e("provision", "=== provision FAILED: $errDetail ===", it)
+            _state.value = State(Step.ERROR, errDetail)
+        }
     }
 
     /**
@@ -261,21 +270,30 @@ class DkProvisioning(
      * ECDSA signature, like stock) and retry with a ~5s backoff.
      */
     private suspend fun createOwnerBluKeyWithRetry(deviceId: String, sign: () -> String): DkResp<KeyItem> {
-        var last: retrofit2.HttpException? = null
+        var last: Exception? = null
         for (attempt in 1..OWNER_CREATE_ATTEMPTS) {
             try {
                 return api.createOwnerBluKey(OwnerKeyReq(deviceId = deviceId, proprietary = "", signature = sign()))
             } catch (e: retrofit2.HttpException) {
+                val errBody = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
+                Logx.w("provision", "create-owner-blu-key HTTP ${e.code()} (body=$errBody)")
                 if (e.code() == 429) {
                     last = e
                     Logx.w("provision", "create-owner-blu-key 429 (gateway rate-limit 00A29) — " +
                         "backoff ${OWNER_CREATE_BACKOFF_MS}ms, retry $attempt/$OWNER_CREATE_ATTEMPTS …")
                     if (attempt < OWNER_CREATE_ATTEMPTS) kotlinx.coroutines.delay(OWNER_CREATE_BACKOFF_MS)
-                } else throw e
+                } else if (e.code() == 401 && errBody?.contains("079021") == true) {
+                    last = e
+                    Logx.w("provision", "create-owner-blu-key 401 (logged in elsewhere 079021) — retry $attempt/$OWNER_CREATE_ATTEMPTS …")
+                    if (attempt < OWNER_CREATE_ATTEMPTS) kotlinx.coroutines.delay(2000)
+                } else {
+                    val fullMsg = "HTTP ${e.code()}${if (!errBody.isNullOrBlank()) ": $errBody" else ""}"
+                    throw IllegalStateException("create-owner-blu-key failed: $fullMsg", e)
+                }
             }
         }
         throw IllegalStateException(
-            "create-owner-blu-key kept returning 429 (gateway rate-limit). Wait ~10s and try again.", last)
+            "create-owner-blu-key kept returning errors. Wait ~10s and try again.", last)
     }
 
     /**
