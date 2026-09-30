@@ -20,6 +20,10 @@ import androidx.compose.material3.SwitchColors
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,10 +33,46 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openzeekr.core.R
 import com.openzeekr.app.ui.theme.Brand
+
+/**
+ * Single-line text that shrinks its font until it fits the available width. Used for dense dashboard
+ * values/labels (stat tiles, control captions) so they never wrap raggedly ("Locke\nd", "578\nkm") on
+ * phones with a large display size or font scale. Version-agnostic (Compose 1.7 has no built-in
+ * autoSize): it renders at [maxFontSize] and, on overflow, steps down ~8% per pass to [minFontSize].
+ */
+@Composable
+fun AutoSizeText(
+    text: String,
+    color: Color,
+    maxFontSize: TextUnit,
+    modifier: Modifier = Modifier,
+    minFontSize: TextUnit = 10.sp,
+    fontWeight: FontWeight? = null,
+    textAlign: TextAlign? = TextAlign.Center,
+) {
+    var size by remember(text, maxFontSize) { mutableStateOf(maxFontSize) }
+    Text(
+        text = text,
+        color = color,
+        modifier = modifier,
+        fontSize = size,
+        fontWeight = fontWeight,
+        textAlign = textAlign,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Visible,
+        onTextLayout = { result ->
+            if (result.hasVisualOverflow && size.value > minFontSize.value) {
+                size = (size.value * 0.92f).coerceAtLeast(minFontSize.value).sp
+            }
+        },
+    )
+}
 
 /**
  * One consistent Switch palette for the whole app. The Material3 defaults wash out on

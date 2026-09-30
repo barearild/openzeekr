@@ -19,7 +19,6 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Thermostat
-import androidx.compose.material.icons.filled.ViewColumn
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -38,7 +37,7 @@ fun iconFor(cmd: Command): ImageVector = when (cmd) {
     Command.FRAGRANCE_ON, Command.FRAGRANCE_OFF -> Icons.Filled.LocalFlorist
     Command.FRIDGE_ON, Command.FRIDGE_OFF -> Icons.Filled.Kitchen
     Command.ENGINE_START, Command.ENGINE_STOP -> Icons.Filled.PowerSettingsNew
-    Command.WINDOW_OPEN, Command.WINDOW_CLOSE, Command.WINDOW_VENT -> Icons.Filled.ViewColumn
+    Command.WINDOW_OPEN, Command.WINDOW_CLOSE, Command.WINDOW_VENT -> OzIcons.CarWindow
     Command.SUNROOF_OPEN, Command.SUNROOF_CLOSE -> Icons.Filled.WbSunny
     Command.SUNSHADE_OPEN, Command.SUNSHADE_CLOSE -> Icons.Filled.Layers
     Command.CHARGING_ON, Command.CHARGING_OFF, Command.SET_CHARGE_SOC,
@@ -54,7 +53,7 @@ fun iconFor(cmd: Command): ImageVector = when (cmd) {
 fun iconFor(category: Category): ImageVector = when (category) {
     Category.DOORS -> Icons.Filled.Lock
     Category.CLIMATE -> Icons.Filled.Air
-    Category.WINDOWS -> Icons.Filled.ViewColumn
+    Category.WINDOWS -> OzIcons.CarWindow
     Category.CHARGING -> Icons.Filled.BatteryChargingFull
     Category.SIGNAL -> Icons.Filled.Campaign
     Category.SECURITY -> Icons.Filled.Shield

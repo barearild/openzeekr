@@ -69,6 +69,13 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
     /** Last status key-structure we logged; used to dump the schema only when it changes (not per poll). */
     private var lastStatusKeyTree: String? = null
 
+    /** Process-wide cache of the azure vehicle-config lookup per VIN (one fetch yields both the real
+     *  exterior paint AND the model series name). A cached entry with both fields blank = looked up, none. */
+    private val configCache = java.util.concurrent.ConcurrentHashMap<String, VehicleConfigInfo>()
+
+    /** The two identity fields we read from the azure config endpoint. Blank string = present-but-empty. */
+    private data class VehicleConfigInfo(val colorName: String, val seriesName: String)
+
     /** Fire a catalog command. Physical-actuation ids (RDU_2/RDL_2/RDO/RDC) route through
      *  the ecarx device-api transport (System B); everything else through /ms-remote-control. */
     suspend fun send(cmd: Command, extraParams: List<ServiceParameter> = emptyList()): CallResult<RemoteControlResponse> =
@@ -178,7 +185,12 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
             // car. Preserves custom names; no-op on an empty/failed fetch.
             val refs = all.mapNotNull { v ->
                 v.vin?.takeIf { it.isNotBlank() }?.let {
-                    com.openzeekr.app.config.VehicleRef(it, v.nickName ?: v.model ?: "", v.isOwner)
+                    // Name = the server-side nickname ONLY (blank when the car is unnamed). NEVER fall back
+                    // to v.model here: that leaked the internal platform code ("CC1E") into carNickname and
+                    // the top-bar title, and the "preserve custom names" merge then treated that code as a
+                    // user name and refused the real nickname. Unnamed cars fall back to a friendly label at
+                    // DISPLAY time (see AppRoot carName), not to a code.
+                    com.openzeekr.app.config.VehicleRef(it, v.nickName ?: "", v.isOwner)
                 }
             }
             if (store.reconcileGarage(refs))
@@ -188,8 +200,51 @@ class RemoteControlRepository(private val store: ConfigStore, private val client
             com.openzeekr.app.util.Logx.d("veh",
                 "vehicleInfo active vin=…${activeVin.takeLast(4)} -> model=${info?.model} color=${info?.colorName} " +
                 "(of ${all.size} car(s): ${all.joinToString { "${it.model}/…${it.vin?.takeLast(4)}" }})")
-            info?.also { if (it.isOwner != store.current().isOwner) store.update { c -> c.copy(isOwner = it.isOwner) } }
+            // The TSP vehicle-list is unreliable for BOTH identity fields: colorName is often null / a
+            // material name that doesn't match a palette paint, and it carries no human model name (only an
+            // internal platform code like "CC1E"), so the hero mis-tints and CarCatalog.forModel can't map
+            // the car. The AUTHORITATIVE source for both is the azure config endpoint: data.exDecoration.
+            // featureName ("Mystic Lilac"/"Tech Grey") and data.seriesName ("Zeekr 7GT EU"/"Zeekr 001 ...").
+            // Prefer them whenever present (one call, cached per VIN); fall back to the vehicle-list values
+            // only when the lookup fails or a field is blank.
+            val colored = if (info != null && activeVin.isNotBlank()) {
+                val cfg = vehicleConfigInfo(activeVin)
+                info.copy(
+                    colorName = cfg?.colorName?.ifBlank { null } ?: info.colorName,
+                    model = cfg?.seriesName?.ifBlank { null } ?: info.model,
+                )
+            } else info
+            colored?.also { if (it.isOwner != store.current().isOwner) store.update { c -> c.copy(isOwner = it.isOwner) } }
         }
+    }
+
+    /**
+     * The car's REAL identity from the azure overseas-app config endpoint
+     * (`GET {azureHost}/overseas-app/ucd/service/vehicle/config/{VIN}`): the exterior paint
+     * (`data.exDecoration.featureName`, e.g. "Mystic Lilac" / "Tech Grey") AND the model series
+     * (`data.seriesName`, e.g. "Zeekr 7GT EU" / "Zeekr 001 ..."). The TSP vehicle-list leaves colorName
+     * null for many cars and carries no human model name (only an internal platform code like "CC1E"), so
+     * this endpoint is the authoritative source for BOTH - one call, cached per VIN. Returns null on any
+     * failure (auth/parse), in which case the hero keeps the vehicle-list values / model-default paint.
+     */
+    private suspend fun vehicleConfigInfo(vin: String): VehicleConfigInfo? {
+        configCache[vin]?.let { return it }
+        val info = runCatching {
+            val url = "${store.current().azureHost}/overseas-app/ucd/service/vehicle/config/$vin"
+            val data = client.api.vehicleConfig(url).data as? kotlinx.serialization.json.JsonObject
+            fun str(v: kotlinx.serialization.json.JsonElement?) =
+                (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.trim().orEmpty()
+            val color = str(
+                (data?.get("exDecoration") as? kotlinx.serialization.json.JsonObject)?.get("featureName"),
+            )
+            val series = str(data?.get("seriesName"))
+            VehicleConfigInfo(colorName = color, seriesName = series)
+        }.getOrNull()
+        configCache[vin] = info ?: VehicleConfigInfo("", "")   // cache the miss too (don't re-fetch every poll)
+        com.openzeekr.app.util.Logx.d("veh",
+            "config for …${vin.takeLast(4)}: paint=${info?.colorName?.ifBlank { null } ?: "(none)"} " +
+                "series=${info?.seriesName?.ifBlank { null } ?: "(none)"}")
+        return info
     }
 
     /** Rename the car (cloud). vehicleId is optional; the backend also keys off X-VIN. */
@@ -250,7 +305,8 @@ class ShareRepository(private val store: ConfigStore, private val client: ApiCli
                 // Pull the fresh list so the newly shared car enters the garage, then activate it.
                 val refs = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data).mapNotNull { v ->
                     v.vin?.takeIf { it.isNotBlank() }?.let {
-                        com.openzeekr.app.config.VehicleRef(it, v.nickName ?: v.model ?: "", v.isOwner)
+                        // Server nickname only - never the v.model platform code (see reconcileGarage).
+                        com.openzeekr.app.config.VehicleRef(it, v.nickName ?: "", v.isOwner)
                     }
                 }
                 store.reconcileGarage(refs)
@@ -318,12 +374,26 @@ class InboxRepository(private val store: ConfigStore, private val client: ApiCli
         guarded { require(store.current().overseasReady) { NOT_CONFIGURED }; client.api.inboxMarkRead("$INBOX/$id"); Unit }
     }
 
-    /** Mark every message read. */
+    /**
+     * Mark every message read. Stock never calls a bulk `/read-all` in ANY capture; the only verified
+     * read operation is `PUT /inbox/{id}` (same as single mark-read). So we mark each currently-fetched
+     * message individually (guaranteed to work), and additionally fire the reversed `/read-all` as a
+     * best-effort catch-all for anything beyond the fetched page (ignored if that route isn't valid).
+     */
     suspend fun markAllRead(): CallResult<Unit> = withContext(Dispatchers.IO) {
         guarded {
             val cfg = store.current()
             require(cfg.overseasReady) { NOT_CONFIGURED }
-            client.api.inboxReadAll("$INBOX/read-all", com.openzeekr.app.net.model.MarkAllReadRequest(vin = cfg.vin.ifBlank { null })); Unit
+            val ids = when (val r = messages(page = 1)) {
+                is CallResult.Ok -> r.value.mapNotNull { it.id }.distinct()
+                is CallResult.Err -> emptyList()
+            }
+            for (id in ids) runCatching { client.api.inboxMarkRead("$INBOX/$id") }
+            runCatching {
+                client.api.inboxReadAll("$INBOX/read-all", com.openzeekr.app.net.model.MarkAllReadRequest(vin = cfg.vin.ifBlank { null }))
+            }
+            com.openzeekr.app.util.Logx.d("inbox", "markAllRead: PUT ${ids.size} message(s) + read-all best-effort")
+            Unit
         }
     }
 

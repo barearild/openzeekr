@@ -3,8 +3,6 @@ package com.openzeekr.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -295,30 +293,31 @@ fun AppRoot(deps: Deps) {
             }
         },
         bottomBar = {
-            // Custom, horizontally-scrollable bar: with 6+ tabs the stock NavigationBar squeezes labels
-            // until they wrap ("Schedul\ne"). Fixed-width, single-line items that scroll sideways keep
-            // every label intact on any screen width.
+            // Every tab shares the width equally (RowScope weight) so ALL of them are ALWAYS on screen,
+            // on any resolution - no horizontal scroll (users on narrow phones could not tell there were
+            // more tabs off-screen to the right). Labels stay single-line and ellipsize on very narrow
+            // widths rather than wrapping ("Schedul\ne", the reason we don't use the stock NavigationBar).
             Column {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Brand.line))
                 Row(
                     Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
-                        .horizontalScroll(rememberScrollState())
                         .navigationBarsPadding()
-                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     tabs.forEachIndexed { i, t ->
                         val selected = tab == i
                         val tint = if (selected) Brand.accent else Brand.muted
                         Column(
-                            Modifier.width(76.dp).clip(RoundedCornerShape(14.dp))
-                                .clickable { tab = i }.padding(vertical = 6.dp),
+                            Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
+                                .clickable { tab = i }.padding(vertical = 6.dp, horizontal = 2.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(3.dp),
                         ) {
                             Icon(t.icon, t.label, tint = tint, modifier = Modifier.size(24.dp))
                             Text(
-                                t.label, color = tint, fontSize = 11.sp, maxLines = 1,
+                                t.label, color = tint, fontSize = 10.sp,
+                                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                             )
                         }
@@ -340,6 +339,7 @@ fun AppRoot(deps: Deps) {
                     ble = deps.ble,
                     lock = deps.lock,
                     config = deps.config,
+                    calib = deps.calibTest,
                     isProvisioned = { deps.dkIdentity.isProvisioned },
                     dkId = remember(provisioned) { runCatching { deps.dkIdentity.credential()?.dkId }.getOrNull() },
                     onRemoveKey = {
@@ -465,8 +465,8 @@ fun AppRoot(deps: Deps) {
     }
 }
 
-// Revolut tip link shown in the one-time support note. Replace with the real revolut.me handle.
-private const val REVOLUT_URL = "https://revolut.me/REPLACE_ME"
+/** Donate/support link, shared by the one-time "hello" support note here and the Settings donate row. */
+internal const val REVOLUT_URL = "https://revolut.me/emilimpd"
 
 /** Share end/expiry epoch (ms, or seconds) -> short local date. Tolerates seconds-precision values. */
 private fun formatShareDate(epoch: Long): String {

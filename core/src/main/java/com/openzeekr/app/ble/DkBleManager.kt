@@ -8,6 +8,10 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanFilter
@@ -723,6 +727,11 @@ class DkBleManager(base: Context) : DkTransport {
 
     @SuppressLint("MissingPermission")
     private suspend fun setupNotificationsAndEstablish(g: BluetoothGatt) {
+        // SELF-HEAL: wipe any lingering/stuck bond from a prior session on every ordinary connect. We only
+        // want a bond transiently DURING calibration (created later, after READY); a leftover BONDED/BONDING
+        // makes Android re-attempt pairing on every reconnect = the constant buzz. Safe: the DK handshake is
+        // app-layer and needs no link bond, and no calibration bond exists this early in setup.
+        runCatching { clearBond(g.device, "connect cleanup") }
         if (!enableNotify(g, chNotify1!!)) { fail("enable notify 2A11 failed"); return }
         chNotify2?.let { if (!enableNotify(g, it)) Log.w(TAG, "enable notify 2A13 failed (continuing)") }
         // Bail if the link dropped during notify setup — never run the handshake on a dead GATT
@@ -738,6 +747,12 @@ class DkBleManager(base: Context) : DkTransport {
         try {
             Logx.d("ble", "starting DK handshake …")
             (session as RealDkSession).establish()
+            // NB: the BLE link-layer BOND is NOT done here. Bonding is only needed for self-calibration
+            // (the car gates 0x0138 PAIRING_RESP + calibration acceptance on a bonded link), and it's
+            // triggered ON DEMAND by the calibration flow (ensureBonded()). Doing it in the always-run
+            // handshake made every connect - including the proximity service's frequent auto-reconnects -
+            // re-attempt a pairing, which spammed the system pairing dialog (the car rotates its BLE
+            // address, so a prior bond doesn't match the new MAC). Lock/unlock/approach work unbonded.
             Logx.d("ble", "DK session READY")
             setupRetries = 0 // clean session — clear the fast-retry budget
             handshakeFailStreak = 0; handshakeBackoffUntilMs = 0L // handshake worked — clear the backoff
@@ -759,6 +774,99 @@ class DkBleManager(base: Context) : DkTransport {
                 Logx.w("ble", "DK handshake failed ${handshakeFailStreak}x - backing off auto-reconnect ${backoff / 1000}s")
             }
             fail("DK handshake: ${e.message}")
+        }
+    }
+
+    /**
+     * On-demand BLE bond for the CURRENT car link - called ONLY by the calibration flow (the car gates
+     * 0x0138 PAIRING_RESP + calibration acceptance on a bonded link). Not called on ordinary connects, so
+     * lock/unlock and the proximity auto-connects never trigger a pairing prompt. Returns true if bonded.
+     */
+    suspend fun ensureBonded(): Boolean {
+        val dev = gatt?.device ?: run { Logx.w("ble", "ensureBonded: no active GATT device"); return false }
+        return ensureBonded(dev)
+    }
+
+    /** The device the last bond attempt was made against, so cleanup works even after the GATT link
+     *  dropped and `gatt` is null (the exact case that left a stuck BONDING and caused the buzz). */
+    @Volatile private var lastBondDevice: BluetoothDevice? = null
+
+    /**
+     * Clear any bond (or stuck in-progress bonding) with [device]. We only ever createBond() to nudge the
+     * car into sending 0x0138 during calibration - the STORED bond is useless and actively harmful: the car
+     * ROTATES its BLE address, so a persisted/half-formed bond never matches the next session and Android
+     * keeps re-attempting the pairing (the "constant pairing request" buzz). cancelBondProcess() aborts a
+     * hung BONDING; removeBond() drops a completed one. Both are hidden APIs (no public counterpart to
+     * createBond()). Quiet + idempotent: a no-op when already NONE.
+     */
+    @SuppressLint("MissingPermission")
+    private fun clearBond(device: BluetoothDevice?, reason: String) {
+        val dev = device ?: return
+        val state = dev.bondState
+        if (state == BluetoothDevice.BOND_NONE) return
+        if (state == BluetoothDevice.BOND_BONDING) {
+            runCatching { dev.javaClass.getMethod("cancelBondProcess").invoke(dev) }
+                .onSuccess { Logx.d("ble", "cancelBondProcess ${dev.address} ($reason)") }
+                .onFailure { Logx.w("ble", "cancelBondProcess failed: ${it.message}") }
+        }
+        runCatching { dev.javaClass.getMethod("removeBond").invoke(dev) }
+            .onSuccess { Logx.d("ble", "removeBond ${dev.address} ($reason)") }
+            .onFailure { Logx.w("ble", "removeBond failed: ${it.message}") }
+    }
+
+    /** Public entry: clear the transient calibration bond after a calibration run. Uses the live device
+     *  or the last bond target, so it still works if the car already dropped the link. */
+    fun removeBond() = clearBond(gatt?.device ?: lastBondDevice, "post-calibration")
+
+    /**
+     * Ensure a BLE link-layer BOND with the car before calibration. Idempotent: if already BONDED
+     * (subsequent sessions) it returns immediately. Otherwise it calls createBond() and waits for the
+     * ACTION_BOND_STATE_CHANGED broadcast to reach BONDED (or BOND_NONE = failed), up to [timeoutMs].
+     * See the call site for WHY (stock bonds; the car gates 0x0138 + calibration on it).
+     */
+    @SuppressLint("MissingPermission")
+    private suspend fun ensureBonded(device: BluetoothDevice, timeoutMs: Long = 12_000L): Boolean {
+        lastBondDevice = device   // remember the target so post-calibration cleanup works even if the link drops
+        if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            Logx.d("ble", "already bonded ${device.address}"); return true
+        }
+        val done = CompletableDeferred<Boolean>()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+                @Suppress("DEPRECATION")
+                val dev = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                if (dev?.address != device.address) return
+                val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+                Logx.d("ble", "bond state -> $state for ${device.address}")
+                when (state) {
+                    BluetoothDevice.BOND_BONDED -> done.complete(true)
+                    BluetoothDevice.BOND_NONE -> done.complete(false)   // BONDING -> NONE = pairing failed
+                }
+            }
+        }
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else appContext.registerReceiver(receiver, filter)
+        return try {
+            // Force LE transport. Plain createBond() uses TRANSPORT_AUTO, which on a dual-mode device can
+            // pick BR/EDR (classic) pairing - the wrong stack for a BLE key and a likely source of the odd
+            // pairing prompts. createBond(int transport) is hidden, so call it by reflection; fall back to
+            // the default only if that fails.
+            Logx.d("ble", "createBond ${device.address} (LE transport)")
+            val started = runCatching {
+                val m = device.javaClass.getMethod("createBond", Int::class.javaPrimitiveType)
+                m.invoke(device, 2) as Boolean   // 2 = BluetoothDevice.TRANSPORT_LE
+            }.getOrElse {
+                Logx.w("ble", "createBond(LE) reflection failed (${it.message}); using default transport")
+                device.createBond()
+            }
+            if (!started) { Logx.w("ble", "createBond() returned false"); false }
+            // The car sends 0x0138 on the ATTEMPT, so a timeout here is non-fatal - calibration proceeds.
+            else withTimeoutOrNull(timeoutMs) { done.await() } ?: run { Logx.w("ble", "bond timeout (continuing)"); false }
+        } finally {
+            runCatching { appContext.unregisterReceiver(receiver) }
         }
     }
 
@@ -819,7 +927,58 @@ class DkBleManager(base: Context) : DkTransport {
 
     override fun broadcastRnd(): ByteArray? = advBroadcastRnd
 
-    override fun close() { inboundHandler = null }
+    // ---- in-cabin positioning beacon (self-cal pos4 + passive entry) ----
+    // The phone BROADCASTS a fixed manufacturer advertisement while the DK session is up so the car's
+    // anchors can localize it. Captured live from stock (frida, 2026-09-25): stock advertises the SAME
+    // stock (m0/c.smali) advertises ONLY via legacy startAdvertising - manufacturer id 0x7F99, data
+    // 07 09 43 58, LOW_LATENCY + TX_HIGH + connectable + no timeout, one continuous burst at session-up
+    // (NOT per-position). VERIFIED 2026-09-25: the whole stock app has ZERO startAdvertisingSet /
+    // AdvertisingSetParameters; the startAdvertisingSet seen in Frida captures was Android's own internal
+    // emulation of the legacy call (API 26+), not stock behaviour. So we mirror LEGACY ONLY.
+    private var beaconAdvertiser: BluetoothLeAdvertiser? = null
+    private var beaconCallback: AdvertiseCallback? = null
+
+    @SuppressLint("MissingPermission")
+    override fun startPositioningBeacon() {
+        if (beaconCallback != null) return                                    // already advertising
+        val a = adapter ?: run { Logx.w("ble", "beacon: no BT adapter"); return }
+        if (!a.isEnabled) { Logx.w("ble", "beacon: BT off"); return }
+        if (!a.isMultipleAdvertisementSupported) { Logx.w("ble", "beacon: radio has no LE advertising"); return }
+        val adv = a.bluetoothLeAdvertiser ?: run { Logx.w("ble", "beacon: no LE advertiser"); return }
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)    // stock mode=2
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)        // stock txPower=3
+            .setConnectable(true)                                            // stock connectable=true
+            .setTimeout(0)                                                   // stock timeout=0
+            .build()
+        val data = AdvertiseData.Builder()
+            .addManufacturerData(BEACON_MFR_ID, BEACON_MFR_DATA)              // 0x7F99 / 07094358 (stock beacon)
+            .setIncludeDeviceName(false)
+            .setIncludeTxPowerLevel(false)
+            .build()
+        val scanResp = AdvertiseData.Builder()                                // stock scanResp = empty
+            .setIncludeDeviceName(false).setIncludeTxPowerLevel(false).build()
+        val cb = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                Logx.d("ble", "beacon: advertising (mfr=0x%04x data=%s)".format(
+                    BEACON_MFR_ID, BEACON_MFR_DATA.joinToString("") { "%02x".format(it) }))
+            }
+            override fun onStartFailure(errorCode: Int) { Logx.w("ble", "beacon: start failed err=$errorCode") }
+        }
+        beaconAdvertiser = adv
+        beaconCallback = cb
+        runCatching { adv.startAdvertising(settings, data, scanResp, cb) }
+            .onFailure { Logx.w("ble", "beacon: startAdvertising threw ${it.message}"); beaconCallback = null; beaconAdvertiser = null }
+    }
+
+    @SuppressLint("MissingPermission")
+    override fun stopPositioningBeacon() {
+        val adv = beaconAdvertiser; val cb = beaconCallback
+        if (adv != null && cb != null) { runCatching { adv.stopAdvertising(cb) }; Logx.d("ble", "beacon: stopped") }
+        beaconAdvertiser = null; beaconCallback = null
+    }
+
+    override fun close() { stopPositioningBeacon(); inboundHandler = null }
 
     private fun fail(msg: String) { lastError = msg; Logx.e("ble", msg); _state.value = State.ERROR }
 
@@ -834,6 +993,15 @@ class DkBleManager(base: Context) : DkTransport {
         /** Manufacturer company id in the car's 0xFF advert block (LE `fe 06`); a scan-filter on it
          *  keeps the scan hardware-filtered/screen-off-legal. */
         private const val DK_MFR_COMPANY_ID = 0x06FE
+        /** In-cabin positioning beacon, captured LIVE from the stock app 2026-09-24:
+         *  FactorEngine.genPSBroadcast("null") = 99 7f 07 09 43 58 -> the m0.a splitter takes bytes[0:2]
+         *  little-endian as the manufacturer id (0x7F99) and bytes[2:] as the data (07 09 43 58). The
+         *  genPSBroadcast argument was "null", so this is a FIXED constant, NOT per-VIN/per-key. The car's
+         *  interior passive anchors localize the phone off this advert; without it self-calibration
+         *  position 4 -> errCode 8. Advertised (LOW_LATENCY + TX_HIGH + connectable, no timeout) for the
+         *  whole DK session via LEGACY startAdvertising only, exactly as stock (m0/c.smali). */
+        private const val BEACON_MFR_ID = 0x7F99
+        private val BEACON_MFR_DATA = byteArrayOf(0x07, 0x09, 0x43, 0x58)
         /** Stable request code for the offloaded presence-scan PendingIntent (arm/disarm must
          *  build an equal PendingIntent, so the request code + intent action are fixed). */
         private const val PRESENCE_REQUEST_CODE = 0x2ee5  // "ZEE(kr)"

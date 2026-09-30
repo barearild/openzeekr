@@ -218,12 +218,15 @@ class ProximityService : Service() {
         }
     }
 
-    /** Start/stop the RSSI approach controller to follow the persisted setting. */
+    /** Start/stop the RSSI approach controller to follow the persisted setting. Approach-unlock is GATED
+     *  on a proximity calibration existing: without measured door/6 m anchors we don't run it at all (the
+     *  fixed presets were never reliable for a non-stock phone - see [SecretsConfig.isProximityCalibrated]). */
     private suspend fun runApproach(deps: Deps) {
         deps.config.config.collect { cfg ->
             val running = deps.proximity.state.value.running
-            if (cfg.proximityEnabled && !running) runCatching { deps.proximity.start() }
-            else if (!cfg.proximityEnabled && running) runCatching { deps.proximity.stop() }
+            val wanted = cfg.proximityEnabled && cfg.isProximityCalibrated
+            if (wanted && !running) runCatching { deps.proximity.start() }
+            else if (!wanted && running) runCatching { deps.proximity.stop() }
         }
     }
 

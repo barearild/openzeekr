@@ -77,6 +77,10 @@ private fun foregroundPerms(): List<String> = buildList {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         add(Manifest.permission.BLUETOOTH_SCAN)
         add(Manifest.permission.BLUETOOTH_CONNECT)
+        // Needed to BROADCAST the in-cabin positioning beacon (self-cal pos4 + passive entry). It's a
+        // runtime permission on 12+ - manifest declaration alone is not enough; without it the OS throws
+        // "Need BLUETOOTH_ADVERTISE permission" and the beacon never starts.
+        add(Manifest.permission.BLUETOOTH_ADVERTISE)
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         add(Manifest.permission.POST_NOTIFICATIONS)

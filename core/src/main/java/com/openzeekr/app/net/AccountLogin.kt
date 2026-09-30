@@ -301,21 +301,13 @@ class AccountLogin(private val store: ConfigStore) {
                     vehData?.let { kotlinx.serialization.json.JsonArray(it) })
                 val refs = all.mapNotNull { v ->
                     v.vin?.takeIf { it.isNotBlank() }?.let {
-                        com.openzeekr.app.config.VehicleRef(it, v.nickName ?: v.model ?: "", v.isOwner)
+                        // Server nickname only - never the v.model platform code (see ConfigStore.reconcileGarage).
+                        com.openzeekr.app.config.VehicleRef(it, v.nickName ?: "", v.isOwner)
                     }
                 }
                 if (refs.isNotEmpty()) {
-                    store.update { cur ->
-                        // Keep the currently-active car if it's still on the account, else the first.
-                        val active = refs.firstOrNull { it.vin == cur.vin } ?: refs.first()
-                        cur.copy(
-                            vehicles = refs,
-                            vin = active.vin,
-                            isOwner = active.isOwner,
-                            // Keep the user's custom name if the active car is unchanged, else use the server name.
-                            carNickname = if (cur.vin == active.vin && cur.carNickname.isNotBlank()) cur.carNickname else active.name,
-                        )
-                    }
+                    // Reuse the single garage-reconcile path (name resolution + platform-code heal + active pick).
+                    store.reconcileGarage(refs)
                     Logx.d("login", "step 6/6 vehicle-list OK, ${refs.size} car(s) on account")
                 } else {
                     Logx.w("login", "step 6/6 vehicle-list returned no vehicles (enter VIN manually if needed)")
@@ -460,7 +452,29 @@ class AccountLogin(private val store: ConfigStore) {
         val code = root["code"]?.jsonPrimitive?.contentOrNull
         if (!success && code != "000000") {
             val msg = root["msg"]?.jsonPrimitive?.contentOrNull ?: root["message"]?.jsonPrimitive?.contentOrNull
-            error("request failed ($code ${msg ?: ""}) @ ${url.substringAfterLast('/').substringBefore('?')}")
+            val ep = url.substringAfterLast('/').substringBefore('?')
+            val hint = friendlyLoginError(ep, code, msg)
+            // Keep the raw ($code $msg) suffix - it is what we read back from a decrypted issue log.
+            error("${hint ?: "request failed"} ($code ${msg ?: ""}) @ $ep")
+        }
+    }
+
+    /**
+     * Human-readable hint for a known user-center business code, so a failed login shows something
+     * actionable instead of a bare "request failed (9007)". The server often returns `msg:null`, so
+     * we map the numeric code ourselves. Returns null for codes we don't have a specific message for
+     * (the caller then falls back to the generic wording, still with the raw code appended).
+     */
+    private fun friendlyLoginError(endpoint: String, code: String?, msg: String?): String? {
+        if (!msg.isNullOrBlank()) return null   // server gave its own message - prefer it.
+        return when (code) {
+            // checkUserV2 (step 1) verifies the account exists in the selected region's user-center.
+            // 9007 = no such registered user in this tenant: almost always a mistyped email, or an
+            // account registered in a DIFFERENT region than the one selected in Settings.
+            "9007" -> "Account not found in this region - check the email spelling and that the correct region is selected in Settings"
+            // password step rejections
+            "9300", "9301" -> "Login rejected - check your password (and, on SEA, that no email verification code is required)"
+            else -> null
         }
     }
 }

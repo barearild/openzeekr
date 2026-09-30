@@ -229,11 +229,11 @@ class RealDkSession(
             exchange(DkProtocol.CMD_A2V_SEND_DKEY, cred.digitalKey, DkProtocol.CMD_V2A_DK_VERIFY_STATUS)
         }.onFailure { Logx.w("dk", "SEND_DKEY: ${it.message}") }
 
-        // NOTE: openzeekr does NOT send 0x0137 PAIRING_REQ. An experimental attempt (0.1.6) to send it
-        //   on every connect with a FABRICATED "request new pairing" pairData CORRUPTED the car's stored
-        //   pairing for the device - breaking entry/start and poisoning re-provision. The real pairData
-        //   is native-derived (getPairDataJNI) and cannot be faked. Removed. Stock's 0x0137 is unrelated
-        //   to whether the car will complete a normal DK session (lock/unlock/start work without it).
+        // NOTE: the 0x0137 PAIRING_REQ "replay" that used to sit here was REMOVED. It was based on a
+        //   misread Frida hook (stock READS getPairData(), it never GATT-writes 0x0137). The REAL step
+        //   stock does for in-cabin localization is BLE-ADVERTISE a fixed positioning beacon (started at
+        //   the end of establish, below) - captured live 2026-09-24. Position 4 needs the advert, not a
+        //   0x0137 frame.
 
         // 5) coef upload on channel 2 (plaintext) — optional (RPA/approach only)
         Logx.d("dk", "handshake 5/5 coef upload …")
@@ -243,6 +243,10 @@ class RealDkSession(
         }.onFailure { Logx.w("dk", "coef upload: ${it.message}") }
 
         isEstablished = true
+        // Start the positioning beacon CONTINUOUSLY at session-up and leave it running - stock's capture
+        // (2026-09-25) shows one advertising burst near session-up, timeout 0, for the whole session (NOT
+        // per-position). Stopped in reset()/close().
+        runCatching { transport.startPositioningBeacon() }.onFailure { Logx.w("dk", "beacon start: ${it.message}") }
         Logx.d("dk", "=== DK session established ===")
     }
 
@@ -415,6 +419,8 @@ class RealDkSession(
      */
     fun reset() {
         isEstablished = false; cryptoReady = false; cmacKeyCache = null
+        // Stop the positioning beacon - the session is gone, so the advert must go with it.
+        runCatching { transport.stopPositioningBeacon() }
         // Complete (don't bare-cancel) each in-flight waiter with a typed error. A bare .cancel()
         // makes an awaiting handshake step throw a CancellationException whose obfuscated class name
         // surfaces to the UI as "w0 was cancelled" (issue #3). DkLinkDropped is a plain exception, so
@@ -471,8 +477,8 @@ class RealDkSession(
     /**
      * 0x0190 CALIBRATION_START [type] -> 0x0191 [errCode]. Returns the car's errCode (0 == OK), or -1
      * when the car sent no 0x0191 within [timeoutMs]. [timeoutMs] defaults to the session default but
-     * is overridable so the type-byte sweep ([CalibrationTestController.probeStartTypes]) can fail fast
-     * per candidate. errCode >= 0 means the car ANSWERED (the self-cal state machine engaged for us).
+     * is overridable (the STOP/flush call passes a short window). errCode >= 0 means the car ANSWERED
+     * (the self-cal state machine engaged for us).
      */
     suspend fun calibStart(type: Byte, timeoutMs: Long = this.timeoutMs): Int {
         if (!isEstablished || !cryptoReady) { Logx.w("dk", "calibStart: session not ready"); return -1 }
@@ -509,15 +515,25 @@ class RealDkSession(
         return err
     }
 
+    /** Latches a 0x0194 table that arrives BEFORE [calibAwaitTable] registers its waiter. The car sends
+     *  the table within ~40ms of the pos4 0x0193 - often during the caller's inter-step delay - so a
+     *  plain awaitFrame() would MISS it and time out despite a successful calibration. Cleared per run
+     *  via [resetCalibTableLatch]. */
+    @Volatile private var latchedCalibTable: ByteArray? = null
+
+    /** Clear any stale latched 0x0194 before starting a fresh calibration run. */
+    fun resetCalibTableLatch() { latchedCalibTable = null }
+
     /**
      * Wait (up to [timeoutMs]) for the car to push the 0x0194 RECEIVE_CALIBRATION result: the
      * 200-byte coefficient table + 4-byte hash it computed for this phone/session (plaintext on Zeekr).
-     * Returns (table, hash) or null on timeout. Call AFTER the measurement flow completes.
+     * Returns (table, hash) or null on timeout. Call AFTER the measurement flow completes. Uses the
+     * [latchedCalibTable] first so a table that already arrived (the common case) is returned instantly.
      */
     suspend fun calibAwaitTable(timeoutMs: Long): Pair<ByteArray, ByteArray>? {
-        val body = awaitFrame(DkProtocol.CMD_V2A_RECEIVE_CALIBRATION, timeoutMs) ?: run {
-            Logx.w("dk", "calibAwaitTable: no 0x0194 within ${timeoutMs}ms"); return null
-        }
+        val body = latchedCalibTable?.also { latchedCalibTable = null }
+            ?: awaitFrame(DkProtocol.CMD_V2A_RECEIVE_CALIBRATION, timeoutMs)
+            ?: run { Logx.w("dk", "calibAwaitTable: no 0x0194 within ${timeoutMs}ms"); return null }
         // CalibrationReceivePayload: [6:206]=calib(200), [206:210]=hash(4) when body>=210; else short.
         return if (body.size >= 210) {
             val table = body.copyOfRange(6, 206); val hash = body.copyOfRange(206, 210)
@@ -564,6 +580,7 @@ class RealDkSession(
         // RPA frames append AES-CMAC(cmacKey, ts(4 BE) ‖ tail)[0:6] inside the GCM plaintext.
         val fullTail = if (DkProtocol.needsCmac(cmdId)) tail + DkCrypto.aesCmac6(cmacKey(), tsBytes(ts) + tail) else tail
         val plain = DkPayload.wrap(nSeq, ts, fullTail)
+        Logx.d("dkframe", "-> ${hex(cmdId)} plain(${plain.size})=${hexOf(plain)}")
         val body = if (DkProtocol.isEncrypted(cmdId)) DkCrypto.gcmEncrypt(sKey, iv, plain) else plain
         val frame = DkFrame(cmdId, instTypeFor(cmdId), body).encode()
         return transport.write(cmdId, frame)
@@ -599,6 +616,9 @@ class RealDkSession(
         val def = CompletableDeferred<ByteArray>()
         pending[expect] = def
         try {
+            // DIAG (frame-diff vs stock): log the exact plaintext we send, so we can byte-compare every
+            // handshake/calibration frame against a stock capture and find any clean-room divergence.
+            Logx.d("dkframe", "-> ${hex(cmdId)} plain(${plainBody.size})=${hexOf(plainBody)}")
             val body = if (encrypt) DkCrypto.gcmEncrypt(sKey, iv, plainBody) else plainBody
             val frame = DkFrame(cmdId, instTypeFor(cmdId), body).encode()
             if (!transport.write(cmdId, frame)) throw IllegalStateException("write failed for cmd ${hex(cmdId)}")
@@ -620,6 +640,9 @@ class RealDkSession(
         } catch (e: Exception) {
             Logx.w("dk", "decrypt ${hex(cmdId)} failed: ${e.message} rawBody(${rawBody.size}B)=${hexOf(rawBody)}"); return
         }
+        // DIAG (frame-diff vs stock): log every inbound frame's plaintext to byte-compare against a stock
+        // capture (esp. 0x0102 DK_STATUS, 0x010c DK_VERIFY, and whether/what 0x0138 the car sends us).
+        Logx.d("dkframe", "<- ${hex(cmdId)} plain(${body.size})=${hexOf(body)}")
         // DIAGNOSTIC: 0x182 is the car's BNCM ranging telemetry (its measurement of THIS phone). It is
         // fire-and-forget (no reply, like stock), but decrypting it with the session key shows what the
         // car actually measures per calibration position - to tell whether the in-cabin finalize fails
@@ -637,10 +660,17 @@ class RealDkSession(
         // the 0x0194 table (this is a real gap in our calibration flow, not just cosmetic parity).
         if (cmdId == DkProtocol.CMD_V2A_VSTATUS_SYNC ||
             cmdId == DkProtocol.CMD_V2A_CALIBRATION_LOC_RSP ||
-            cmdId == DkProtocol.CMD_V2A_RECEIVE_CALIBRATION) {
+            cmdId == DkProtocol.CMD_V2A_RECEIVE_CALIBRATION ||
+            // 0x0138 PAIRING_RESP: the car issues this ONLY on a bonded link, right before it will accept
+            // calibration. Stock ACKs it (captured 2026-09-25 stock_calib_adv.log: -> 0xfffe ...0138 1000);
+            // without our ACK the car may not consider pairing complete and keeps rejecting calibration.
+            cmdId == DkProtocol.CMD_V2A_PAIRING_RESP) {
             val ackBody = body
             ackScope.launch { runCatching { sendAck(cmdId, ackBody) } }
         }
+        // Latch the 0x0194 table so it's never lost to a race: the car sends it ~40ms after pos4's 0x0193,
+        // often before calibAwaitTable() has registered its waiter. calibAwaitTable() reads this first.
+        if (cmdId == DkProtocol.CMD_V2A_RECEIVE_CALIBRATION) latchedCalibTable = body
         pending[cmdId]?.let { it.complete(body); return }
         // Known handshake failures: fail the awaited step immediately (don't wait for timeout).
         val failFor = when (cmdId) {

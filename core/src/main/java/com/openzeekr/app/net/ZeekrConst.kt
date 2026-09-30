@@ -47,9 +47,11 @@ object ZeekrConst {
     const val XCHANGER_OPERATOR = "ZEEKR"
     /** Stock Accept header value on the HF calls — part of the signed header set. */
     const val XCHANGER_ACCEPT = "application/json;responseformat=3"
-    // Device identity presented to the HF/xchanger backend — hardcoded to the known-good
-    // stock DK phone (Pixel 6a), since the DK is gated to a set of supported phones. These
-    // are UNSIGNED headers (not part of X-SIGNATURE); they label the device server-side.
+    // Device identity presented to the HF/xchanger backend — hardcoded to the known-good stock DK phone
+    // (Pixel 6a). NOTE (2026-09-25): the coef/model is NOT the calibration blocker — a FRESH stock Pixel 6a
+    // (mobileCode FFFFFF) calibrated pos4=7 on its first run, same as a fresh Pixel 7. openzeekr fails on a
+    // fresh device for a CLEAN-ROOM reason (software key + our own handshake vs stock's native iWall lib),
+    // not the phone model. Kept Pixel 6a to match the known-good stock identity.
     const val XCHANGER_DEVICE_MANUFACTURE = "google"   // Build.BRAND
     const val XCHANGER_DEVICE_BRAND = "bluejay"         // Build.PRODUCT (Pixel 6a)
     const val XCHANGER_DEVICE_MODEL = "Pixel 6a"        // Build.MODEL

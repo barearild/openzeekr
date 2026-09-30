@@ -163,7 +163,10 @@ object DkProtocol {
         CMD_A2V_CALIBRATION_START, CMD_V2A_CALIBRATION_RSP,
         CMD_A2V_CALIBRATION_LOC_SEND, CMD_V2A_CALIBRATION_LOC_RSP,
         CMD_A2V_PE_MODE_REQ, CMD_V2A_PE_MODE_RSP,
-        CMD_A2V_SEND_CALIBRATION, CMD_A2V_CALIBRATION_MODEL_ZEEKR -> true
+        CMD_A2V_SEND_CALIBRATION, CMD_A2V_CALIBRATION_MODEL_ZEEKR,
+        // Pairing: 0x0137 PAIRING_REQ (our replay of the car's per-VIN pairData) + 0x0138 PAIRING_RESP
+        // (the car issuing it) are GCM on the session key. Required for self-cal to finalize.
+        CMD_A2V_PAIRING_REQ, CMD_V2A_PAIRING_RESP -> true
         // Car->phone RPA TELEMETRY is PLAINTEXT (verified at car, 2026-09-20): 0x114 STATUS,
         // 0x115 CHALLENGE, 0x117 SYNC, 0x118 SYNC2 arrive as readable nSeq|ts|payload — GCM-decrypting
         // them throws BAD_DECRYPT. Only 0x121 VSTATUS_SYNC (high-entropy) is encrypted. So the RPA

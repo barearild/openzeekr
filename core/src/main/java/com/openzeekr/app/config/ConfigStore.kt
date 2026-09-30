@@ -95,6 +95,20 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
      * digital key - that stays provisioned for whichever car it was set up on; switching here is for
      * the cloud features. Callers should refresh vehicle status afterward.
      */
+    /** Persist the last-set car-side passive-entry switch state (local mirror; see SecretsConfig). */
+    fun setPassiveEntry(approachUnlock: Boolean, walkAwayLock: Boolean) =
+        update { it.copy(approachUnlockOn = approachUnlock, walkAwayLockOn = walkAwayLock) }
+
+    /** Persist the proximity calibration anchors measured during the smart-calibration walk (dBm).
+     *  All-zero clears the calibration (falls back to the fixed sensitivity presets). */
+    fun setProximityCalibration(nearRssi: Int, farRssi: Int, insideRssi: Int = 0) =
+        update { it.copy(calibNearRssi = nearRssi, calibFarRssi = farRssi, calibInsideRssi = insideRssi) }
+
+    /** Clear the calibration AND turn approach-unlock off: it is now gated on a calibration existing,
+     *  so a cleared calibration must not leave the proximity service running on the fixed presets. */
+    fun clearProximityCalibration() =
+        update { it.copy(calibNearRssi = 0, calibFarRssi = 0, calibInsideRssi = 0, proximityEnabled = false) }
+
     fun setActiveVehicle(vin: String) = update { cur ->
         val v = cur.vehicles.firstOrNull { it.vin == vin } ?: return@update cur
         cur.copy(vin = v.vin, isOwner = v.isOwner, carNickname = v.name.ifBlank { cur.carNickname })
@@ -112,21 +126,37 @@ class ConfigStore private constructor(private val prefs: SharedPreferences) {
         if (fresh.isEmpty()) return false
         val before = _config.value.vin
         update { cur ->
-            // Keep custom names: for each server car, reuse the stored name if the user renamed it.
+            // Name resolution per car: the SERVER nickname is authoritative (renames are pushed to the
+            // server), so it wins whenever present. Only when the server sends no name do we keep the prior
+            // local name - this covers the brief gap after an in-app rename before the server echoes it back
+            // (and a rename whose server push failed). `takeUnless(looksLikePlatformCode)` HEALS the old bug
+            // where a leaked "CC1E"-style code stuck in the stored name forever and masked the real nickname.
             val merged = fresh.map { f ->
                 val prior = cur.vehicles.firstOrNull { it.vin == f.vin }
-                if (prior != null && prior.name.isNotBlank() && prior.name != f.name) f.copy(name = prior.name) else f
+                    ?.takeUnless { looksLikePlatformCode(it.name) }
+                if (f.name.isBlank() && prior != null && prior.name.isNotBlank()) f.copy(name = prior.name) else f
             }
             val active = merged.firstOrNull { it.vin == cur.vin } ?: merged.first()
             cur.copy(
                 vehicles = merged,
                 vin = active.vin,
+                // Follow the resolved active name; keep the current nickname only when the resolved one is
+                // blank (unnamed car / propagation gap) so an in-app rename isn't lost before it echoes -
+                // but never resurrect a leaked platform code, so an unnamed car falls back to "My Zeekr".
                 isOwner = active.isOwner,
-                carNickname = if (cur.vin == active.vin && cur.carNickname.isNotBlank()) cur.carNickname else active.name,
+                carNickname = active.name.ifBlank { cur.carNickname.takeUnless { looksLikePlatformCode(it) } ?: "" },
             )
         }
         return _config.value.vin != before
     }
+
+    /**
+     * True for a bare Zeekr internal platform code (e.g. "CC1E", "CC1E-U", "CX1E-EU") - never a real car
+     * name. A past bug fell back to this code when a car had no nickname and let it stick as the car name;
+     * we drop such values so they're never preserved or displayed as a title.
+     */
+    private fun looksLikePlatformCode(name: String): Boolean =
+        Regex("^[A-Z]{2}\\d[A-Z](-[A-Z0-9]+)?$").matches(name.trim())
 
     /**
      * Switch the active region: repopulates every region-derived host + identifier

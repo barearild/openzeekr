@@ -107,7 +107,7 @@ class Deps(context: Context) {
     val rpa = RpaController(ble.session, appScope, phoneStatus::stateByte, rssi = ble::pollRemoteRssi)
     /** BLE self-calibration test harness (0x0190-0x0199) + BLE lock/unlock, driven from the Parking tab.
      *  Teaches the car THIS phone's RSSI/ranging model so passive entry / RPA localization can converge. */
-    val calibTest = CalibrationTestController(appCtx, ble, appScope)
+    val calibTest = CalibrationTestController(appCtx, ble, appScope, config)
     /** Wakelock-free motion state (still vs moving) for proximity cadence gating. */
     val motion = com.openzeekr.app.ble.MotionMonitor(appCtx)
     val proximity = ProximityController(

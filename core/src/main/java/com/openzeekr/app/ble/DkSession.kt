@@ -119,5 +119,15 @@ interface DkTransport {
      * without scanning, or the advert wasn't parsed.
      */
     fun broadcastRnd(): ByteArray?
+    /**
+     * Start/stop the in-cabin POSITIONING BEACON the car's interior passive anchors need to localize
+     * the phone (self-calibration position 4, and passive in-cabin entry). It's a FIXED manufacturer
+     * advertisement, captured live from the stock app 2026-09-24 (FactorEngine.genPSBroadcast, arg
+     * "null" -> a constant, NOT per-VIN): manufacturer id 0x7F99, data 07 09 43 58, LOW_LATENCY +
+     * TX_HIGH, connectable, no timeout. Without it the interior anchors never see the phone and
+     * self-cal position 4 returns errCode 8. Default no-op so non-BLE transports ignore it.
+     */
+    fun startPositioningBeacon() {}
+    fun stopPositioningBeacon() {}
     fun close()
 }

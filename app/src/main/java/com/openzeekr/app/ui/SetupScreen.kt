@@ -32,9 +32,14 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +59,7 @@ import com.openzeekr.app.ble.DkBleManager
 import com.openzeekr.app.ble.DkLockController
 import com.openzeekr.app.ble.DkProvisioning
 import com.openzeekr.app.config.ConfigStore
+import com.openzeekr.app.config.SecretsConfig
 import com.openzeekr.app.ui.theme.Brand
 import kotlinx.coroutines.launch
 
@@ -62,12 +68,14 @@ import kotlinx.coroutines.launch
  * "Key active" card (re-provision / remove); otherwise the provisioning stepper. Below:
  * an at-the-car connect/lock/unlock test, and passive-entry (approach unlock / walk-away).
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SetupScreen(
     provisioning: DkProvisioning,
     ble: DkBleManager,
     lock: DkLockController,
     config: ConfigStore,
+    calib: com.openzeekr.app.ble.CalibrationTestController,
     isProvisioned: () -> Boolean,
     dkId: String?,
     onRemoveKey: () -> Unit,
@@ -76,12 +84,14 @@ fun SetupScreen(
     val prov by provisioning.state.collectAsState()
     val bleState by ble.state.collectAsState()
     val cfg by config.config.collectAsState()
+    val calibState by calib.state.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // Owner vs shared is known from the vehicle-list (`isOwner`) captured at login — no manual pick.
     val owner = cfg.isOwner
     var confirmRemove by remember { mutableStateOf(false) }
     var probing by remember { mutableStateOf(false) }
+    var showCalib by remember { mutableStateOf(false) }
 
     val ready = isProvisioned() || prov.step == DkProvisioning.Step.DONE
     val sessionReady = bleState == DkBleManager.State.SESSION_READY
@@ -202,7 +212,9 @@ fun SetupScreen(
             }
         }
 
-        // Passive entry.
+        // Passive entry. Approach-unlock is GATED on a one-time at-the-car calibration: the digital key
+        // can be provisioned from the cloud, but the phone's RSSI thresholds can only be learned at the
+        // car, so without calibration the feature stays unavailable (the calibrate button sits on top).
         SectionHeader("Passive entry")
         CockpitCard {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -213,9 +225,39 @@ fun SetupScreen(
                     Text("Approach unlock & walk-away lock", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     Text("Unlock as you near the car, lock when you leave.", color = Brand.muted, fontSize = 12.sp)
                 }
-                Switch(checked = cfg.proximityEnabled, onCheckedChange = { on -> config.update { it.copy(proximityEnabled = on) } }, colors = brandSwitchColors(Brand.good))
+                // Only togglable once calibrated; the switch reads off until then.
+                Switch(
+                    checked = cfg.proximityEnabled && cfg.isProximityCalibrated,
+                    enabled = cfg.isProximityCalibrated,
+                    onCheckedChange = { on -> config.update { it.copy(proximityEnabled = on) } },
+                    colors = brandSwitchColors(Brand.good),
+                )
             }
-            if (cfg.proximityEnabled) {
+
+            // --- Calibration: the prerequisite, prominent on top of the feature ---
+            if (cfg.isProximityCalibrated) {
+                Text("✓ Calibrated at your car · door ${cfg.calibNearRssi} dBm · 6 m ${cfg.calibFarRssi} dBm",
+                    color = Brand.good, fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SelectChip("Re-calibrate", selected = false) {
+                        if (sessionReady) showCalib = true
+                        else { connect(); snackbar("Connecting to the car — try Calibrate again once linked") }
+                    }
+                    SelectChip("Reset", selected = false) {
+                        config.clearProximityCalibration(); snackbar("Calibration cleared — approach unlock turned off")
+                    }
+                }
+            } else {
+                Text("Approach unlock needs a one-time calibration walk at your car (~2 min). " +
+                    "Until then it stays off.", color = Brand.faint, fontSize = 11.5.sp)
+                PrimaryButton("Calibrate at your car", Modifier.fillMaxWidth()) {
+                    if (sessionReady) showCalib = true
+                    else { connect(); snackbar("Connecting to the car — try Calibrate again once linked") }
+                }
+            }
+
+            // --- Sensitivity: only meaningful once enabled (and thus calibrated) ---
+            if (cfg.proximityEnabled && cfg.isProximityCalibrated) {
                 Text("Sensitivity — how close before it unlocks", color = Brand.muted, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("veryclose" to "Very close", "close" to "Close", "far" to "Far").forEach { (key, label) ->
@@ -225,12 +267,20 @@ fun SetupScreen(
                 Text(
                     when (cfg.proximitySensitivity) {
                         "veryclose" -> "Unlocks within arm's reach · most secure"
-                        "far" -> "Unlocks within ~3–4 m · most convenient"
-                        else -> "Unlocks within ~1–2 m · locks as you walk away"
+                        "far" -> "Unlocks farthest out · most convenient"
+                        else -> "Unlocks about halfway · locks as you walk away"
                     },
                     color = Brand.faint, fontSize = 11.5.sp,
                 )
             }
+
+            // --- Car-side passive entry (0x0151), DEV-ONLY. Tells the CAR to run its own approach/walk
+            // behaviour for this key; moved here from the Location smart-calibration harness. Owner-gated
+            // car-side and not reliable under our clean-room key yet, so kept behind developer mode. ---
+            if (cfg.devMode) {
+                CarSidePassiveEntry(provisioning, config, calib, cfg, enabled = !calibState.busy)
+            }
+
             Text(
                 "Runs a low-power scan, then connects & unlocks over the BLE key. Uses a foreground " +
                     "service - allow unrestricted background for reliability.",
@@ -238,6 +288,13 @@ fun SetupScreen(
             )
         }
         Spacer(Modifier.height(16.dp))
+    }
+
+    if (showCalib) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { showCalib = false }, sheetState = sheetState) {
+            ProximityCalibrationWalk(calib) { showCalib = false }
+        }
     }
 
     if (confirmRemove) AlertDialog(
@@ -251,6 +308,103 @@ fun SetupScreen(
         },
         dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("Cancel") } },
     )
+}
+
+/**
+ * The user-facing proximity-calibration walk (moved here from the Parking dev harness). Drives the same
+ * 4-position [CalibrationTestController.runCalibration] flow; while the car computes its ranging table we
+ * record this phone's RSSI at the door and at ~6 m and save them as the real unlock/lock thresholds.
+ */
+@Composable
+private fun ProximityCalibrationWalk(
+    calib: com.openzeekr.app.ble.CalibrationTestController,
+    onClose: () -> Unit,
+) {
+    val cs by calib.state.collectAsState()
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Text("Calibrate proximity", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        Text("Walk to 4 spots around your car once. We measure this phone's real signal at the door and " +
+            "at ~6 m and use those as your unlock / walk-away thresholds — so approach-unlock works for " +
+            "YOUR phone and car, not a generic guess. Carry the phone the way you normally do.",
+            color = Brand.muted, fontSize = 12.5.sp)
+
+        if (cs.message.isNotBlank()) {
+            Text(cs.message,
+                color = if (cs.phase == com.openzeekr.app.ble.CalibrationTestController.Phase.ERROR) Brand.crit else Brand.accent,
+                fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        }
+        if (cs.step in 1..cs.totalSteps) {
+            if (cs.measuring) {
+                PrimaryButton("Measuring… ${cs.secondsLeft}s — hold still", Modifier.fillMaxWidth(), enabled = false) {}
+            } else {
+                PrimaryButton("I'm in position — Continue", Modifier.fillMaxWidth()) { calib.advanceStep() }
+            }
+        }
+
+        val done = cs.phase == com.openzeekr.app.ble.CalibrationTestController.Phase.DONE
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            PrimaryButton(
+                if (cs.busy) "Running…" else if (done) "Calibrate again" else "Start calibration",
+                Modifier.weight(1f), enabled = !cs.busy,
+            ) { calib.runCalibration() }
+            GhostButton(if (cs.busy) "Cancel" else "Close", Modifier.weight(1f), tint = Brand.muted) {
+                if (cs.busy) calib.cancel() else onClose()
+            }
+        }
+        Text("Stay near the car for the whole walk and keep the area clear of other people.",
+            color = Brand.faint, fontSize = 11.sp)
+    }
+}
+
+/**
+ * DEV-only car-side passive entry (0x0151 CUST_REQ): tells the CAR to run its own approach-unlock /
+ * walk-away-lock for this key. Moved here from the Location smart-calibration harness. The switch
+ * baseline is a local mirror of the last-set state, overlaid by the cloud key-list value when the
+ * server reports it. Kept behind developer mode because the car only acts on these once calibrated and
+ * it appears owner-gated / not honoured under our clean-room key yet.
+ */
+@Composable
+private fun CarSidePassiveEntry(
+    provisioning: DkProvisioning,
+    config: ConfigStore,
+    calib: com.openzeekr.app.ble.CalibrationTestController,
+    cfg: SecretsConfig,
+    enabled: Boolean,
+) {
+    var approachOn by remember { mutableStateOf(cfg.approachUnlockOn) }
+    var walkAwayOn by remember { mutableStateOf(cfg.walkAwayLockOn) }
+    LaunchedEffect(Unit) {
+        provisioning.passiveState()?.let { (approach, walk) ->
+            approachOn = approach; walkAwayOn = walk; config.setPassiveEntry(approach, walk)
+        }
+    }
+    Text("Car-side passive entry (developer)", color = Brand.muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    PassiveToggle("Approach unlock (car-side)", "Car unlocks as you walk up", approachOn, enabled) {
+        approachOn = it; config.setPassiveEntry(it, walkAwayOn); calib.setApproachUnlock(it)
+    }
+    PassiveToggle("Walk-away auto-lock (car-side)", "Car locks itself as you leave", walkAwayOn, enabled) {
+        walkAwayOn = it; config.setPassiveEntry(approachOn, it); calib.setWalkAwayLock(it)
+    }
+}
+
+@Composable
+private fun PassiveToggle(label: String, subtitle: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Brand.surface2).padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Text(subtitle, color = Brand.muted, fontSize = 11.5.sp)
+        }
+        Switch(
+            checked = checked, onCheckedChange = onChange, enabled = enabled,
+            colors = SwitchDefaults.colors(checkedThumbColor = Brand.energy, checkedTrackColor = Brand.energy.copy(alpha = 0.4f)),
+        )
+    }
 }
 
 @Composable

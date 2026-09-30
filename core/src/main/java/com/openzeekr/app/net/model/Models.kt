@@ -537,14 +537,19 @@ object Inbox {
         return ids.toList()
     }
 
-    /** Total unread = Σ each `/home` group's `sum`. (There is no working `/unread` GET — it 500s.) */
+    /**
+     * Total unread = Σ every `/home` group's `statistics.*.unReadNum`. NOT the group `sum` field: `sum`
+     * is the group's TOTAL message count, which does NOT drop when messages are read, so summing it left
+     * the badge stuck at the total (e.g. 81) even after "mark all read" / opening messages. `unReadNum`
+     * (per notice sub-type, may be null) is the authoritative unread counter. (No `/unread` GET - it 500s.)
+     */
     fun homeUnread(data: JsonElement?): Int {
         var total = 0
         fun walk(n: JsonElement?) {
             when (n) {
                 is JsonArray -> n.forEach(::walk)
                 is JsonObject -> {
-                    (n["sum"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.let { total += it }
+                    (n["unReadNum"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.let { total += it }
                     n.values.forEach(::walk)
                 }
                 else -> {}
@@ -1071,9 +1076,15 @@ data class ElectricStatusVo(
     /** Charge-port lid state: "1" = open, else closed (AC / DC flaps). */
     val chargeLidAcStatus: String? = null,
     val chargeLidDcAcStatus: String? = null,
-    /** Live AC charge current (A) and voltage (V); their product is the real charge power. */
+    /** Live AC charge current (A) and voltage (V). On 1-phase the product is the charge power; on
+     *  3-phase chargeUAct is the ~400 V line-to-line voltage, so real power = sqrt(3)*U*I (see
+     *  [chargePowerW] / issue #9). */
     val chargeIAct: String? = null,
     val chargeUAct: String? = null,
+    /** DC fast-charge pile live current (A) and voltage (V); their product is DC charge power
+     *  directly (no phase factor). Populated only during a DC session. */
+    val dcChargePileIAct: String? = null,
+    val dcChargePileUAct: String? = null,
     /** EV range on battery only. */
     val distanceToEmptyOnBatteryOnly: String? = null,
     /** Battery temperature regulation / preconditioning active. */
@@ -1095,13 +1106,40 @@ data class ElectricStatusVo(
     /** Charge-port (AC or DC flap) open. */
     val chargePortOpen: Boolean get() = chargeLidAcStatus == "1" || chargeLidDcAcStatus == "1"
 
-    /** Real charge power in watts from live current×voltage, or null if unavailable. */
+    /**
+     * Real charge power in watts, or null when not charging / unavailable.
+     *  - DC fast charge: dcChargePileUAct * dcChargePileIAct (direct DC, no phase factor).
+     *  - AC 1-phase: chargeUAct * chargeIAct.
+     *  - AC 3-phase: sqrt(3) * chargeUAct * chargeIAct - chargeUAct is the ~400 V line-to-line voltage,
+     *    so the plain product undercounts by sqrt(3) (e.g. 400*16 = 6.4 kW shown vs 11.1 kW real, issue #9).
+     * Phase count is inferred from the AC voltage (>= 300 V => 3-phase line-to-line) because the live
+     * status carries no phase-count field. HEURISTIC for EU 230/400 V - verify against a 3-phase capture.
+     */
     val chargePowerW: Double?
         get() {
+            dcPower()?.let { return it }
             val a = chargeIAct?.toDoubleOrNull() ?: return null
             val v = chargeUAct?.toDoubleOrNull() ?: return null
-            return a * v
+            if (a <= 0.0 || v <= 0.0) return null
+            return if (v >= AC_3PHASE_MIN_V) kotlin.math.sqrt(3.0) * v * a else v * a
         }
+
+    /** Inferred AC phase count (1 or 3) for display; null on DC or when not AC-charging. */
+    val chargePhases: Int?
+        get() {
+            if (dcPower() != null) return null
+            val v = chargeUAct?.toDoubleOrNull() ?: return null
+            val a = chargeIAct?.toDoubleOrNull() ?: return null
+            if (v <= 0.0 || a <= 0.0) return null
+            return if (v >= AC_3PHASE_MIN_V) 3 else 1
+        }
+
+    /** DC pile power (W) when a DC session reports live values, else null. */
+    private fun dcPower(): Double? {
+        val a = dcChargePileIAct?.toDoubleOrNull() ?: return null
+        val v = dcChargePileUAct?.toDoubleOrNull() ?: return null
+        return if (a > 0.0 && v > 0.0) a * v else null
+    }
 
     /** Actively charging — by chargerState enum (isCharging is dead), power as fallback. */
     val chargingActive: Boolean
@@ -1135,6 +1173,9 @@ data class ElectricStatusVo(
         const val CHARGE_POWER_ON_W = 100.0
         private val CHARGING_STATES = setOf(2, 15, 24, 28, 30)
         private val CONNECTED_STATES = setOf(1, 2, 3)
+        /** AC voltage at/above which we treat the session as 3-phase (line-to-line ~400 V) vs
+         *  1-phase (~230 V). No phase-count field in the live status, so this splits EU 230/400 V. */
+        private const val AC_3PHASE_MIN_V = 300.0
     }
 }
 

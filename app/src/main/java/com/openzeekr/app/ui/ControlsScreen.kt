@@ -282,10 +282,14 @@ private fun ProximityCard(deps: Deps) {
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
 
-    fun requestPerms(): Array<String> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-            blePerms() + Manifest.permission.POST_NOTIFICATIONS
-        else blePerms()
+    fun requestPerms(): Array<String> {
+        // ADVERTISE is requested (for the in-cabin positioning beacon) but deliberately NOT part of the
+        // hasBlePerms() gate: the core scan/connect/lock path must still run if the user denies it.
+        var p = blePerms()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) p += Manifest.permission.BLUETOOTH_ADVERTISE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) p += Manifest.permission.POST_NOTIFICATIONS
+        return p
+    }
 
     fun hasBlePerms(): Boolean = blePerms().all {
         context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
@@ -314,14 +318,20 @@ private fun ProximityCard(deps: Deps) {
                     ) { Icon(Icons.Filled.Bolt, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp)) }
                     Column {
                         Text("Proximity unlock", fontWeight = FontWeight.SemiBold)
-                        Text("RSSI approach / walk-away", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            if (cfg.isProximityCalibrated) "RSSI approach / walk-away"
+                            else "Calibrate at your car (Key tab) to enable",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
                 Switch(
-                    // The persisted setting is the source of truth; the foreground key
-                    // service reacts to it (starts/stops the RSSI approach scan).
-                    checked = cfg.proximityEnabled,
+                    // The persisted setting is the source of truth; the foreground key service reacts to
+                    // it. GATED on a proximity calibration existing (same as the Key-tab toggle): without
+                    // measured door/6 m anchors approach-unlock is unavailable.
+                    checked = cfg.proximityEnabled && cfg.isProximityCalibrated,
+                    enabled = cfg.isProximityCalibrated,
                     onCheckedChange = { on ->
                         deps.config.update { it.copy(proximityEnabled = on) }
                         if (on) {

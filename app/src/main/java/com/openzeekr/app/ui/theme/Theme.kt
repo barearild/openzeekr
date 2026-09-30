@@ -89,7 +89,19 @@ object Brand {
     )
 }
 
+/** Upper bound on the OS font scale the app honours. We follow the user's accessibility font size up to
+ *  this, then stop: the dense cockpit dashboard (4-across stat rows, control tiles, tyre cards) can't
+ *  absorb a 1.5–2× system font without wrapping/clipping. Below this cap, everything still scales. */
+private const val MAX_FONT_SCALE = 1.30f
+
 @Composable
 fun OpenZeekrTheme(dark: Boolean = true, content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = DarkColors, shapes = AppShapes, content = content)
+    val base = androidx.compose.ui.platform.LocalDensity.current
+    val clamped = if (base.fontScale > MAX_FONT_SCALE)
+        androidx.compose.ui.unit.Density(base.density, MAX_FONT_SCALE) else base
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.compose.ui.platform.LocalDensity provides clamped,
+    ) {
+        MaterialTheme(colorScheme = DarkColors, shapes = AppShapes, content = content)
+    }
 }

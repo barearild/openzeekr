@@ -166,6 +166,13 @@ interface TspApi {
     @GET
     suspend fun inboxUnread(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
 
+    // ---- exterior paint color (azure overseas-app gateway) ----
+    // GET {azureHost}/overseas-app/ucd/service/vehicle/config/{VIN} -> data.exDecoration.featureName =
+    // the REAL exterior paint name (e.g. "Mystic Lilac", "Tech Grey"), which the TSP vehicle-list omits
+    // (colorName null). Absolute @Url; the interceptor auths it as an /overseas-app request.
+    @GET
+    suspend fun vehicleConfig(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
+
     @PUT
     suspend fun inboxMarkRead(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
 

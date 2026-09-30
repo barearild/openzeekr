@@ -311,8 +311,14 @@ class RpaController(
     private fun stopHeartbeat() { heartbeat?.cancel(); heartbeat = null }
 
     private fun fail(t: Throwable) {
+        // Never surface structured cancellation as an error. runCatching {} catches EVERYTHING,
+        // including the CancellationException/JobCancellationException thrown when a job or the
+        // scope is cancelled (screen left, session torn down) - which otherwise renders as the
+        // useless "StandaloneCoroutine was cancelled" in the RPA card. Rethrow it so the coroutine
+        // machinery handles it and the UI stays clean.
+        if (t is kotlinx.coroutines.CancellationException) throw t
         stopHeartbeat(); stopRssiStream(); stopReqModePoll()
-        _state.value = _state.value.copy(phase = Phase.ERROR, message = t.message)
+        _state.value = _state.value.copy(phase = Phase.ERROR, message = t.message ?: t.javaClass.simpleName)
     }
 
     private fun intToBytes(v: Int): ByteArray =

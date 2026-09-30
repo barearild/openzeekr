@@ -103,11 +103,54 @@ object CarCatalog {
         }
     }
 
-    /** Look up a colour by its reported name within a model (falls back to the first). */
+    /** Neutral placeholder used when the reported colour can't be matched to a known paint. We render the
+     *  car in a plain graphite instead of confidently showing the WRONG vivid paint (issue #8: a 7GT France
+     *  car in Onyx Black was showing "Mystic Lilac", the 7GT palette's first entry). */
+    private val NEUTRAL = c(0x6E7075)
+
+    /** Normalise a colour name for tolerant matching: lower-case, strip spaces/hyphens and finish words. */
+    private fun norm(s: String): String =
+        s.lowercase().replace(Regex("[\\s\\-_]+"), "")
+            .replace(Regex("(metallic|pearl|matte|matt|twotone|two-tone|colou?r)"), "")
+
+    /** Localised / marketing colour-word aliases -> the English token used in our palette names, so a
+     *  car whose backend returns a localised paint name (e.g. FR "Noir", DE "Schwarz", "Onyx") still
+     *  resolves. Keyed on normalised tokens; values are tokens that appear in a [PaintColor.name]. */
+    private val ALIASES: Map<String, String> = mapOf(
+        "noir" to "black", "schwarz" to "black", "negro" to "black", "nero" to "black", "onyx" to "black",
+        "blanc" to "white", "weiss" to "white", "blanco" to "white", "bianco" to "white", "crystal" to "white",
+        "gris" to "grey", "grau" to "grey", "gray" to "grey", "grigio" to "grey", "tech" to "grey",
+        "vert" to "green", "grün" to "green", "verde" to "green", "forest" to "green",
+        "bleu" to "blue", "blau" to "blue", "azul" to "blue", "silber" to "silver", "argent" to "silver",
+    )
+
+    /**
+     * Look up a colour by its reported name within a model. Matching is tolerant (case/spacing/finish
+     * insensitive, then token-overlap, then a localised-alias pass) so backend names in any locale still
+     * hit the palette. When nothing matches we DO NOT fall back to the model's first paint (that is what
+     * mislabelled Onyx-Black 7GTs as "Mystic Lilac" - issue #8); instead we keep the car's real reported
+     * name but paint it a neutral graphite, so the label stays truthful and the render is never confidently
+     * wrong. A null/blank name (colour genuinely unknown) also yields the neutral placeholder.
+     */
     fun colorFor(model: CarModel, colorName: String?): PaintColor {
-        if (colorName != null) {
-            model.colors.firstOrNull { it.name.equals(colorName, ignoreCase = true) }?.let { return it }
+        val raw = colorName?.trim()?.takeIf { it.isNotBlank() }
+            ?: return PaintColor("", NEUTRAL, "-")
+        val target = norm(raw)
+        // 1) exact (normalised) match.
+        model.colors.firstOrNull { norm(it.name) == target }?.let { return it }
+        // 2) token overlap: any word of the reported name appears in a palette name, or vice-versa.
+        val targetTokens = raw.lowercase().split(Regex("[\\s\\-_]+")).filter { it.length >= 3 }
+        model.colors.firstOrNull { pc ->
+            val palTokens = pc.name.lowercase().split(' ')
+            targetTokens.any { t -> palTokens.any { it == t } } ||
+                palTokens.any { pt -> target.contains(pt) && pt.length >= 4 }
+        }?.let { return it }
+        // 3) localised aliases -> map a foreign colour word to an English token, then match a palette name.
+        val aliasHit = (targetTokens + target).firstNotNullOfOrNull { ALIASES[it] }
+        if (aliasHit != null) {
+            model.colors.firstOrNull { it.name.lowercase().contains(aliasHit) }?.let { return it }
         }
-        return model.colors.first()
+        // 4) no palette match - keep the real name, neutral tint (never a wrong vivid paint).
+        return PaintColor(raw, NEUTRAL, "-")
     }
 }

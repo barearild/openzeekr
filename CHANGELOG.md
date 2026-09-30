@@ -3,6 +3,47 @@
 All notable changes to OpenZeekr are recorded here. OpenZeekr is a free, non-commercial
 clean-room app and is not affiliated with Zeekr.
 
+## [0.1.8] - 2026-09-30
+
+### Added
+- **Approach unlock & walk-away lock.** The car can unlock as you walk up to it and lock
+  itself as you walk away, over the BLE digital key. Because every phone-and-car pair is
+  different, this is set up with a quick, one-time **"Calibrate at your car"** walk in the
+  **Key** tab: you stand at four spots around the car once and OpenZeekr learns your phone's
+  real signal at the door and at ~6 m. Approach unlock stays off until you've calibrated, and
+  the sensitivity (very close / close / far) is then based on your measured distances instead
+  of one-size-fits-all guesses. The digital key itself still sets up from your account with no
+  car present - only approach unlock needs the at-car walk.
+
+### Changed
+- **Bottom navigation** now shows every tab at once on any phone - tabs are no longer pushed
+  off the edge of the screen where they can't be found.
+- **Scaling on any phone.** The home dashboard, stat row and control tiles now fit correctly
+  on phones with a large display size or font size, instead of wrapping or clipping (e.g.
+  "Locked" or "578 km" splitting across lines).
+- The **donate link** in Settings now opens when tapped.
+- Passive-entry setup and proximity calibration are consolidated in the **Key** tab.
+
+### Fixed
+- **Paint colour.** Cars (for example the 7GT) no longer show the wrong colour - the real
+  exterior paint is read from your account and is matched even when the colour name comes back
+  localised.
+- **Car name.** The top bar now shows your car's real name or nickname (including a name you
+  set in the official app) instead of an internal model code.
+- **Charging speed.** Three-phase AC charging now reports the correct power (about 11 kW)
+  rather than a third of it.
+- **Windows tile** now uses a car-window icon instead of the Windows logo.
+- **Notifications badge.** The unread count now goes down as you read messages or tap
+  "mark all read" - previously it could stay stuck at the total.
+- **Login.** A clearer message when an account can't be found in the selected region, instead
+  of a bare error code.
+
+### Digital key
+- Fixed the constant Bluetooth **pairing-request buzz** some phones got near the car. Pairing
+  is now used only briefly during calibration and is cleared straight afterwards.
+- Self-calibration now completes under OpenZeekr's own key - the groundwork that makes the new
+  at-car approach-unlock calibration possible.
+
 ## [0.1.7] - 2026-09-24
 
 ### Added

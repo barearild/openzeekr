@@ -284,9 +284,24 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                 "Thanks to the community that mapped the cloud first: Wysie, Fryyyyy, mescon.",
                 color = Brand.faint, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp),
             )
-            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.padding(top = 8.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        runCatching {
+                            ctx.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(REVOLUT_URL))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }.onFailure {
+                            android.widget.Toast.makeText(ctx, "Couldn't open the link", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(Icons.Filled.Favorite, null, tint = Brand.crit, modifier = Modifier.size(14.dp))
-                Text("  Support: revolut.me/emilimpd", color = Brand.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text("  Donate: revolut.me/emilimpd", color = Brand.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
         Spacer(Modifier.height(16.dp))

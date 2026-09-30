@@ -150,6 +150,17 @@ data class SecretsConfig(
      *  One of: "veryclose", "close", "far". */
     val proximitySensitivity: String = "close",
     /**
+     * Proximity calibration anchors (dBm), captured once during the smart-calibration walk:
+     * [calibNearRssi] = median RSSI with the phone AT THE DRIVER'S DOOR HANDLE ("0" / at-car), and
+     * [calibFarRssi] = median RSSI at ~6 m from the car. 0 = NOT calibrated → the sensitivity presets
+     * below fall back to the fixed factory RSSI values. When set, the presets are computed from THESE
+     * measured anchors instead (see [sensitivityUnlockRssi]), so "close"/"far"/… map to real distances
+     * for THIS phone + car + carry rather than one-size-fits-all guesses. [calibInsideRssi] (cabin) is
+     * kept only as a sanity reference (should read stronger than the door). */
+    val calibNearRssi: Int = 0,
+    val calibFarRssi: Int = 0,
+    val calibInsideRssi: Int = 0,
+    /**
      * Hardware-offloaded presence scan: when idle (no live DK session), hand the car's
      * advert filter (0xFDFD / company 0x06FE) to the Bluetooth controller via a
      * PendingIntent scan and let the CPU sleep. The controller wakes us with FIRST_MATCH
@@ -172,6 +183,11 @@ data class SecretsConfig(
     val logHttp: Boolean = false,
     /** Collect + show the on-device BLE log (digital-key / proximity traffic: key material). */
     val logBle: Boolean = false,
+    /** Local mirror of the car-side passive-entry switches (approach-unlock / walk-away-lock). The cloud
+     *  key-list is authoritative WHEN it reports them, but it omits them for non-activated keys, so we
+     *  remember the user's last choice to keep the switches showing the right state (like stock). */
+    val approachUnlockOn: Boolean = false,
+    val walkAwayLockOn: Boolean = false,
     /** Developer mode (enabled by tapping the version 10x in Settings). Gates in-development tools -
      *  the Hero lab, Remote Parking and Smart calibration - so they aren't shown to normal users
      *  between releases. Default off; a fresh/normal install never sees the dev tools. */
@@ -289,22 +305,45 @@ data class SecretsConfig(
      */
     val effectiveLockRssi: Int get() = effectiveUnlockRssi - LOCK_RSSI_GAP_DB
 
-    /** Unlock RSSI for the chosen sensitivity preset (hidden from the user). */
+    /** True when a proximity calibration exists and is sane: both anchors negative and the door reading
+     *  is meaningfully STRONGER (less negative) than the 6 m reading. */
+    val isProximityCalibrated: Boolean
+        get() = calibNearRssi < 0 && calibFarRssi < 0 && (calibNearRssi - calibFarRssi) >= CALIB_MIN_SPAN_DB
+
+    /**
+     * Unlock RSSI for the chosen sensitivity preset. When calibrated, the presets are interpolated
+     * between the MEASURED door anchor ([calibNearRssi], strongest) and 6 m anchor ([calibFarRssi],
+     * weakest): "very close" = right at the door, "far" = unlock while still a few metres out, "close"
+     * = about halfway. Uncalibrated, we fall back to the fixed factory values.
+     */
     val sensitivityUnlockRssi: Int
-        get() = when (proximitySensitivity) {
+        get() = if (isProximityCalibrated) {
+            val span = calibNearRssi - calibFarRssi   // > 0 (near is stronger / less negative)
+            when (proximitySensitivity) {
+                "veryclose" -> calibNearRssi - 3
+                "far" -> calibFarRssi + Math.round(span * 0.30f)
+                else -> calibNearRssi - Math.round(span * 0.50f) // close ≈ halfway
+            }
+        } else when (proximitySensitivity) {
             "veryclose" -> -58
             "far" -> -74
             else -> -66 // close
         }
 
-    /** Lock RSSI = unlock − 8 dB hysteresis for the preset. */
-    val sensitivityLockRssi: Int get() = sensitivityUnlockRssi - 8
+    /** Lock (walk-away) RSSI. Calibrated: around the measured ~6 m level, but always a hysteresis gap
+     *  below unlock so the two can't overlap. Uncalibrated: unlock − 8 dB (unchanged legacy behaviour). */
+    val sensitivityLockRssi: Int
+        get() = if (isProximityCalibrated) minOf(calibFarRssi, sensitivityUnlockRssi - LOCK_RSSI_GAP_DB)
+        else sensitivityUnlockRssi - 8
 
     companion object {
         /** Unlock can never be set weaker (more negative) than this — safety floor. */
         const val UNLOCK_RSSI_FLOOR = -65
         /** Lock threshold sits this many dB weaker than unlock (fixed hysteresis gap). */
         const val LOCK_RSSI_GAP_DB = 5
+        /** Minimum door→6 m RSSI span (dB) for a calibration to be trusted; below this the walk was
+         *  too noisy / the anchors too close, so we ignore it and keep the fixed presets. */
+        const val CALIB_MIN_SPAN_DB = 4
         /**
          * Passive low-power scan RSSI at/above which we do a background connect so the
          * aggressive connected-GATT RSSI monitor can take over. The user's "-70..-90

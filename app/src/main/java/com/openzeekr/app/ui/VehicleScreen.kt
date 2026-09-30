@@ -45,9 +45,9 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Luggage
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.WbSunny
-import androidx.compose.material.icons.filled.Window
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -71,6 +71,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TileMode
@@ -82,6 +83,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import android.graphics.BitmapFactory
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openzeekr.app.Deps
@@ -166,7 +168,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     // glyph, accent), fully down → "Open" (energy), all closed → "Windows" (idle).
     val windowsVenting = climate?.windowsVenting == true
     val windowsOpen = climate?.windowsOpen == true
-    val windowIcon = if (windowsVenting) Icons.Filled.Air else Icons.Filled.Window
+    val windowIcon = if (windowsVenting) Icons.Filled.Air else OzIcons.CarWindow
     val windowLabel = when { windowsVenting -> "Vent"; windowsOpen -> "Open"; else -> "Windows" }
     val windowTint = if (windowsVenting) Brand.accent else Brand.energy
 
@@ -221,7 +223,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     }
 
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
-        Hero(model, paint, charging, soc, powerKw)
+        Hero(model, paint, charging, soc, powerKw, loading = info == null)
 
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             StatItem("Central lock", if (locked) "Locked" else "Unlocked", if (locked) Brand.good else Brand.energy, Modifier.weight(1f))
@@ -247,7 +249,7 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
                 add { Ctl(climateIcon, "Climate", tint = climateTint, active = acOn, modifier = Modifier.weight(1f)) { showClimate = true } }
                 // Always open the sheet — charge limit, battery pre-conditioning (a PRE-charge action)
                 // and the charge-port control all live there, so it must be reachable when unplugged too.
-                add { ChargeCtl(charging, plugged, soc, powerKw, elec?.timeToFullyCharged, Modifier.weight(1f)) { showCharge = true } }
+                add { ChargeCtl(charging, plugged, soc, powerKw, elec?.chargePhases, elec?.timeToFullyCharged, Modifier.weight(1f)) { showCharge = true } }
                 add { Ctl(windowIcon, windowLabel, tint = windowTint, active = windowsOpen, modifier = Modifier.weight(1f)) { showWindows = true } }
                 // Combined locator: the ONE signal action the key session can fire directly (DK 0x03 =
                 // flash + honk together), so it's BLE-first (instant in range) with cloud fallback.
@@ -352,13 +354,23 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
 }
 
 @Composable
-private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Float?, powerKw: Double?) {
+private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Float?, powerKw: Double?, loading: Boolean = false) {
     val trans = rememberInfiniteTransition(label = "charge")
     val breathe by trans.animateFloat(0.04f, 0.24f, infiniteRepeatable(tween(2400), RepeatMode.Reverse), label = "breathe")
     Box(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
-            .height(196.dp).clip(RoundedCornerShape(22.dp)).background(Brand.paintCard(paint.color)),
+            // While identity is still loading (info == null) the model/paint default to a placeholder
+            // (7GT / Mystic Lilac); use a neutral card + spinner so we never flash that wrong car.
+            .height(196.dp).clip(RoundedCornerShape(22.dp))
+            .background(if (loading) SolidColor(Brand.surface2) else Brand.paintCard(paint.color)),
     ) {
+        if (loading) {
+            CircularProgressIndicator(Modifier.size(34.dp).align(Alignment.Center), color = Brand.muted, strokeWidth = 3.dp)
+            Row(Modifier.align(Alignment.BottomStart).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Loading…", color = Brand.muted, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+            }
+            return@Box
+        }
         if (charging) Box(Modifier.matchParentSize().background(Brand.energy.copy(alpha = breathe)))
         // Stock press render (white car) on the paint-tinted card.
         val bmp = rememberAssetBitmap(model.renderAsset)
@@ -384,8 +396,14 @@ private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Flo
 @Composable
 private fun StatItem(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, color = color, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-        Text(label, color = Brand.muted, fontSize = 11.sp)
+        // Value must stay on ONE line - shrink to fit the (1/N-width) column instead of wrapping
+        // ("Locke\nd", "578\nkm") on large display-size / font-scale phones.
+        AutoSizeText(value, color = color, maxFontSize = 19.sp, minFontSize = 12.sp,
+            fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth())
+        // Long labels ("Central lock", "Ø kWh/100km") may take two lines, but centred and capped so
+        // they never push the layout around.
+        Text(label, color = Brand.muted, fontSize = 11.sp, textAlign = TextAlign.Center,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
     }
 }
 
@@ -399,13 +417,20 @@ private fun Ctl(icon: ImageVector, label: String, tint: Color = MaterialTheme.co
             .border(1.dp, if (active) tint else Brand.line, CircleShape), contentAlignment = Alignment.Center) {
             Icon(icon, label, tint = if (active) tint else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
         }
-        Text(label, color = Brand.muted, fontSize = 11.sp, textAlign = TextAlign.Center)
+        // Tile caption: allow two centred lines, capped, so "Charge & more" doesn't overflow its column
+        // on a narrow / large-display phone.
+        Text(label, color = Brand.muted, fontSize = 11.sp, textAlign = TextAlign.Center,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 13.sp, modifier = Modifier.fillMaxWidth())
     }
 }
 
+/** "6.4 kW · 3-phase" (or just "6.4 kW" when the phase count is unknown / DC), or null when no power. */
+private fun chargePowerLabel(powerKw: Double?, phases: Int?): String? =
+    powerKw?.let { "${fmt1(it)} kW" + (phases?.let { p -> " · ${p}-phase" } ?: "") }
+
 @Composable
 private fun ChargeCtl(
-    charging: Boolean, plugged: Boolean, soc: Float?, powerKw: Double?,
+    charging: Boolean, plugged: Boolean, soc: Float?, powerKw: Double?, phases: Int? = null,
     timeToFullMin: Int? = null, modifier: Modifier = Modifier, onClick: () -> Unit,
 ) {
     Column(modifier.clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally,
@@ -427,7 +452,7 @@ private fun ChargeCtl(
         Text(
             // Idle label hints that the sheet holds ALL the charge settings (limit, scheduled charging,
             // battery pre-conditioning, port open/close), which users missed under the bare "Charge port".
-            when { charging -> powerKw?.let { "${fmt1(it)} kW · 1-phase" } ?: "Charging"; plugged -> "Plugged in"; else -> "Charge & more" },
+            when { charging -> chargePowerLabel(powerKw, phases) ?: "Charging"; plugged -> "Plugged in"; else -> "Charge & more" },
             // Match the lightning-bolt colour while charging (energy amber); muted otherwise.
             color = if (charging) Brand.energy else Brand.muted, fontSize = 11.sp, textAlign = TextAlign.Center,
         )
@@ -487,7 +512,7 @@ private fun ChargeSheet(
             Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text(soc?.let { "${fmt(it)}%" } ?: "—", fontSize = 30.sp, fontWeight = FontWeight.Bold)
                 Column(horizontalAlignment = Alignment.End) {
-                    Text(if (charging) (powerKw?.let { "${fmt1(it)} kW · 1-phase" } ?: "Charging") else if (plugged) "Plugged in" else "Unplugged",
+                    Text(if (charging) (chargePowerLabel(powerKw, elec?.chargePhases) ?: "Charging") else if (plugged) "Plugged in" else "Unplugged",
                         color = if (charging) Brand.energy else Brand.muted, fontWeight = FontWeight.SemiBold)
                     status?.additionalVehicleStatus?.electricVehicleStatus?.distanceToEmptyOnBatteryOnly?.let { Text("$it km range", color = Brand.muted, fontSize = 12.sp) }
                 }

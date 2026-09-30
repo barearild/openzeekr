@@ -327,6 +327,32 @@ class DkProvisioning(
             Logx.d("provision", "=== key removed (cloud best-effort, local fully wiped) ===")
         }
     }
+
+    /**
+     * Read the current per-key passive-entry state (approach-unlock / walk-away-lock) the car reports on
+     * OUR key-list entry, so the UI switches can reflect what the car actually has set - the same values
+     * stock's DK-management switches read. Returns (approachUnlock, walkAwayLock) or null if unreadable
+     * (no account/VIN, request failed, or no matching key). Best-effort, never throws.
+     */
+    suspend fun passiveState(): Pair<Boolean, Boolean>? = withContext(Dispatchers.IO) {
+        runCatching {
+            val cfg = store.current()
+            val deviceId = identity.deviceId
+            if (cfg.userId.isBlank() || cfg.vin.isBlank()) return@runCatching null
+            val sig = identity.signDkMessage(cfg.userId, cfg.vin)
+            val kl = api.keyList(KeyListReq(deviceId = deviceId, dkType = 2, signature = sig))
+            if (!ok(kl.code)) { Logx.w("provision", "passiveState: key-list ${kl.code}"); return@runCatching null }
+            val entry = kl.data?.firstOrNull { it.deviceId == deviceId } ?: kl.data?.firstOrNull()
+            ?: run { Logx.w("provision", "passiveState: no key entry"); return@runCatching null }
+            Logx.d("carprox", "passiveState: ${kl.data?.size ?: 0} key(s); ours dkStatus=${entry.dkStatus} " +
+                "approachUnlock=${entry.approachUnlock} walkAwayLock=${entry.walkAwayLock} " +
+                "(null = server omitted it; UI keeps the local mirror)")
+            // If the server didn't report the fields (non-activated key), return null so the UI keeps the
+            // local mirror instead of forcing both switches off.
+            if (entry.approachUnlock == null && entry.walkAwayLock == null) null
+            else (entry.approachUnlock == 1) to (entry.walkAwayLock == 1)
+        }.getOrNull()
+    }
 }
 
 // ---------------- DK cloud API (relative to baseUrl) ----------------
@@ -419,6 +445,9 @@ interface DkApi {
     val deviceId: String? = null,
     val dkStatus: Int? = null, val shareStatus: Int? = null, val keyType: Int? = null,
     val dkType: Int? = null, val ownerId: String? = null, val userId: String? = null,
+    // Per-key passive-entry state the car reports back (1 = on, 0 = off). Stock's DK-management
+    // switches read these; the values are on the key-list entry, NOT the vehicle status.
+    val approachUnlock: Int? = null, val walkAwayLock: Int? = null,
 )
 @Serializable data class KeyInfoData(
     val dkId: String? = null, val bookId: String? = null,
