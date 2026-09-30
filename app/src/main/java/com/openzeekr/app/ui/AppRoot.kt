@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +33,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -76,6 +78,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     SECURITY("Security", Icons.Filled.Shield),
     SCHEDULE("Schedule", Icons.Filled.CalendarMonth),
     KEY("Key", Icons.Filled.VpnKey),
+    UPDATES("Updates", Icons.Filled.SystemUpdate),
     SETTINGS("Settings", Icons.Filled.Settings),
     // Sentry footage/live-view stays hidden (sentinel-monitoring-service is CN-only /
     // unrouted on EU). SentryScreen is kept in the tree for when a workaround is found.
@@ -295,31 +298,38 @@ fun AppRoot(deps: Deps) {
         bottomBar = {
             // Every tab shares the width equally (RowScope weight) so ALL of them are ALWAYS on screen,
             // on any resolution - no horizontal scroll (users on narrow phones could not tell there were
-            // more tabs off-screen to the right). Labels stay single-line and ellipsize on very narrow
-            // widths rather than wrapping ("Schedul\ne", the reason we don't use the stock NavigationBar).
+            // more tabs off-screen to the right). ADAPTIVE labels: with enough width per tab we show the
+            // label under each icon; when it gets tight (many tabs + a small/large-display-size screen)
+            // we drop to clean ICONS-ONLY instead of letting labels crowd and ellipsize ("Sched…").
             Column {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Brand.line))
-                Row(
-                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
-                        .navigationBarsPadding()
-                        .padding(horizontal = 4.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    tabs.forEachIndexed { i, t ->
-                        val selected = tab == i
-                        val tint = if (selected) Brand.accent else Brand.muted
-                        Column(
-                            Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
-                                .clickable { tab = i }.padding(vertical = 6.dp, horizontal = 2.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(3.dp),
-                        ) {
-                            Icon(t.icon, t.label, tint = tint, modifier = Modifier.size(24.dp))
-                            Text(
-                                t.label, color = tint, fontSize = 10.sp,
-                                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            )
+                BoxWithConstraints(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)) {
+                    // ~50 dp per tab is the minimum for an icon + the longest single-line label ("Schedule"
+                    // / "Settings" at 10 sp). Standard phones keep labels; only tight / large-display-size
+                    // screens (where 7 labels would ellipsize) drop to icons-only.
+                    val showLabels = (maxWidth / tabs.size.coerceAtLeast(1)) >= 50.dp
+                    Row(
+                        Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 4.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        tabs.forEachIndexed { i, t ->
+                            val selected = tab == i
+                            val tint = if (selected) Brand.accent else Brand.muted
+                            Column(
+                                Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
+                                    .clickable { tab = i }.padding(vertical = 6.dp, horizontal = 2.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Icon(t.icon, t.label, tint = tint, modifier = Modifier.size(if (showLabels) 24.dp else 26.dp))
+                                if (showLabels) {
+                                    Text(
+                                        t.label, color = tint, fontSize = 10.sp,
+                                        maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -352,6 +362,7 @@ fun AppRoot(deps: Deps) {
                     snackbar = snackbar,
                 )
             }
+            Tab.UPDATES -> OtaScreen(deps, m)
             Tab.SETTINGS -> SettingsScreen(deps, m)
         }
     }

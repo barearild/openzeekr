@@ -317,6 +317,39 @@ class ShareRepository(private val store: ConfigStore, private val client: ApiCli
 }
 
 /**
+ * OTA software-update CHECK (under development). Cloud-orchestration only - the car does the actual
+ * GEEA FOTA download/flash itself; we can only ask "is a new version assigned?". Lives on the azure
+ * overseas-app gateway, so it needs the overseas AK/SK (Frida-dumped) - without them it fails soft
+ * (401 -> CallResult.Err), same as the inbox. Apply/confirm/progress are NOT implemented (need a live
+ * capture while an update is actually available).
+ */
+class OtaRepository(private val store: ConfigStore, private val client: ApiClient) {
+    suspend fun checkUpdate(): CallResult<com.openzeekr.app.net.model.OtaStatus> = withContext(Dispatchers.IO) {
+        guarded {
+            val cfg = store.current()
+            val vin = cfg.vin
+            require(vin.isNotBlank()) { "No active car selected" }
+            // The versionV2 body wants the raw platform codes (modelCode=year, seriesCode/vehicleModelNo=
+            // appModelCode); pull them from the vehicle-list for the active VIN.
+            val all = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data)
+            val info = all.firstOrNull { it.vin == vin } ?: all.firstOrNull()
+            val seriesCode = info?.appModelCode.orEmpty()
+            val url = "${cfg.azureHost.trimEnd('/')}/overseas-app/ota/os/versionV2"
+            val resp = client.api.otaVersion(
+                url,
+                com.openzeekr.app.net.model.OtaVersionRequest(
+                    modelCode = info?.appYearCode.orEmpty(),
+                    seriesCode = seriesCode,
+                    vehicleModelNo = seriesCode,
+                    vehicleVin = vin,
+                ),
+            )
+            com.openzeekr.app.net.model.Ota.parse(resp.data)
+        }
+    }
+}
+
+/**
  * Member message-center ("Inbox"): charging done/abnormal, alarm / abnormal parking,
  * remote-control results, low battery, OTA, marketing. On-demand paged REST on the same
  * gateway — there is no push of message bodies (FCM only deep-links). Endpoints and

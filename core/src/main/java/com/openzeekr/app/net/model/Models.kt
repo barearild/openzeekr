@@ -317,6 +317,10 @@ data class VehicleInfo(
     val isOwner: Boolean = false,
     /** The car's VIN (needed for multi-car: the active VIN keys every cloud call). */
     val vin: String? = null,
+    /** Raw platform codes from the vehicle-list (appModelCode="CC1E", appYearCode="1614"). Kept for the
+     *  OTA version check, whose body needs modelCode/seriesCode/vehicleModelNo (NOT for display). */
+    val appModelCode: String? = null,
+    val appYearCode: String? = null,
 )
 
 /** Tolerant parse of the (shape-varying) vehicle-list `data`. */
@@ -345,6 +349,8 @@ object VehicleGarage {
             vehicleId = s("id") ?: s("vehicleId") ?: s("relationId"),
             isOwner = ownerFlag,
             vin = s("vin"),
+            appModelCode = s("appModelCode") ?: s("appInnerCode") ?: s("seriesCode"),
+            appYearCode = s("appYearCode") ?: s("modelCode"),
         )
     }
 
@@ -457,6 +463,53 @@ object ShareInviteParse {
                 acceptTime = l("acceptTime"),
             )
         }
+    }
+}
+
+// -------------------------------------------------------------- OTA software-update check
+// Cloud-orchestration ONLY (the car does the GEEA FOTA download/flash itself). We wire just the CHECK
+// (POST {azureHost}/overseas-app/ota/os/versionV2) for now: current car SW version + whether an update
+// is assigned. Auth = the overseas-app interceptor (needs the overseas AK/SK, Frida-dumped).
+
+@Serializable
+data class OtaVersionRequest(
+    val modelCode: String,
+    val seriesCode: String,
+    val vehicleModelNo: String,
+    val vehicleVin: String,
+)
+
+/** Parsed OTA check result for the UI. */
+data class OtaStatus(
+    val currentVersion: String?,
+    val targetVersion: String?,
+    val updateAvailable: Boolean,
+    val releaseNotes: List<String>,
+)
+
+object Ota {
+    /** Parse the versionV2 `data` object. Tolerant: any missing field -> null / false. */
+    fun parse(data: JsonElement?): OtaStatus {
+        val o = data as? JsonObject
+        fun verOf(key: String): Pair<String?, List<String>> {
+            val v = o?.get(key) as? JsonObject ?: return null to emptyList()
+            val disp = (v["displayVersion"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+            val notes = (v["bssPackageReleaseNotes"] as? JsonArray).orEmpty().mapNotNull { n ->
+                ((n as? JsonObject)?.get("description") as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+            }
+            return disp to notes
+        }
+        val (current, currentNotes) = verOf("currentVehicleVersion")
+        val (target, targetNotes) = verOf("targetVehicleVersion")
+        val hasNew = (o?.get("hasNewAssignment") as? JsonPrimitive)?.let {
+            it.contentOrNull == "true" || it.contentOrNull == "1"
+        } ?: false
+        return OtaStatus(
+            currentVersion = current,
+            targetVersion = target,
+            updateAvailable = hasNew || target != null,
+            releaseNotes = if (targetNotes.isNotEmpty()) targetNotes else currentNotes,
+        )
     }
 }
 
@@ -827,6 +880,18 @@ data class VehicleCapabilities(
     /** Cooled/ventilated seats — not all models have them. Fail CLOSED like the roof features: only
      *  true when the capability list positively advertises seat ventilation. */
     val seatCoolConfirmed: Boolean = false,
+    /**
+     * REAR-seat ventilation specifically. The single [seatCool] flag (from "seat_ventilation" /
+     * "seat_ventilation_level") can't tell a fitted front vent from an absent rear vent: on a 7GT
+     * Privilege the rear seats are heat-only (front vent comes with the Seat Pack). The stock
+     * capability carries the real per-zone answer in paramCode "new_seat_ventilation_position",
+     * whose paramValueCode enumerates ONLY the seats that actually have ventilation
+     * (main_driver_seat / copilot_seat for the front, second_row_left / second_row_right for the
+     * rear). Stock's ModelTransformKt maps second_row_* -> setSeatVentilateBL/BRSupported. We mirror
+     * that: true only when a rear position is positively advertised; fail CLOSED otherwise so we
+     * never show a rear vent button the car lacks.
+     */
+    val rearSeatCoolConfirmed: Boolean = false,
 ) {
     private fun has(vararg keys: String): Boolean =
         !known || keys.any { k -> codes.any { it.contains(k, ignoreCase = true) } }
@@ -873,6 +938,10 @@ data class VehicleCapabilities(
     // fetched yet, known=false) still reads true via has()'s fail-open, so the control isn't hidden
     // before the list loads. ([seatCoolConfirmed] kept for reference.)
     val seatCool get() = has("seat_ventilation_level") || has("seat_ventilation")
+    // Rear-seat ventilation: fail CLOSED, presence gate on the per-zone capability only (see
+    // [rearSeatCoolConfirmed]). Unlike [seatCool] this does NOT fail open when the list is unknown:
+    // rear vent is rare optional hardware, so we hide it until a rear position proves it's fitted.
+    val rearSeatCool get() = rearSeatCoolConfirmed
     val steeringHeat get() = has("steering_wheel_heating")
     val charging get() = has("V_RCS", "RCS")
     val glovebox get() = has("storageBox_codeLock", "T_ZAP", "ZAD")
@@ -917,8 +986,18 @@ object VehicleCapabilityParse {
             (o["functionCode"] as? JsonPrimitive)?.contentOrNull == "seat_ventilation" &&
                 (o["paramValueUse"] as? JsonPrimitive)?.contentOrNull?.trim() == "Y"
         }
+        // Rear-seat ventilation (per-zone, fail closed): a bean with paramCode
+        // "new_seat_ventilation_position" and a rear-row paramValueCode ("second_row_left" /
+        // "second_row_right"). A 7GT whose vent positions list only the front seats omits these, so a
+        // fail-open check would wrongly show the rear vent buttons the reporter flagged.
+        val rearSeatCool = beans.any { o ->
+            val pos = (o["paramValueCode"] as? JsonPrimitive)?.contentOrNull
+            (o["paramCode"] as? JsonPrimitive)?.contentOrNull == "new_seat_ventilation_position" &&
+                (pos == "second_row_left" || pos == "second_row_right")
+        }
         return VehicleCapabilities(
             codes, sunroofConfirmed = sunroof, sunshadeConfirmed = sunshade, seatCoolConfirmed = seatCool,
+            rearSeatCoolConfirmed = rearSeatCool,
         )
     }
 }
@@ -1081,6 +1160,10 @@ data class ElectricStatusVo(
      *  [chargePowerW] / issue #9). */
     val chargeIAct: String? = null,
     val chargeUAct: String? = null,
+    /** The SET AC charge-current limit (amps) - the SETPOINT, distinct from the live [chargeIAct]. This is
+     *  the readback for the RCS `altCurrent` control; null until a current has been set. (See the
+     *  ac-charge-current-control note.) */
+    val acSettingCurrent: String? = null,
     /** DC fast-charge pile live current (A) and voltage (V); their product is DC charge power
      *  directly (no phase factor). Populated only during a DC session. */
     val dcChargePileIAct: String? = null,
@@ -1293,6 +1376,7 @@ object VehicleStatus {
                             chargeLidDcAcStatus = e.str("chargeLidDcAcStatus"),
                             chargeIAct = e.str("chargeIAct"),
                             chargeUAct = e.str("chargeUAct"),
+                            acSettingCurrent = e.str("acSettingCurrent"),
                             distanceToEmptyOnBatteryOnly = e.str("distanceToEmptyOnBatteryOnly"),
                             hvBatteryPreHeatingActive = e.boolOf("hvBatteryPreHeatingActive"),
                             averPowerConsumption = e.str("averPowerConsumption"),

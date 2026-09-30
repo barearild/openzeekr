@@ -173,6 +173,13 @@ interface TspApi {
     @GET
     suspend fun vehicleConfig(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
 
+    // ---- OTA software-update check (azure overseas-app gateway) ----
+    // POST {azureHost}/overseas-app/ota/os/versionV2 {modelCode, seriesCode, vehicleModelNo, vehicleVin}
+    // -> data.currentVehicleVersion.displayVersion + targetVehicleVersion + hasNewAssignment. Absolute
+    // @Url; the interceptor auths it as an /overseas-app request (needs the overseas AK/SK).
+    @POST
+    suspend fun otaVersion(@Url url: String, @Body body: com.openzeekr.app.net.model.OtaVersionRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
+
     @PUT
     suspend fun inboxMarkRead(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
 

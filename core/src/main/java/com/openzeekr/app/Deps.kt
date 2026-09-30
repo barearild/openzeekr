@@ -16,6 +16,7 @@ import com.openzeekr.app.remote.CapabilityHolder
 import com.openzeekr.app.remote.InboxRepository
 import com.openzeekr.app.remote.JourneyRepository
 import com.openzeekr.app.remote.NavRepository
+import com.openzeekr.app.remote.OtaRepository
 import com.openzeekr.app.remote.RemoteControlRepository
 import com.openzeekr.app.remote.SentryRepository
 import com.openzeekr.app.remote.VehicleStatusHolder
@@ -66,6 +67,8 @@ class Deps(context: Context) {
     val journey = JourneyRepository(config, apiClient)
     /** Member message center (charging done, abnormal parking, alarms, OTA, …). */
     val inbox = InboxRepository(config, apiClient)
+    /** OTA software-update check (under development; check-only). */
+    val ota = OtaRepository(config, apiClient)
     /** Car-share invitations: accept/decline a car shared with us (no stock app needed). */
     val share = com.openzeekr.app.remote.ShareRepository(config, apiClient)
     /** Pending car-share invitations addressed to us; observed by AppRoot to raise the accept dialog. */

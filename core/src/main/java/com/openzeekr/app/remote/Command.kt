@@ -104,6 +104,14 @@ enum class Command(
     //   [{"key":"soc","value":"949"},{"key":"rcs.setting","value":"1"},{"key":"altCurrent","value":"1"}]
     SET_CHARGE_SOC("Set Charge Limit", Category.CHARGING, "RCS", "start",
         listOf(ServiceParameter("soc", "800"), ServiceParameter("rcs.setting", "1"), ServiceParameter("altCurrent", "1"))),
+    // Set the AC charge CURRENT (amps). Byte-matched to the stock app captured on the wire via Frida:
+    //   {"serviceId":"RCS","command":"start","serviceParameters":[{"rcs.ac.current":<amps>},{"rcs.setting":"1"}]}
+    // (DC uses rcs.dc.current.) NOTE (2026-10-01): PROVEN not remotely settable on the EU 7GT - even the
+    // stock app, forced to send this exact body, TIMES OUT and the amp never changes; the car advertises
+    // VehicleCapability.acRange="0" ("no remote AC-current control") and enforces it car-side (local HMI
+    // still works). So this is a car/market gate, not a client bug. Kept for cars that expose acRange>0.
+    SET_CHARGE_CURRENT("Set Charge Current", Category.CHARGING, "RCS", "start",
+        listOf(ServiceParameter("rcs.ac.current", "16"), ServiceParameter("rcs.setting", "1"))),
     BATTERY_PREHEAT_ON("Battery Preheat On", Category.CHARGING, "ZAN", "start"),
     BATTERY_PREHEAT_OFF("Battery Preheat Off", Category.CHARGING, "ZAN", "stop"),
 

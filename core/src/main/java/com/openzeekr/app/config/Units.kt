@@ -40,4 +40,9 @@ object Units {
 
     fun distanceSuffix(unit: String): String = if (unit.lowercase() == "mi") "mi" else "km"
     fun distanceValue(km: Double, unit: String): Double = if (unit.lowercase() == "mi") km * 0.6213712 else km
+
+    /** Speed from km/h, following the distance unit preference (km/h or mph). */
+    fun speedValue(kmh: Int, unit: String): Int =
+        if (unit.lowercase() == "mi") Math.round(kmh * 0.6213712f) else kmh
+    fun speedUnitLabel(unit: String): String = if (unit.lowercase() == "mi") "mph" else "km/h"
 }

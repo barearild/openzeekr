@@ -40,7 +40,7 @@ fun iconFor(cmd: Command): ImageVector = when (cmd) {
     Command.WINDOW_OPEN, Command.WINDOW_CLOSE, Command.WINDOW_VENT -> OzIcons.CarWindow
     Command.SUNROOF_OPEN, Command.SUNROOF_CLOSE -> Icons.Filled.WbSunny
     Command.SUNSHADE_OPEN, Command.SUNSHADE_CLOSE -> Icons.Filled.Layers
-    Command.CHARGING_ON, Command.CHARGING_OFF, Command.SET_CHARGE_SOC,
+    Command.CHARGING_ON, Command.CHARGING_OFF, Command.SET_CHARGE_SOC, Command.SET_CHARGE_CURRENT,
     Command.BATTERY_PREHEAT_ON, Command.BATTERY_PREHEAT_OFF -> Icons.Filled.BatteryChargingFull
     Command.FLASH -> Icons.Filled.FlashOn
     Command.HONK -> Icons.Filled.VolumeUp

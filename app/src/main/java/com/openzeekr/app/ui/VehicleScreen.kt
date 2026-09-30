@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Kitchen
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -151,6 +152,16 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     val maint = status?.additionalVehicleStatus?.maintenanceStatus
     val climate = status?.additionalVehicleStatus?.climateStatus
 
+    // Driving vs idle: engineStatus "engine-off" = parked; anything else = the car is on/in use. A live
+    // road speed (> 0) means it's actually moving. When driving we surface the current speed on the hero
+    // instead of the parked paint label. (speed is car-native km/h; convert to the user's unit.)
+    val basic = status?.basicVehicleStatus
+    val engineOn = basic?.engineStatus?.let { it.isNotBlank() && !it.equals("engine-off", ignoreCase = true) } ?: false
+    val speedKmh = basic?.speed?.takeIf { it > 0 }
+    val driving = engineOn || speedKmh != null
+    val heroSpeed = speedKmh?.let { Units.speedValue(it, cfg.distanceUnit) }
+    val heroSpeedUnit = Units.speedUnitLabel(cfg.distanceUnit)
+
     // Home-screen climate glyph: while A/C runs, show whether it's cooling or heating the cabin —
     // compare interior temp to the target setpoint. Cooling → blue snowflake; heating → orange sun.
     // The car doesn't report the setpoint, so use our remembered [targetTemp] (prefer the car's
@@ -223,7 +234,8 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
     }
 
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
-        Hero(model, paint, charging, soc, powerKw, loading = info == null)
+        Hero(model, paint, charging, soc, powerKw, driving = driving, speedNum = heroSpeed,
+            speedUnit = heroSpeedUnit, loading = info == null)
 
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             StatItem("Central lock", if (locked) "Locked" else "Unlocked", if (locked) Brand.good else Brand.energy, Modifier.weight(1f))
@@ -326,11 +338,12 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
 
     if (showCharge) ChargeSheet(status, soc, powerKw, charging, plugged, elec,
         initialLimitPct = cfg.chargeLimitPct,
+        devMode = cfg.devMode,
         onCmd = { c, extra -> fire("Charge") { deps.control.send(c, extra) } },
         onLimitSet = { pct -> deps.config.update { it.copy(chargeLimitPct = pct) } },
         onDismiss = { showCharge = false })
     if (showClimate) ClimateSheet(status?.additionalVehicleStatus?.climateStatus,
-        initialTemp = targetTemp, showSeatCool = caps.seatCool,
+        initialTemp = targetTemp, showSeatCool = caps.seatCool, showRearSeatCool = caps.rearSeatCool,
         onTempChange = { t -> targetTemp = t; writeTargetTemp(ctx, t) },
         onCmd = { c, extra -> fireQuiet("Climate") { deps.control.send(c, extra) } }, onDismiss = { showClimate = false })
     // Window/trunk actions close the sheet first, THEN fire — the snackbar host lives behind the modal
@@ -354,7 +367,10 @@ fun VehicleScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = M
 }
 
 @Composable
-private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Float?, powerKw: Double?, loading: Boolean = false) {
+private fun Hero(
+    model: CarModel, paint: PaintColor, charging: Boolean, soc: Float?, powerKw: Double?,
+    driving: Boolean = false, speedNum: Int? = null, speedUnit: String = "km/h", loading: Boolean = false,
+) {
     val trans = rememberInfiniteTransition(label = "charge")
     val breathe by trans.animateFloat(0.04f, 0.24f, infiniteRepeatable(tween(2400), RepeatMode.Reverse), label = "breathe")
     Box(
@@ -380,6 +396,23 @@ private fun Hero(model: CarModel, paint: PaintColor, charging: Boolean, soc: Flo
             horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             Box(Modifier.size(13.dp).clip(CircleShape).background(paint.color))
             Text(paint.name, color = Color.White.copy(alpha = .92f), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+        }
+        // Being driven: a live-speed badge in the top-right corner (falls back to a "Driving" chip when the
+        // car is on but not reporting a road speed). Distinguishes an in-use car from a parked/idle one.
+        if (driving) {
+            Row(
+                Modifier.align(Alignment.TopEnd).padding(12.dp).clip(RoundedCornerShape(14.dp))
+                    .background(Color.Black.copy(alpha = .38f)).padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (speedNum != null) {
+                    Text("$speedNum", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Text(speedUnit, color = Color.White.copy(alpha = .85f), fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 3.dp))
+                } else {
+                    Text("Driving", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
         }
         if (charging && soc != null) {
             val phase by trans.animateFloat(0f, 1f, infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart), label = "soc")
@@ -493,12 +526,18 @@ private fun Tyre(pos: String, kpa: String?, unit: String, modifier: Modifier = M
     }
 }
 
+/** AC charge-current setpoint bounds (amps): min 5 A, max 32 A = the car's onboard AC ceiling
+ *  (~22 kW 3-phase, 32 A/phase). Same in EU and AU/NZ (230 V / 400 V). Reuses the shared [StepBtn]. */
+private const val AC_CURRENT_MIN = 5
+private const val AC_CURRENT_MAX = 32
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChargeSheet(
     status: VehicleStatusBean?, soc: Float?, powerKw: Double?,
     charging: Boolean, plugged: Boolean, elec: ElectricStatusVo?,
     initialLimitPct: Int = 80,
+    devMode: Boolean = false,
     onCmd: (Command, List<ServiceParameter>) -> Unit,
     onLimitSet: (Int) -> Unit = {}, onDismiss: () -> Unit,
 ) {
@@ -542,6 +581,34 @@ private fun ChargeSheet(
                         }
                     }
                 })
+            // AC charge-current (amps) limit - DEV-ONLY. Proven a car-side gate: even the stock app (exact
+            // same rcs.ac.current body) times out and the amp never changes on the EU 7GT (VehicleCapability
+            // acRange="0" = no remote AC-current control). Kept behind developer mode for cars/markets that
+            // expose acRange>0. Range 5..32 A; seed = acSettingCurrent set-point, else live chargeIAct, else 16.
+            if (devMode) {
+                var current by remember(elec?.acSettingCurrent, elec?.chargeIAct) {
+                    val seed = elec?.acSettingCurrent?.toIntOrNull()
+                        ?: elec?.chargeIAct?.toDoubleOrNull()?.let { kotlin.math.round(it).toInt() }
+                        ?: 16
+                    mutableStateOf(seed.coerceIn(AC_CURRENT_MIN, AC_CURRENT_MAX))
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("AC charge current (dev / car-gated)", fontWeight = FontWeight.SemiBold)
+                        Text(elec?.acSettingCurrent?.let { "Car reports: $it A" } ?: "Car reports: not set yet",
+                            color = Brand.muted, fontSize = 11.5.sp)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StepBtn("−") { current = (current - 1).coerceAtLeast(AC_CURRENT_MIN) }
+                        Text("$current A", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.widthIn(min = 44.dp), textAlign = TextAlign.Center)
+                        StepBtn("+") { current = (current + 1).coerceAtMost(AC_CURRENT_MAX) }
+                    }
+                }
+                PrimaryButton("Set charge current ($current A)", Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    onCmd(Command.SET_CHARGE_CURRENT, listOf(ServiceParameter("rcs.ac.current", current.toString())))
+                }
+            }
+
             SheetToggleRow("Battery temp regulation", "Precondition the pack — run before charging",
                 checked = elec?.hvBatteryPreHeatingActive == true) { on ->
                 onCmd(if (on) Command.BATTERY_PREHEAT_ON else Command.BATTERY_PREHEAT_OFF, emptyList())
@@ -639,6 +706,9 @@ private fun ClimateSheet(
     climate: ClimateStatusVo?,
     initialTemp: Double,
     showSeatCool: Boolean,
+    // Rear vent is gated separately: the 7GT Privilege has front ventilation (Seat Pack) but heat-only
+    // rear seats, and the capability API advertises rear vent only when it's actually fitted.
+    showRearSeatCool: Boolean,
     onTempChange: (Double) -> Unit,
     onCmd: (Command, List<ServiceParameter>) -> Unit,
     onDismiss: () -> Unit,
@@ -705,9 +775,9 @@ private fun ClimateSheet(
                 }
                 // rear row
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SeatCabinTile("Rear L", "21", climate?.rlHeatingSts, climate?.rlVentDetail, showSeatCool, Modifier.weight(1f), onCmd)
+                    SeatCabinTile("Rear L", "21", climate?.rlHeatingSts, climate?.rlVentDetail, showRearSeatCool, Modifier.weight(1f), onCmd)
                     Spacer(Modifier.width(20.dp))
-                    SeatCabinTile("Rear R", "29", climate?.rrHeatingSts, climate?.rrVentDetail, showSeatCool, Modifier.weight(1f), onCmd)
+                    SeatCabinTile("Rear R", "29", climate?.rrHeatingSts, climate?.rrVentDetail, showRearSeatCool, Modifier.weight(1f), onCmd)
                 }
             }
 

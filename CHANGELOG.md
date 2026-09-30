@@ -3,7 +3,16 @@
 All notable changes to OpenZeekr are recorded here. OpenZeekr is a free, non-commercial
 clean-room app and is not affiliated with Zeekr.
 
-## [0.1.9] - 2026-09-30
+## [0.1.9] - 2026-10-01
+
+### Added
+- **Live speed on the hero card.** When the car is being driven, the home card shows the
+  current speed; while it's parked you get the normal card. Updates refresh faster while
+  driving (and only while the app is open).
+- **Software updates tab (experimental).** A new "Updates" tab checks whether your car has a
+  new software version available. It's under development - it can only check for now, not
+  install - and on most setups the check needs credentials it won't have, so it may be
+  unavailable.
 
 ### Fixed
 - **Crash on startup (introduced in 0.1.8).** On setups without the optional inbox
@@ -14,6 +23,9 @@ clean-room app and is not affiliated with Zeekr.
   connected to it as you walked up. Previously it only unlocked if the key was still linking
   at the moment you arrived, so walking up to an already-connected car often did nothing. It
   still unlocks only once per approach and re-arms after you walk away.
+- **Rear seat ventilation** buttons no longer show on cars that don't have the feature (e.g. a
+  7GT with heated-only rear seats). The Climate tab now follows the car's actual fitted
+  ventilation zones instead of a generic four-seat layout. Thanks to Atarinside (issue #20).
 
 ### Changed
 - **Walk-away auto-lock** now waits until you've clearly left the car before locking - it was
@@ -21,6 +33,8 @@ clean-room app and is not affiliated with Zeekr.
   one consistent gap (calibrated or not).
 - **Calibration** step 2 now says "the driver's side" instead of "to the left", so it's correct
   on right-hand-drive cars (left for LHD, right for RHD).
+- **Bottom navigation** adapts to the screen: it keeps labels where there's room and falls back
+  to clean icons on smaller / large-display screens, so the tabs never crowd.
 
 ## [0.1.8] - 2026-09-30
 
