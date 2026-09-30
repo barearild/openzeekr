@@ -3,6 +3,14 @@
 All notable changes to OpenZeekr are recorded here. OpenZeekr is a free, non-commercial
 clean-room app and is not affiliated with Zeekr.
 
+## [0.1.9] - 2026-09-30
+
+### Fixed
+- **Approach unlock** now triggers when you reach the car even if your phone had already
+  connected to it as you walked up. Previously it only unlocked if the key was still linking
+  at the moment you arrived, so walking up to an already-connected car often did nothing. It
+  still unlocks only once per approach and re-arms after you walk away.
+
 ## [0.1.8] - 2026-09-30
 
 ### Added

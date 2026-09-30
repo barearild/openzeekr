@@ -92,6 +92,11 @@ class ProximityController(
     private var armedUnlocked = false
     // Confirmed-unlock retry loop: true while actively trying to unlock; the job is the loop itself.
     @Volatile private var needToUnlock = false
+    // True once we've acted on an arrival (fired the unlock) since the last time we were clearly FAR.
+    // Lets a session that comes up ALREADY near the car fire once (the FAR->NEAR crossing is missed when
+    // the phone is near before SESSION_READY, since zone latches to NEAR while we wait for the handshake).
+    // Reset when we go FAR, so a walk-away-then-return re-arms.
+    private var arrivalActed = false
     private var unlockJob: Job? = null
     // Confirmed-lock loop (walk-away). Locking matters more than unlocking — never leave the car open —
     // so this is at least as persistent as unlock and falls back to a cloud lock if BLE won't confirm.
@@ -142,6 +147,7 @@ class ProximityController(
         // reset so a fresh monitor starts from a known state.
         armedUnlocked = false
         needToUnlock = false; unlockJob?.cancel(); unlockJob = null
+        arrivalActed = false
         farAsleep = false; nearRefDist = null; nearStillSinceMs = 0L
         farApproachDeadline = 0L; farApproachRefDist = Double.MAX_VALUE
         _wakeLockNeeded.value = true   // hold until the first sample decides (bring-up needs the CPU)
@@ -248,6 +254,7 @@ class ProximityController(
         } else if (walkAwayArmed && now - linkLostAtMs >= LINK_LOSS_LOCK_DELAY_MS) {
             walkAwayArmed = false
             armedUnlocked = false
+            arrivalActed = false
             Logx.d("prox", "walk-away confirmed (link down ${LINK_LOSS_LOCK_DELAY_MS}ms) -> lock")
             startLockLoop("walk-away-lock (link down)")
         }
@@ -413,18 +420,21 @@ class ProximityController(
         // for SESSION_READY makes the unlock instant instead. Cadence/zone above still update.
         if (ble.state.value != DkBleManager.State.SESSION_READY) return
 
-        // UNLOCK on ARRIVAL: near enough AND we weren't already sitting near on the previous sample —
-        // i.e. a clean FAR->NEAR crossing, OR a FRESH session (prevZone == UNKNOWN: the presence scan
-        // just brought us into range / we just (re)connected). This is the fix for "woke the phone AT
-        // the car and nothing happened": the handshake often only reaches SESSION_READY once you're
-        // already standing still, so the old rising-RSSI-trend requirement missed it. The armedUnlocked
-        // latch still guarantees a single unlock per approach (reconnects while parked won't re-fire).
-        if (!armedUnlocked && !needToUnlock && smoothed >= unlockThresh && prevZone != Zone.NEAR) {
+        // UNLOCK on ARRIVAL: near enough, and either a clean FAR->NEAR crossing OR the first time we're
+        // NEAR-while-ready this approach ([arrivalActed] is false until we act, reset when we go FAR). The
+        // plain `prevZone != NEAR` crossing MISSED "woke/connected AT the car": the zone latches to NEAR on
+        // the first sample - often before SESSION_READY - so by the time the handshake is up prevZone is
+        // already NEAR and no crossing is seen. [arrivalActed] + the armedUnlocked/needToUnlock latches
+        // still guarantee a single unlock per approach (reconnects while parked won't re-fire).
+        if (!armedUnlocked && !needToUnlock && smoothed >= unlockThresh && (prevZone != Zone.NEAR || !arrivalActed)) {
+            arrivalActed = true
             needToUnlock = true
             Logx.d("prox", "approach-unlock ARM (rssi=$smoothed ~${"%.1f".format(dist)}m prevZone=$prevZone) — confirmed-unlock loop")
             startUnlockLoop()
             return
         }
+        // Re-arm the arrival latch once we're clearly FAR, so a walk-away then walk-back unlocks again.
+        if (smoothed <= lockThresh) arrivalActed = false
         // WALK-AWAY cancels a pending unlock loop — only once we cross to FAR (≤ lockThresh). The NEAR/FAR
         // hysteresis gap is the "smoothing" so it can't flap while you hover at the door; cancelling also
         // stops any stale mid-retry command dead.
