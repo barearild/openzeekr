@@ -79,14 +79,15 @@ class CalibrationTestController(
      *
      * The four points fit the phone's RSSI->distance+direction model:
      *  1 door handle  = the passive-entry "at the handle" near threshold (ties to the 0x182 handle
-     *                   ranging round) - RIGHT side, ~0 m.
-     *  2 6 m left     = far-field, driver side (distance decay + left/right direction).
+     *                   ranging round) - the DRIVER's door, ~0 m.
+     *  2 6 m driver-side = far-field on the driver's side (distance decay + left/right direction). Phrased
+     *                   as "driver's side", NOT "left", so it is correct for LHD (left) AND RHD (right).
      *  3 6 m rear     = far-field, behind (front/back direction).
      *  4 charger      = "inside the cabin" reference (don't-lock / allow-drive threshold).
      */
     val stepPrompts: List<String> = listOf(
         "1/4  Phone flat on the DRIVER's DOOR HANDLE. Then tap Continue.",
-        "2/4  Outside, ~6 m to the LEFT of the car. Then tap Continue.",
+        "2/4  Outside, ~6 m out on the DRIVER'S SIDE of the car (left for LHD, right for RHD). Then tap Continue.",
         "3/4  Outside, ~6 m behind the REAR of the car. Then tap Continue.",
         "4/4  Inside the car, phone on the WIRELESS CHARGING pad. Then tap Continue.",
     )

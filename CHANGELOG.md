@@ -19,6 +19,8 @@ clean-room app and is not affiliated with Zeekr.
 - **Walk-away auto-lock** now waits until you've clearly left the car before locking - it was
   locking too soon, as little as a step back from the door. The unlock and lock points now use
   one consistent gap (calibrated or not).
+- **Calibration** step 2 now says "the driver's side" instead of "to the left", so it's correct
+  on right-hand-drive cars (left for LHD, right for RHD).
 
 ## [0.1.8] - 2026-09-30
 
