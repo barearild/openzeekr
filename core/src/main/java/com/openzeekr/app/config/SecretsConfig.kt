@@ -330,17 +330,19 @@ data class SecretsConfig(
             else -> -66 // close
         }
 
-    /** Lock (walk-away) RSSI. Calibrated: around the measured ~6 m level, but always a hysteresis gap
-     *  below unlock so the two can't overlap. Uncalibrated: unlock − 8 dB (unchanged legacy behaviour). */
-    val sensitivityLockRssi: Int
-        get() = if (isProximityCalibrated) minOf(calibFarRssi, sensitivityUnlockRssi - LOCK_RSSI_GAP_DB)
-        else sensitivityUnlockRssi - 8
+    /** Lock (walk-away) RSSI = unlock − [LOCK_RSSI_GAP_DB], the SAME fixed hysteresis gap whether or not
+     *  the phone is calibrated. Lock fires when the signal falls this many dB below the unlock point, i.e.
+     *  once you've clearly walked away - a bigger gap means it waits until you're further out before
+     *  locking (a smaller gap locked too soon, the moment you stepped back from the door). */
+    val sensitivityLockRssi: Int get() = sensitivityUnlockRssi - LOCK_RSSI_GAP_DB
 
     companion object {
         /** Unlock can never be set weaker (more negative) than this — safety floor. */
         const val UNLOCK_RSSI_FLOOR = -65
-        /** Lock threshold sits this many dB weaker than unlock (fixed hysteresis gap). */
-        const val LOCK_RSSI_GAP_DB = 5
+        /** Lock threshold sits this many dB weaker (farther) than unlock - the single hysteresis gap used
+         *  by both the calibrated and the uncalibrated path. Larger = you must walk further away before the
+         *  car auto-locks (5 dB locked too soon; 10 dB waits until you've clearly left). */
+        const val LOCK_RSSI_GAP_DB = 10
         /** Minimum door→6 m RSSI span (dB) for a calibration to be trusted; below this the walk was
          *  too noisy / the anchors too close, so we ignore it and keep the fixed presets. */
         const val CALIB_MIN_SPAN_DB = 4

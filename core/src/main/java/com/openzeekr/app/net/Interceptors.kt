@@ -139,6 +139,12 @@ class OverseasAppAuthInterceptor(private val store: ConfigStore) : Interceptor {
         val req = chain.request()
         if (!req.isOverseasApp()) return chain.proceed(req)
         val cfg = store.current()
+        // The overseas-app HMAC AK/SK are OPTIONAL (Frida-dumped; blank for most users). Signing with a
+        // blank secret makes OverseasSign -> SecretKeySpec throw "Empty key" and crashes the OkHttp
+        // dispatcher thread. Without these keys the overseas-app features (inbox, azure vehicle-config)
+        // simply aren't available, so proceed UNSIGNED - the request fails cleanly (401) instead of
+        // taking the app down. (Reported by fredrik@fredda.se on 0.1.8.)
+        if (cfg.overseasAccessKey.isBlank() || cfg.overseasSecretKey.isBlank()) return chain.proceed(req)
         val xDate = OverseasSign.dateHeader()
         val bodyBytes = req.body?.let { body -> Buffer().use { buf -> body.writeTo(buf); buf.readByteArray() } } ?: ByteArray(0)
         val sig = OverseasSign.signature(

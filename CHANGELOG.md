@@ -6,10 +6,19 @@ clean-room app and is not affiliated with Zeekr.
 ## [0.1.9] - 2026-09-30
 
 ### Fixed
+- **Crash on startup (introduced in 0.1.8).** On setups without the optional inbox
+  credentials (which most people don't have), the app could crash right after the main
+  screen. Those overseas-app features are now simply unavailable when the keys aren't set,
+  instead of taking the app down. Thanks to Fredrik for the report and diagnosis.
 - **Approach unlock** now triggers when you reach the car even if your phone had already
   connected to it as you walked up. Previously it only unlocked if the key was still linking
   at the moment you arrived, so walking up to an already-connected car often did nothing. It
   still unlocks only once per approach and re-arms after you walk away.
+
+### Changed
+- **Walk-away auto-lock** now waits until you've clearly left the car before locking - it was
+  locking too soon, as little as a step back from the door. The unlock and lock points now use
+  one consistent gap (calibrated or not).
 
 ## [0.1.8] - 2026-09-30
 
