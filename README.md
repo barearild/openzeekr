@@ -1,6 +1,6 @@
 # OpenZeekr
 
-**Version 0.1.7** · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog](#changelog)
+[![Latest release](https://img.shields.io/github/v/release/borconi/openzeekr?label=version&sort=semver)](https://github.com/borconi/openzeekr/releases/latest) · [⬇ Download the latest signed APK](https://github.com/borconi/openzeekr/releases/latest) · [Changelog & releases](https://github.com/borconi/openzeekr/releases)
 
 > 🧪 **Early beta — testing in progress.** This is an experimental research project
 > under active development. It's usable and being tested by early users, but expect
@@ -65,148 +65,6 @@ into reverse-engineering it and bringing it this far. If it's useful to you, a s
 token of appreciation is genuinely welcome (never expected):
 
 **→ [revolut.me/emilimpd](https://revolut.me/emilimpd)**
-
-## Changelog
-
-### 0.1.7
-- **Critical fix - reverted a 0.1.6 change that could break your digital key.** 0.1.6 included an
-  experimental Bluetooth "pairing" step that was sent on every connection; it could corrupt the car's
-  stored pairing for your phone, so entry/start stopped working and re-provisioning failed. That step
-  is removed and the key handshake is back to the proven 0.1.5 behaviour. **If 0.1.6 broke your key:**
-  update to 0.1.7, remove the OpenZeekr digital key from the official Zeekr app (Digital keys → remove),
-  then re-provision in OpenZeekr. **Do not run 0.1.6.**
-- **Multiple cars on one account.** Switch between all your cars - owned and shared - from the car-name
-  dropdown at the top. The dashboard, status and controls follow the selected car, and each car can be
-  renamed. Fixes the hero card sometimes showing the wrong car's model/colour after switching.
-- **Accept a shared car without the official app.** When someone shares a car with you, OpenZeekr now
-  shows an Accept / Decline prompt (owner, model, access and expiry). There's also a "Check for shared
-  cars" button in Settings. When a share ends, the car drops out of the switcher automatically.
-- **Fridge / cool-box control** (on/off + target temperature) and **Sun-shield** (rear sunshade)
-  open/close, for cars that have them.
-- **New vehicle stats:** odometer, distance and time to the next service, and the 12 V battery voltage.
-- The charge tile is now **"Charge & more"** so it's clearer it opens all the charge settings (limit,
-  scheduled charging, battery pre-conditioning, port). The quick-action grid also lays out more cleanly
-  when a car doesn't have every control.
-- Includes the 0.1.6 improvements below (SEA/Australia login, sign-out/back-in fix, gzip response
-  handling, faster reconnect).
-
-### 0.1.6
-- **Fixed: couldn't log back in after signing out.** Signing out cleared the saved VIN, but the app
-  wrongly treated a VIN as mandatory before it would even attempt login - so the sign-in was rejected
-  with "vin is required" (the VIN is actually obtained *during* login). You can now sign out and back in
-  normally.
-- **Southeast Asia / Australia login now works.** The region (now labelled **"Australia + SEA"**) was
-  reaching the wrong login endpoint and couldn't read the gateway's responses, so sign-in failed at the
-  very first step. It now uses SEA's correct user-center path and TSP signing, and decodes the SEA
-  gateway's (compressed) responses properly - so login completes all the way through to your vehicle list.
-  This finishes the SEA support that was only partial in earlier builds.
-- **More reliable response handling everywhere.** Compressed API responses are now always decoded
-  correctly (some regional gateways compress every response), which also prevents occasional garbled-data
-  errors on other calls.
-- **Faster reconnect when you're already parked at the car.** When the app comes up next to your car it
-  now reconnects directly to it instead of waiting on a fresh scan.
-- **Tidier notification counter** on the home screen.
-
-### 0.1.5
-- **Send a diagnostic log from the login screen.** If sign-in fails during setup, a "Share diagnostic log"
-  button now appears right there, and the login attempt's network traffic is captured automatically - so a
-  tester who can't get past login (and therefore can't reach Settings) can still send us an encrypted log to
-  diagnose the failure.
-
-### 0.1.4
-- **Send a debug log as a file.** Settings now has a "Share" button that sends the encrypted log through
-  your email / share sheet as a file attachment. A full session log is far longer than the clipboard can
-  hold, so the old copy-paste route silently cut long logs off and made them unreadable - sharing a file
-  fixes that. (The log is still encrypted so only the developers can read it.)
-- **Shared accounts can create a key.** Provisioning no longer refuses to mint a digital key just because
-  the signed-in account isn't the registered car owner - it attempts the mint and lets the server decide,
-  so a second/shared account can set up its own key.
-- **Clearer error when the link drops mid-pairing.** A Bluetooth drop during the key handshake now shows a
-  plain "link dropped during the handshake" message instead of a cryptic obfuscated one.
-- **Works on 16 KB-page devices.** The native secrets library is now aligned for 16 KB memory pages, so it
-  loads correctly on newer devices (some Android 15+ phones). Previously it could fail to load there,
-  leaving the app unconfigured (unable to sign in).
-- **In-app update check.** OpenZeekr now checks GitHub on launch and tells you in Settings when a newer
-  release is available, with a one-tap link to download it (plus a manual "Check for updates" button).
-- **Stops retrying forever when a car won't pair.** If the car accepts the Bluetooth link but never
-  completes the digital-key handshake, the app no longer loops connect / fail / reconnect endlessly
-  (which drained the battery) - it now backs off automatically, while an explicit connect still retries
-  immediately.
-- **Better handshake diagnostics.** More detail is captured when the key handshake fails, and the
-  on-screen error now names the likely cause, to help pin down cars that won't pair (share the
-  encrypted log from Settings).
-- **Anti-relay / fake-car protection.** The car's certificate is now pinned to your car on first
-  pairing (and checked for validity), so a fake or relayed "car" - even one presenting a genuine
-  Geely certificate - can no longer complete the handshake and harvest your digital key.
-- **No key material in the log.** Removed leftover debug lines that wrote the AES session key and the
-  raw digital key into the log.
-- **Safer secrets export.** "Export" now copies your configuration to the clipboard instead of
-  displaying your password, tokens and keys on screen.
-- **Hardened the "send to car" link handling.** Shared map links are now only expanded over
-  http/https to public addresses (no internal / loopback targets).
-- **Southeast Asia (SEA) login.** Selecting the SEA region now uses SEA's own signing keys, so
-  accounts registered in SEA/Malaysia can sign in (previously the app signed every region's login
-  with the EU keys and SEA was rejected). LA / ME will follow once their keys are added.
-- **Watch stays usable when the phone isn't at the car.** The Wear OS app now only stands down while
-  the phone is *actually holding* the car's Bluetooth link (not merely when Lock-on-approach is
-  enabled), so you can still lock/unlock from the watch via the handover otherwise. Thanks to Jan
-  Compen for the report and patch.
-
-### 0.1.3
-- **Lock / unlock is now confirmed by the car, with self-healing.** The app waits for the car's
-  acknowledgement instead of assuming a sent command worked, and if the digital-key session has
-  gone stale it rebuilds the link and retries automatically - previously a lock/unlock could
-  silently do nothing until you toggled Bluetooth off and on.
-- **Handshake retries.** The BLE key handshake now re-tries the connect step when the car doesn't
-  answer the first time, instead of failing outright.
-- **Broader car discovery.** The connect scan is now unfiltered, which should fix the "can't find /
-  connect to the car" link issue (issue 1) for more models, e.g. the Zeekr X.
-- **Session refresh for a stale link.** A stale digital-key session is now recovered with a fresh
-  reconnect. This is an interim improvement over 0.1.2 and will likely change again in a later release.
-- **Logging is OFF by default.** A clean install no longer starts with logging enabled - you opt in
-  explicitly.
-- **Sanitized HTTP logs.** Cloud request/response logs now redact keys, tokens and other secrets.
-  (This still needs a full human review, which is not yet complete.)
-- **Encrypted log sharing.** The BLE log "Copy" button now encrypts the copied log, so sharing a log
-  on GitHub or elsewhere is safe and your car/account data isn't leaked by accident.
-- **Compile-time keys hardened.** The keys baked into the APK at build time now live inside a native
-  `.so` library instead of as plaintext strings in the APK.
-
-### 0.1.2
-- **Region selection (beyond EU).** You can now pick your market — **EU / SEA / LA / ME** — in
-  onboarding and under Settings › Region. This swaps in that region's Zeekr servers (TSP gateway,
-  Azure overseas-app, xchanger DK backend), project-id, country and push region. **Only EU is
-  verified on a real car;** SEA/LA/ME are reconstructed from the stock app's host tables and ship
-  as **experimental**, with an Advanced panel to correct any host per-market. As before, each
-  region needs its **own** extracted secrets (`zeekr_key_extractor --region <REGION>`).
-- **Fixed logging still leaking.** HTTP traffic was still being written to logcat even when
-  the debug-logging switch was **off** — the toggle is now honoured everywhere, so nothing is
-  logged unless you explicitly opt in.
-- **Push notifications from Zeekr, directly in OpenZeekr.** Hooked into Firebase so the app now
-  receives the car's message-centre pushes (security alarms, charging, service messages, …) and
-  displays them itself — no need to keep the official app running to get notified.
-- **Power trunk.** Added an option to power **open / close the trunk** remotely.
-- **Better walk-away lock.** Enhanced the phone-side walk-away lock logic, including a cloud
-  backstop so the car still gets locked if the BLE lock command can't be confirmed as you leave.
-- **Average trip consumption.** The app now shows your car's average energy consumption
-  (Ø kWh/100km) alongside the vehicle status.
-- **Mobile data usage.** See how much of your car's built-in eSIM data plan you've used this
-  month, right inside the app.
-- **Charge & departure scheduling.** Set off-peak charging windows and departure / preconditioning
-  times. Saving now works - the app commits the schedule to the car and reads it back to confirm.
-- **Nicer climate UI.** Improved the UI for climate **cooling / heating**.
-- **Seat ventilation detection fixed.** The controls now reflect **only the options your specific
-  car actually supports**, and seat ventilation is detected correctly again.
-
-### 0.1.1
-- **Prevented log leakage when logging is off.** Debug logging is now truly silent unless
-  you turn it on — and enabling it shows a clear warning first, because the log can contain
-  key material, session tokens and your VIN.
-- **Fixed a security concern around blindly trusting the car.** The app now authenticates
-  the vehicle's certificate against the Geely/Zeekr CA chain **before** releasing the
-  digital key, instead of accepting whatever certificate the car presents.
-- **Rewrote the approach logic.** It now uses more sensors to decide when you're
-  approaching the car, while letting the phone sleep so it doesn't drain the battery.
 
 ## What it does
 
@@ -378,6 +236,11 @@ Next:
 
 1. **Proximity at the car** — tune the connect band / actuation thresholds on real
    approach/walk-away runs.
+2. **Faster BLE reconnect.** Unlock works reliably, but when the DK session has gone
+   stale the app currently tears the link down and does a full reconnect/handshake, so
+   you can stand at the car waiting several seconds for nothing. Reconnect logic should
+   detect the dead session sooner and re-establish (or keep the session warm) so the car
+   responds the moment you reach it.
 
 **Remote parking** is considered **closed** for this project: the schema is fully
 reverse-engineered, but the car gates actuation behind a DK 3.0 / Secure-Element key
