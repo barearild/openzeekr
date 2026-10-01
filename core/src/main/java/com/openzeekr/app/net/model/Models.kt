@@ -479,13 +479,90 @@ data class OtaVersionRequest(
     val vehicleVin: String,
 )
 
-/** Parsed OTA check result for the UI. */
+/** Body for ota/os/download (trigger the car-side GEEA FOTA download). Stock sends only these two. */
+@Serializable
+data class OtaActionRequest(
+    val vehicleModelNo: String,
+    val vehicleVin: String,
+)
+
+/**
+ * Body for ota/os/installation - the "Install now" / "Schedule install" command. Captured byte-exact from
+ * stock 3.0.7 (Frida). There is NO separate confirm call: the disclaimer is a client-side gate only, and
+ * this one POST schedules/starts the install. `installationOperation` = "INSTALL" (now, scheduledTime null)
+ * or "SCHEDULE_INSTALL" (scheduledTime = local "yyyy-MM-dd HH:mm:ss"). availableAssignmentId is a NUMBER.
+ */
+@Serializable
+data class OtaInstallRequest(
+    val availableAssignmentId: Long,
+    val installationOperation: String,
+    val installationOrderId: String,
+    val scheduledTime: String?,
+    val vehicleCurrentVersion: String,
+    val vehicleModelNo: String,
+    val vehicleTargetVersion: String,
+    val vehicleVin: String,
+)
+
+/**
+ * Parsed OTA check result for the UI. Beyond the version check, the same versionV2 `data` object carries
+ * the LIVE assignment state (`newStatus`) and download `progress`, so a re-check doubles as a progress
+ * poll - the car does the actual download, we just read its state. [newStatus] cycles
+ * NEWBORN -> DOWNLOAD_STARTED -> DOWNLOAD_PROGRESS -> DOWNLOAD_COMPLETED -> READY (stock enum `rf/b`).
+ */
 data class OtaStatus(
     val currentVersion: String?,
     val targetVersion: String?,
     val updateAvailable: Boolean,
     val releaseNotes: List<String>,
-)
+    val newStatus: String? = null,
+    val progressPercent: Int? = null,
+    val availableAssignmentId: Long? = null,
+    val installationOrderId: String? = null,
+    val totalInstallationTimeSec: Long? = null,
+    val scheduledTime: String? = null,
+    val hasNewAssignment: Boolean = false,
+    val isConfirm: Boolean = false,
+) {
+    // Normalized status (hyphens -> underscores). Full state set is stock enum `rf/b`:
+    //  download:  ASSIGNMENT_*, SIGNATURE_CERTIFICATE_SYSTEM, DOWNLOAD_CONSENT_GRANTED, DOWNLOAD_STARTED,
+    //             DOWNLOAD_PROGRESS, DOWNLOAD_(DISTRIBUTE_)PAUSE  -> terminal DOWNLOAD_COMPLETED / *_FAILED / _ABORTED
+    //  install:   INSTALLATION_CONSENT_SCHEDULED (scheduled), INSTALLATION_CONSENT_GRANTED, INSTALLATION_PENDING,
+    //             INSTALLATION_STARTED, INSTALLATION_PROGRESS, INSTALLATION_DEFERRED, POSTINSTALLATION_START(ED)
+    //             -> terminal INSTALLATION_COMPLETED / _FINISHED / POSTINSTALLATION_COMPLETED / *_FAILED(_CRITICAL) /
+    //                _ABORTED / _CONSENT_REVOKED / TIMEOUT
+    private val s = newStatus?.uppercase()?.replace('-', '_').orEmpty()
+    private val downloadActive = setOf(
+        "ASSIGNMENT_DATA", "ASSIGNMENT_FILE_INFO", "SIGNATURE_CERTIFICATE_SYSTEM",
+        "DOWNLOAD_CONSENT_GRANTED", "DOWNLOAD_STARTED", "DOWNLOAD_PROGRESS",
+        "DOWNLOAD_PAUSE", "DOWNLOAD_DISTRIBUTE_PAUSE",
+    )
+    private val installActive = setOf(
+        "INSTALLATION_CONSENT_GRANTED", "INSTALLATION_PENDING", "INSTALLATION_STARTED",
+        "INSTALLATION_PROGRESS", "INSTALLATION_DEFERRED", "POSTINSTALLATION_START", "POSTINSTALLATION_STARTED",
+    )
+    /** The car is actively pulling the package (show a progress bar). */
+    val downloading: Boolean get() = s in downloadActive
+    /** Download finished / assignment ready to install (the point where Install now / Schedule appear). */
+    val readyToInstall: Boolean get() = s == "DOWNLOAD_COMPLETED" || s == "READY"
+    /** An install was scheduled (consent given, waiting for the scheduled time) - show the time, no buttons. */
+    val installScheduled: Boolean get() = s == "INSTALLATION_CONSENT_SCHEDULED"
+    /** The car is actively installing / flashing (monitor + progress bar). */
+    val installing: Boolean get() = s in installActive
+    /** The update finished successfully. */
+    val installed: Boolean get() = s in setOf("INSTALLATION_COMPLETED", "INSTALLATION_FINISHED",
+        "POSTINSTALLATION_COMPLETED", "COMPLETED", "INSTALLED")
+    /** A download or install step failed / aborted / was revoked / timed out. */
+    val failed: Boolean get() = s.endsWith("_FAILED") || s.endsWith("_FAILED_CRITICAL") ||
+        s.endsWith("_FAILED_DISTRIBUTE") || s.endsWith("_ABORTED") || s.contains("REVOK") || s == "TIMEOUT"
+    /** An install has been scheduled or started - the Install now / Schedule buttons are gone. */
+    val installActioned: Boolean get() = installScheduled || installing || installed ||
+        s.startsWith("INSTALLATION") || s.startsWith("POSTINSTALLATION")
+    /** Keep auto-polling the status while the car is actively working (download or install). */
+    val active: Boolean get() = downloading || installing
+    /** A fresh assignment exists that hasn't started downloading yet (the trigger point). */
+    val canStartDownload: Boolean get() = hasNewAssignment && (s.isEmpty() || s == "NEWBORN" || s == "NEW")
+}
 
 object Ota {
     /** Parse the versionV2 `data` object. Tolerant: any missing field -> null / false. */
@@ -499,16 +576,41 @@ object Ota {
             }
             return disp to notes
         }
-        val (current, currentNotes) = verOf("currentVehicleVersion")
-        val (target, targetNotes) = verOf("targetVehicleVersion")
-        val hasNew = (o?.get("hasNewAssignment") as? JsonPrimitive)?.let {
+        fun flag(key: String): Boolean = (o?.get(key) as? JsonPrimitive)?.let {
             it.contentOrNull == "true" || it.contentOrNull == "1"
         } ?: false
+        val (current, currentNotes) = verOf("currentVehicleVersion")
+        val (target, targetNotes) = verOf("targetVehicleVersion")
+        val hasNew = flag("hasNewAssignment")
+        val assign = o?.get("assignmentInfo") as? JsonObject
+        // newStatus is top-level during a live download; fall back to assignmentInfo.newStatus (the check).
+        val newStatus = (o?.get("newStatus") as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: (assign?.get("newStatus") as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        // The download % lives in `reason`, NOT `progress` (which stays null): `reason` is a status code
+        // string ("SYSTEM") when idle and a numeric percentage while downloading (observed 44 -> 94 -> 99;
+        // stock parses it via BigDecimal.intValueExact() to show "Downloading X%"). Prefer the explicit
+        // `progress` field if the server ever populates it, else fall back to a numeric `reason`.
+        fun pctOf(key: String): Int? {
+            val top = (o?.get(key) as? JsonPrimitive)?.contentOrNull
+            val nested = (assign?.get(key) as? JsonPrimitive)?.contentOrNull
+            return (top ?: nested)?.trim()?.toDoubleOrNull()?.toInt()?.takeIf { it in 0..100 }
+        }
+        val progress = pctOf("progress") ?: pctOf("reason")
+        fun longOf(obj: JsonObject?, key: String) =
+            (obj?.get(key) as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
         return OtaStatus(
             currentVersion = current,
             targetVersion = target,
             updateAvailable = hasNew || target != null,
             releaseNotes = if (targetNotes.isNotEmpty()) targetNotes else currentNotes,
+            newStatus = newStatus,
+            progressPercent = progress,
+            availableAssignmentId = longOf(assign, "availableAssignmentId"),
+            installationOrderId = (assign?.get("installationOrderId") as? JsonPrimitive)?.contentOrNull,
+            totalInstallationTimeSec = longOf(assign, "totalInstallationTime"),
+            scheduledTime = (assign?.get("scheduledTime") as? JsonPrimitive)?.contentOrNull,
+            hasNewAssignment = hasNew,
+            isConfirm = flag("isConfirm"),
         )
     }
 }

@@ -180,6 +180,17 @@ interface TspApi {
     @POST
     suspend fun otaVersion(@Url url: String, @Body body: com.openzeekr.app.net.model.OtaVersionRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
 
+    // POST {azureHost}/overseas-app/ota/os/download {vehicleModelNo, vehicleVin} — trigger the car-side
+    // GEEA FOTA download. The car normally auto-starts it (reason=SYSTEM), so this is a manual kick for
+    // the rare case it hasn't. The actual package is pulled by the car; this just orchestrates.
+    @POST
+    suspend fun otaDownload(@Url url: String, @Body body: com.openzeekr.app.net.model.OtaActionRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
+
+    // POST {azureHost}/overseas-app/ota/os/installation - "Install now" (INSTALL) / "Schedule install"
+    // (SCHEDULE_INSTALL). No separate confirm call; the disclaimer is a client gate only. Captured body.
+    @POST
+    suspend fun otaInstallation(@Url url: String, @Body body: com.openzeekr.app.net.model.OtaInstallRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
+
     @PUT
     suspend fun inboxMarkRead(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
 

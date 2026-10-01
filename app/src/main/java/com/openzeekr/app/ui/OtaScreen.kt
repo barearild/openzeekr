@@ -13,11 +13,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Construction
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,20 +36,140 @@ import com.openzeekr.app.Deps
 import com.openzeekr.app.net.model.OtaStatus
 import com.openzeekr.app.remote.CallResult
 import com.openzeekr.app.ui.theme.Brand
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/** How often to re-poll versionV2 while the car is actively downloading (the car does the work; we read). */
+private const val OTA_POLL_MS = 10_000L
+/** After an install/schedule action: poll faster, briefly, to catch the ~20s server-side state transition
+ *  so the card updates without a manual Refresh (20 x 5s ~= 100s, covers the CONSENT -> PENDING -> STARTED ramp). */
+private const val POST_ACTION_POLL_MS = 5_000L
+private const val POST_ACTION_POLLS = 20
+
+/** Friendly label for the stock OTA `newStatus` (hyphen or underscore form; see stock enum `rf/b`). */
+private fun phaseLabel(newStatus: String?): String = when (newStatus?.uppercase()?.replace('-', '_')) {
+    null, "" -> "Checking…"
+    "NEWBORN", "NEW" -> "Update assigned"
+    "DOWNLOAD_CONSENT_GRANTED" -> "Download starting…"
+    "DOWNLOAD_STARTED", "DOWNLOAD_PROGRESS" -> "Downloading…"
+    "DOWNLOAD_PAUSE", "DOWNLOAD_DISTRIBUTE_PAUSE" -> "Download paused"
+    "DOWNLOAD_COMPLETED" -> "Downloaded"
+    "DOWNLOAD_FAILED", "DOWNLOAD_FAILED_DISTRIBUTE", "FAILED" -> "Download failed"
+    "DOWNLOAD_ABORTED", "ABORTED" -> "Download cancelled"
+    "READY" -> "Ready to install"
+    "INSTALLATION_CONSENT_SCHEDULED" -> "Install scheduled"
+    "INSTALLATION_CONSENT_GRANTED" -> "Preparing install…"
+    "INSTALLATION_PENDING", "INSTALLATION_DEFERRED" -> "Vehicle self-check…"   // stock: "Vehicle self inspection in progress"
+    "INSTALLATION_STARTED", "INSTALLATION_PROGRESS", "INSTALLING", "UPGRADING" -> "Installing…"
+    "POSTINSTALLATION_START", "POSTINSTALLATION_STARTED" -> "Finalizing…"
+    "INSTALLATION_COMPLETED", "INSTALLATION_FINISHED", "POSTINSTALLATION_COMPLETED", "COMPLETED", "INSTALLED" -> "Installed"
+    "INSTALLATION_FAILED", "INSTALLATION_FAILED_CRITICAL" -> "Install failed"
+    "INSTALLATION_ABORTED" -> "Install aborted"
+    "INSTALLATION_CONSENT_REVOKED", "USER_REVOKES_CONSENT_FOR_SCHEDULED" -> "Install cancelled"
+    "TIMEOUT" -> "Timed out"
+    else -> newStatus
+}
+
 /**
- * Software-update (OTA) tab - UNDER DEVELOPMENT. For now it only CHECKS whether the cloud has a new
- * software version assigned to the car (the stock `ota/os/versionV2` check). Actually downloading /
- * installing an update is not implemented yet - that needs a live capture while an update is available
- * to reverse the apply flow. The check needs the overseas credentials, so on most setups it fails soft.
+ * Software-update (OTA) tab. CHECKS whether the cloud has a new version for the car (stock
+ * `ota/os/versionV2`) and, when the car is downloading an update, shows the LIVE phase + progress by
+ * re-polling that same call (the car runs the GEEA FOTA download/flash itself; we only read its state).
+ * A manual "Start download" kick is offered for the rare case the car hasn't auto-started. Once the car has
+ * downloaded the package, Install now / Schedule install post ota/os/installation (captured byte-exact from
+ * stock; no confirm call - the disclaimer is a client gate). The check needs the overseas credentials, so
+ * on setups without them it fails soft.
  */
 @Composable
 fun OtaScreen(deps: Deps, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
     var checking by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var installing by remember { mutableStateOf(false) }
+    var disclaimerAccepted by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<OtaStatus?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    suspend fun refresh() {
+        when (val r = deps.ota.checkUpdate()) {
+            is CallResult.Ok -> { status = r.value; error = null }
+            is CallResult.Err -> { error = "Couldn't check for updates (${r.message})." }
+        }
+    }
+
+    fun doInstall(now: Boolean, scheduledTime: String?) {
+        installing = true; error = null
+        scope.launch {
+            when (val r = deps.ota.install(now = now, scheduledTime = scheduledTime)) {
+                is CallResult.Ok -> { status = r.value; error = null }
+                is CallResult.Err -> error = "Couldn't ${if (now) "start" else "schedule"} the install (${r.message})."
+            }
+            installing = false
+            // The server takes ~20s to actually move the assignment (INSTALLATION-CONSENT-SCHEDULED ->
+            // GRANTED -> PENDING -> STARTED), so the install()'s immediate re-read comes back stale. Keep
+            // polling for a short window so the card updates on its own - no manual Refresh. Once the car
+            // is actively installing, the active-poll effect takes over; a schedule stops once confirmed.
+            if (error == null) repeat(POST_ACTION_POLLS) {
+                delay(POST_ACTION_POLL_MS)
+                refresh()
+                val s = status ?: return@repeat
+                if (s.active || s.installed || s.failed || (!now && s.installScheduled)) return@launch
+            }
+        }
+    }
+
+    // Native date+time picker chain -> "yyyy-MM-dd HH:mm:ss" (the format stock sends for SCHEDULE_INSTALL).
+    fun pickScheduleAndInstall() {
+        val cal = java.util.Calendar.getInstance()
+        android.app.DatePickerDialog(
+            context,
+            { _, y, m, d ->
+                android.app.TimePickerDialog(
+                    context,
+                    { _, h, min ->
+                        cal.set(y, m, d, h, min, 0)
+                        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+                        doInstall(now = false, scheduledTime = fmt.format(cal.time))
+                    },
+                    cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE), true,
+                ).show()
+            },
+            cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH),
+        ).apply { datePicker.minDate = System.currentTimeMillis() }.show()
+    }
+
+    // Load the current status when the tab opens - the update card should populate on its own, no tap needed.
+    LaunchedEffect(Unit) {
+        checking = true
+        refresh()
+        checking = false
+    }
+
+    // Auto-poll while the car is actively working (downloading OR installing), so the phase/percent track
+    // the whole update without re-tapping. Scheduled-but-not-started installs don't poll (could be hours off).
+    LaunchedEffect(status?.active) {
+        while (status?.active == true) {
+            delay(OTA_POLL_MS)
+            refresh()
+        }
+    }
+
+    // LIVE updates: the car's OTA status pushes (FCM) arrive several seconds ahead of versionV2 polling, so
+    // track them for an instant, lag-free lifecycle. The push is authoritative for the phase/percent; we
+    // still re-fetch to keep versions / release notes / assignment info current. Filtered to the active car.
+    val cfg by deps.config.config.collectAsState()
+    LaunchedEffect(Unit) {
+        com.openzeekr.app.push.OtaStatusBus.events.collect { e ->
+            if (e.vin != null && e.vin != cfg.vin) return@collect
+            refresh()
+            val pct = e.reason?.trim()?.toDoubleOrNull()?.toInt()?.takeIf { it in 0..100 }
+            status = status?.copy(
+                newStatus = e.status ?: status?.newStatus,
+                scheduledTime = e.scheduledTime ?: status?.scheduledTime,
+                progressPercent = pct ?: status?.progressPercent,
+            )
+        }
+    }
 
     Column(
         modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -55,22 +177,7 @@ fun OtaScreen(deps: Deps, modifier: Modifier = Modifier) {
     ) {
         SectionHeader("Software updates")
 
-        // Under-development notice.
-        CockpitCard {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(Brand.energy.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Construction, null, tint = Brand.energy, modifier = Modifier.size(20.dp))
-                }
-                Column(Modifier.weight(1f)) {
-                    Text("Under development", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Brand.energy)
-                    Text("Not functional yet - for now it can only check whether an update is available. " +
-                        "Installing updates will come once we can test against a real OTA.",
-                        color = Brand.muted, fontSize = 12.sp)
-                }
-            }
-        }
-
-        // Check card.
+        // Status card.
         CockpitCard {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(Brand.surface2), contentAlignment = Alignment.Center) {
@@ -92,6 +199,65 @@ fun OtaScreen(deps: Deps, modifier: Modifier = Modifier) {
                 } else {
                     Text("Up to date", color = Brand.muted, fontSize = 13.sp)
                 }
+
+                // Live phase + progress bar - tracks BOTH the download and the install (the car does the work;
+                // we poll versionV2, which carries the phase in newStatus and the % in reason/progress).
+                if (s.downloading || s.readyToInstall || s.installing) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(phaseLabel(s.newStatus), color = Brand.accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                        s.progressPercent?.let { Text("$it%", color = Brand.accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    val pct = s.progressPercent
+                    if (s.readyToInstall) {
+                        LinearProgressIndicator(progress = { 1f }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)))
+                    } else if (pct != null) {
+                        LinearProgressIndicator(progress = { pct / 100f }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)))
+                    } else {
+                        // STARTED with no percent yet - indeterminate until *_PROGRESS reports one.
+                        LinearProgressIndicator(Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)))
+                    }
+                    s.totalInstallationTimeSec?.takeIf { s.downloading || s.readyToInstall }?.let {
+                        Text("Est. install time once downloaded: ~${it / 60} min", color = Brand.faint, fontSize = 11.sp)
+                    }
+                    if (s.installing) Text("Keep the car parked - it's installing and will be unavailable briefly.",
+                        color = Brand.faint, fontSize = 11.sp)
+                }
+
+                // Install controls - the car has the package (ready) OR an install is already scheduled.
+                // From a scheduled state the same endpoint overrides it: Install now, or pick a new time.
+                if (s.readyToInstall || s.installScheduled) {
+                    Spacer(Modifier.height(8.dp))
+                    if (s.installScheduled) {
+                        s.scheduledTime?.takeIf { it.isNotBlank() }?.let {
+                            Text("Scheduled for $it", color = Brand.accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            Text("You can install it now or pick a different time.", color = Brand.muted, fontSize = 12.sp)
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        androidx.compose.material3.Checkbox(checked = disclaimerAccepted, onCheckedChange = { disclaimerAccepted = it })
+                        Text("I understand that installing now takes the car offline for about " +
+                            "${(s.totalInstallationTimeSec ?: 0L) / 60} min, and it should be parked.",
+                            color = Brand.muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    }
+                    // Install now needs the disclaimer (starts the flash immediately); rescheduling is for later
+                    // so it isn't gated behind it.
+                    PrimaryButton(if (installing) "Working…" else "Install now", Modifier.fillMaxWidth(),
+                        enabled = disclaimerAccepted && !installing) { doInstall(now = true, scheduledTime = null) }
+                    Spacer(Modifier.height(6.dp))
+                    PrimaryButton(if (s.installScheduled) "Change schedule…" else "Schedule install…",
+                        Modifier.fillMaxWidth(), tint = Brand.muted, enabled = !installing) { pickScheduleAndInstall() }
+                }
+                if (s.installed) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Installed ✓", color = Brand.good, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                }
+                if (s.failed) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(phaseLabel(s.newStatus), color = Brand.crit, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                }
+
                 if (s.releaseNotes.isNotEmpty()) {
                     Spacer(Modifier.height(2.dp))
                     Text("Release notes", color = Brand.muted, fontSize = 12.sp)
@@ -102,18 +268,24 @@ fun OtaScreen(deps: Deps, modifier: Modifier = Modifier) {
             }
             error?.let { Text(it, color = Brand.crit, fontSize = 12.5.sp) }
 
-            PrimaryButton(if (checking) "Checking…" else "Check for updates", Modifier.fillMaxWidth(), enabled = !checking) {
+            val busy = checking || downloading || installing
+            PrimaryButton(if (checking) "Checking…" else "Refresh", Modifier.fillMaxWidth(), enabled = !busy) {
                 checking = true; error = null
-                scope.launch {
-                    when (val r = deps.ota.checkUpdate()) {
-                        is CallResult.Ok -> { status = r.value; error = null }
-                        is CallResult.Err -> { status = null; error = "Couldn't check for updates (${r.message})." }
+                scope.launch { refresh(); checking = false }
+            }
+            // Manual download kick - only when an update is assigned but the car hasn't auto-started it.
+            status?.takeIf { it.canStartDownload }?.let {
+                PrimaryButton(if (downloading) "Starting…" else "Start download", Modifier.fillMaxWidth(), enabled = !busy) {
+                    downloading = true; error = null
+                    scope.launch {
+                        when (val r = deps.ota.startDownload()) {
+                            is CallResult.Ok -> { status = r.value; error = null }
+                            is CallResult.Err -> error = "Couldn't start the download (${r.message})."
+                        }
+                        downloading = false
                     }
-                    checking = false
                 }
             }
-            Text("Checking uses the overseas-app credentials; on most setups it isn't available yet.",
-                color = Brand.faint, fontSize = 11.sp)
         }
     }
 }

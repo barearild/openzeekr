@@ -347,6 +347,88 @@ class OtaRepository(private val store: ConfigStore, private val client: ApiClien
             com.openzeekr.app.net.model.Ota.parse(resp.data)
         }
     }
+
+    /**
+     * Trigger the car-side FOTA download for the active car. The car usually auto-starts it, so this is a
+     * manual kick (status still NEWBORN/NEW). Returns the fresh status after the call so the UI can poll.
+     * The package download + flash happen on the car; we only orchestrate and read `newStatus`/`progress`.
+     */
+    suspend fun startDownload(): CallResult<com.openzeekr.app.net.model.OtaStatus> = withContext(Dispatchers.IO) {
+        guarded {
+            val cfg = store.current()
+            val vin = cfg.vin
+            require(vin.isNotBlank()) { "No active car selected" }
+            val all = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data)
+            val info = all.firstOrNull { it.vin == vin } ?: all.firstOrNull()
+            val seriesCode = info?.appModelCode.orEmpty()
+            val base = cfg.azureHost.trimEnd('/')
+            runCatching {
+                client.api.otaDownload(
+                    "$base/overseas-app/ota/os/download",
+                    com.openzeekr.app.net.model.OtaActionRequest(vehicleModelNo = seriesCode, vehicleVin = vin),
+                )
+            }
+            // Re-read status straight after so the UI reflects the new phase (DOWNLOAD-STARTED/PROGRESS).
+            val resp = client.api.otaVersion(
+                "$base/overseas-app/ota/os/versionV2",
+                com.openzeekr.app.net.model.OtaVersionRequest(
+                    modelCode = info?.appYearCode.orEmpty(),
+                    seriesCode = seriesCode,
+                    vehicleModelNo = seriesCode,
+                    vehicleVin = vin,
+                ),
+            )
+            com.openzeekr.app.net.model.Ota.parse(resp.data)
+        }
+    }
+
+    /**
+     * Install the downloaded update. [now] = "Install now" (installationOperation INSTALL, scheduledTime
+     * null); else "Schedule install" (SCHEDULE_INSTALL) at [scheduledTime] ("yyyy-MM-dd HH:mm:ss", local).
+     * NO confirm call - the disclaimer is a client-side gate; this one POST schedules/starts it. Reads the
+     * current versionV2 first for the assignment id / order id / versions the body needs. Returns the fresh
+     * status after. The car does the actual flash; HTTP 200 just means the command was accepted.
+     */
+    suspend fun install(now: Boolean, scheduledTime: String? = null): CallResult<com.openzeekr.app.net.model.OtaStatus> =
+        withContext(Dispatchers.IO) {
+            guarded {
+                val cfg = store.current()
+                val vin = cfg.vin
+                require(vin.isNotBlank()) { "No active car selected" }
+                if (!now) require(!scheduledTime.isNullOrBlank()) { "No scheduled time" }
+                val all = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data)
+                val info = all.firstOrNull { it.vin == vin } ?: all.firstOrNull()
+                val seriesCode = info?.appModelCode.orEmpty()
+                val base = cfg.azureHost.trimEnd('/')
+                val versionUrl = "$base/overseas-app/ota/os/versionV2"
+                suspend fun check() = com.openzeekr.app.net.model.Ota.parse(
+                    client.api.otaVersion(
+                        versionUrl,
+                        com.openzeekr.app.net.model.OtaVersionRequest(
+                            modelCode = info?.appYearCode.orEmpty(),
+                            seriesCode = seriesCode, vehicleModelNo = seriesCode, vehicleVin = vin,
+                        ),
+                    ).data
+                )
+                val st = check()
+                val assignId = requireNotNull(st.availableAssignmentId) { "No assignment to install" }
+                val orderId = requireNotNull(st.installationOrderId) { "No installation order" }
+                client.api.otaInstallation(
+                    "$base/overseas-app/ota/os/installation",
+                    com.openzeekr.app.net.model.OtaInstallRequest(
+                        availableAssignmentId = assignId,
+                        installationOperation = if (now) "INSTALL" else "SCHEDULE_INSTALL",
+                        installationOrderId = orderId,
+                        scheduledTime = if (now) null else scheduledTime,
+                        vehicleCurrentVersion = st.currentVersion.orEmpty(),
+                        vehicleModelNo = seriesCode,
+                        vehicleTargetVersion = st.targetVersion.orEmpty(),
+                        vehicleVin = vin,
+                    ),
+                )
+                check()   // re-read so the UI reflects INSTALLATION-CONSENT-* immediately
+            }
+        }
 }
 
 /**

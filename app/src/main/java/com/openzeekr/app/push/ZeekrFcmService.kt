@@ -5,6 +5,7 @@ import com.google.firebase.messaging.RemoteMessage
 import com.openzeekr.app.net.model.InboxMessage
 import com.openzeekr.app.util.CarNotifier
 import com.openzeekr.app.util.Logx
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,21 @@ class ZeekrFcmService : FirebaseMessagingService() {
         // The message-centre packs the human-facing text + display flags into the deep-link query
         // (title / content / showBanner / showToast), not the data keys, for these pushes.
         val q = deepLink?.let(::queryParams) ?: emptyMap()
+
+        // OTA assignment-status push: the LIVE install lifecycle signal (fresher than versionV2 polling).
+        // Fan it out so the Updates screen can track the install in real time. Silent (showBanner=false),
+        // so it falls through to the silent-push short-circuit below and raises no notification.
+        if (deepLink != null && deepLink.contains("OTAAssignmentStatusUpdate")) {
+            runCatching {
+                val o = kotlinx.serialization.json.Json.parseToJsonElement(q["data"].orEmpty())
+                    .let { it as kotlinx.serialization.json.JsonObject }
+                fun s(k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                OtaStatusBus.emit(
+                    OtaStatusBus.Event(vin = s("vin"), status = s("status"), reason = s("reason"), scheduledTime = s("scheduledTime")),
+                )
+                Logx.d(TAG, "OTA status push -> vin=${s("vin")} status=${s("status")} reason=${s("reason")}")
+            }
+        }
 
         // Prefer the notification payload's title/body, then the data keys, then the deep-link query.
         val title = notif?.title
