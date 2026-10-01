@@ -3,6 +3,25 @@
 All notable changes to OpenZeekr are recorded here. OpenZeekr is a free, non-commercial
 clean-room app and is not affiliated with Zeekr.
 
+## [0.2] - 2026-10-02
+
+### Added
+- **Software updates - the full flow.** The Updates tab now drives your car's software update end to
+  end, like the official app: it shows the available version and release notes, follows the car's
+  **download progress live** (with a percentage), and lets you **Install now** or **Schedule install**
+  for a later time. While an install is scheduled you can still install it now or pick a different time.
+- **Live update status.** Once an update is downloading or installing, the tab tracks the whole
+  lifecycle on its own - Downloading, Ready to install, Vehicle self-check, Installing, Finalizing,
+  Installed - updating in real time from the car's own status pushes, with no need to tap Refresh.
+
+### Changed
+- The Updates tab loads the current update status automatically when you open it.
+
+### Developer tooling
+- Cross-platform `verify` Gradle tasks (build + test + lint), a baselined Android Lint gate, an
+  `.editorconfig`, and a toolchain preflight that fails early with an actionable message on a wrong
+  setup. Thanks to Erik Günther. (Lint runs under `verify`/`check`, not the normal app build.)
+
 ## [0.1.9] - 2026-10-01
 
 ### Added
