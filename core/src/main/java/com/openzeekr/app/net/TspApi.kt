@@ -191,6 +191,10 @@ interface TspApi {
     @POST
     suspend fun otaInstallation(@Url url: String, @Body body: com.openzeekr.app.net.model.OtaInstallRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
 
+    // POST {azureHost}/overseas-app/ota/os/cancel - abort the assignment (dev tool to clear a stuck install).
+    @POST
+    suspend fun otaCancel(@Url url: String, @Body body: com.openzeekr.app.net.model.OtaCancelRequest): BaseResponse<kotlinx.serialization.json.JsonElement>
+
     @PUT
     suspend fun inboxMarkRead(@Url url: String): BaseResponse<kotlinx.serialization.json.JsonElement>
 

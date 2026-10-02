@@ -505,6 +505,21 @@ data class OtaInstallRequest(
 )
 
 /**
+ * Body for ota/os/cancel - aborts the assignment. Same fields as install minus operation/scheduledTime
+ * (stock OTACancelInstallRequest). Used to clear a STUCK assignment (e.g. the car finished but the cloud
+ * is frozen mid-install with synchronizeStatus=NOK, blocking remote control). Cancels - does not finalize.
+ */
+@Serializable
+data class OtaCancelRequest(
+    val availableAssignmentId: Long,
+    val installationOrderId: String,
+    val vehicleCurrentVersion: String,
+    val vehicleModelNo: String,
+    val vehicleTargetVersion: String,
+    val vehicleVin: String,
+)
+
+/**
  * Parsed OTA check result for the UI. Beyond the version check, the same versionV2 `data` object carries
  * the LIVE assignment state (`newStatus`) and download `progress`, so a re-check doubles as a progress
  * poll - the car does the actual download, we just read its state. [newStatus] cycles

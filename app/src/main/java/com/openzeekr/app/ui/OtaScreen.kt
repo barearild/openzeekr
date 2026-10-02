@@ -86,6 +86,8 @@ fun OtaScreen(deps: Deps, modifier: Modifier = Modifier) {
     var checking by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf(false) }
     var installing by remember { mutableStateOf(false) }
+    var cancelling by remember { mutableStateOf(false) }
+    var showCancelConfirm by remember { mutableStateOf(false) }
     var disclaimerAccepted by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<OtaStatus?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -136,6 +138,26 @@ fun OtaScreen(deps: Deps, modifier: Modifier = Modifier) {
             },
             cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH),
         ).apply { datePicker.minDate = System.currentTimeMillis() }.show()
+    }
+
+    // DEV: abort the assignment to clear a STUCK install (car done but cloud frozen mid-install,
+    // synchronizeStatus=NOK, blocking remote control). Aborts - does not finalize the update.
+    fun doCancel() {
+        cancelling = true; error = null
+        scope.launch {
+            when (val r = deps.ota.cancel()) {
+                is CallResult.Ok -> { status = r.value; error = null }
+                is CallResult.Err -> error = "Couldn't cancel the update (${r.message})."
+            }
+            cancelling = false
+            // Poll briefly - the cloud takes a moment to drop out of the INSTALLATION-* state after a cancel.
+            if (error == null) repeat(POST_ACTION_POLLS) {
+                delay(POST_ACTION_POLL_MS)
+                refresh()
+                val s = status ?: return@repeat
+                if (!s.installActioned && !s.installing) return@launch
+            }
+        }
     }
 
     // Load the current status when the tab opens - the update card should populate on its own, no tap needed.
@@ -286,6 +308,38 @@ fun OtaScreen(deps: Deps, modifier: Modifier = Modifier) {
                     }
                 }
             }
+            // DEV-only: cancel/abort the assignment - recovery for a stuck install. Shown only in dev mode
+            // and only when there's an assignment to cancel. Destructive, so it confirms first.
+            if (cfg.devMode && status?.availableAssignmentId != null) {
+                androidx.compose.material3.TextButton(
+                    onClick = { showCancelConfirm = true },
+                    enabled = !busy && !cancelling,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (cancelling) "Cancelling…" else "Cancel update (dev)", color = Brand.crit, fontSize = 13.sp) }
+            }
         }
+    }
+
+    if (showCancelConfirm) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showCancelConfirm = false },
+            title = { Text("Cancel update?") },
+            text = {
+                Text(
+                    "Developer tool. This ABORTS the update assignment on the cloud to clear a stuck install - " +
+                        "it does not finish the update. Only use it if the car has actually completed the update " +
+                        "but the app is frozen (e.g. stuck at a percentage) and remote control is blocked.",
+                    fontSize = 13.sp,
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { showCancelConfirm = false; doCancel() }) {
+                    Text("Cancel update", color = Brand.crit)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showCancelConfirm = false }) { Text("Keep") }
+            },
+        )
     }
 }

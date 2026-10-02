@@ -429,6 +429,49 @@ class OtaRepository(private val store: ConfigStore, private val client: ApiClien
                 check()   // re-read so the UI reflects INSTALLATION-CONSENT-* immediately
             }
         }
+
+    /**
+     * Cancel/abort the current assignment (ota/os/cancel). Dev tool to clear a STUCK install: when the car
+     * has finished but the cloud is frozen mid-install (synchronizeStatus=NOK, newStatus INSTALLATION-*),
+     * remote control stays blocked. Cancel aborts the assignment so the cloud can re-sync. Does NOT finalize
+     * the update. Returns the fresh status after. Reads versionV2 first for the assignment id / order / versions.
+     */
+    suspend fun cancel(): CallResult<com.openzeekr.app.net.model.OtaStatus> = withContext(Dispatchers.IO) {
+        guarded {
+            val cfg = store.current()
+            val vin = cfg.vin
+            require(vin.isNotBlank()) { "No active car selected" }
+            val all = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data)
+            val info = all.firstOrNull { it.vin == vin } ?: all.firstOrNull()
+            val seriesCode = info?.appModelCode.orEmpty()
+            val base = cfg.azureHost.trimEnd('/')
+            val versionUrl = "$base/overseas-app/ota/os/versionV2"
+            suspend fun check() = com.openzeekr.app.net.model.Ota.parse(
+                client.api.otaVersion(
+                    versionUrl,
+                    com.openzeekr.app.net.model.OtaVersionRequest(
+                        modelCode = info?.appYearCode.orEmpty(),
+                        seriesCode = seriesCode, vehicleModelNo = seriesCode, vehicleVin = vin,
+                    ),
+                ).data
+            )
+            val st = check()
+            val assignId = requireNotNull(st.availableAssignmentId) { "No assignment to cancel" }
+            val orderId = requireNotNull(st.installationOrderId) { "No installation order" }
+            client.api.otaCancel(
+                "$base/overseas-app/ota/os/cancel",
+                com.openzeekr.app.net.model.OtaCancelRequest(
+                    availableAssignmentId = assignId,
+                    installationOrderId = orderId,
+                    vehicleCurrentVersion = st.currentVersion.orEmpty(),
+                    vehicleModelNo = seriesCode,
+                    vehicleTargetVersion = st.targetVersion.orEmpty(),
+                    vehicleVin = vin,
+                ),
+            )
+            check()
+        }
+    }
 }
 
 /**
