@@ -14,4 +14,10 @@ object SessionSignal {
      * Reset it to false once the notice has been shown.
      */
     val loggedInElsewhere = MutableStateFlow(false)
+
+    /**
+     * Flips true when the TSP gateway reports `079012 "Token expired"`. [KickoutInterceptor] clears
+     * the expired accessToken (preserving the BLE digital key) so the user can sign in again in Settings.
+     */
+    val tokenExpired = MutableStateFlow(false)
 }

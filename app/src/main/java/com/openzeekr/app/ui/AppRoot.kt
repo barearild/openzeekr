@@ -107,7 +107,7 @@ fun AppRoot(deps: Deps) {
         return
     }
 
-    AppBootstrap(deps, serviceEnabled = loggedIn && provisioned)
+    AppBootstrap(deps, serviceEnabled = provisioned)
 
     // Account taken over on another device (TSP 079021): the interceptor already cleared the
     // token (so we're now on the signed-out flow) — just explain why. Mirrors the stock app,
@@ -117,6 +117,14 @@ fun AppRoot(deps: Deps) {
         if (loggedInElsewhere) {
             snackbar("Signed out — your account was opened on another device (e.g. the Zeekr app). Sign in again to reconnect.")
             com.openzeekr.app.net.SessionSignal.loggedInElsewhere.value = false
+        }
+    }
+
+    val tokenExpired by com.openzeekr.app.net.SessionSignal.tokenExpired.collectAsState()
+    LaunchedEffect(tokenExpired) {
+        if (tokenExpired) {
+            snackbar("Cloud session expired — sign in again in Settings to sync vehicle status (your digital key is kept).")
+            com.openzeekr.app.net.SessionSignal.tokenExpired.value = false
         }
     }
 

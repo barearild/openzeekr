@@ -450,6 +450,15 @@ class AccountLogin(private val store: ConfigStore) {
             ?: false
         val code = root["code"]?.jsonPrimitive?.contentOrNull
         if (!success && code != "000000") {
+            if (code == "079021") {
+                Logx.w("session", "079021 account logged in elsewhere — signing out")
+                if (store.current().accessToken.isNotBlank()) store.update { it.copy(accessToken = "") }
+                SessionSignal.loggedInElsewhere.value = true
+            } else if (code == "079012") {
+                Logx.w("session", "079012 token expired — clearing accessToken to prompt re-login")
+                if (store.current().accessToken.isNotBlank()) store.update { it.copy(accessToken = "") }
+                SessionSignal.tokenExpired.value = true
+            }
             val msg = root["msg"]?.jsonPrimitive?.contentOrNull ?: root["message"]?.jsonPrimitive?.contentOrNull
             val ep = url.substringAfterLast('/').substringBefore('?')
             val hint = friendlyLoginError(ep, code, msg)
