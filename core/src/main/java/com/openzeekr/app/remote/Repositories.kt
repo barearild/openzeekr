@@ -332,6 +332,7 @@ class OtaRepository(private val store: ConfigStore, private val client: ApiClien
             // The versionV2 body wants the raw platform codes (modelCode=year, seriesCode/vehicleModelNo=
             // appModelCode); pull them from the vehicle-list for the active VIN.
             val all = VehicleGarage.parseAll(client.api.vehicleList(needSharedCar = true).data)
+            require(cfg.overseasReady) { "Software-update check needs overseas-app keys — add them in Settings › App secrets" }
             val info = all.firstOrNull { it.vin == vin } ?: all.firstOrNull()
             val seriesCode = info?.appModelCode.orEmpty()
             val url = "${cfg.azureHost.trimEnd('/')}/overseas-app/ota/os/versionV2"

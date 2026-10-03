@@ -163,6 +163,14 @@ fun SettingsScreen(deps: Deps, modifier: Modifier = Modifier) {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Check for shared cars") }
                 OutlinedButton(
+                    onClick = {
+                        store.update { it.copy(accessToken = "", azureToken = "") }
+                        cfg = store.current()
+                        status = "Session cleared — enter your password to sign in again (digital key is kept)."
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Re-login cloud (keep digital key)") }
+                OutlinedButton(
                     onClick = { confirmSignOut = true },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Sign out") }

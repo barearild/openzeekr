@@ -27,7 +27,6 @@ class KickoutInterceptor(private val store: ConfigStore) : Interceptor {
                 Logx.w("session", "079021 account logged in elsewhere — signing out")
                 if (store.current().accessToken.isNotBlank()) store.update { it.copy(accessToken = "") }
                 SessionSignal.loggedInElsewhere.value = true
-            } else if (body?.contains("079012") == true) {
                 Logx.w("session", "079012 token expired — clearing session, prompting re-login")
                 if (store.current().accessToken.isNotBlank()) store.update { it.copy(accessToken = "") }
                 SessionSignal.sessionExpired.value = true
