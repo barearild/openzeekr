@@ -174,7 +174,12 @@ class RpaController(
 
     fun stop() {
         stopHeartbeat(); stopRssiStream(); stopReqModePoll(); gesture = 0
-        oneShot(RpaReq.CMD_RPA_STOP, Phase.READY)
+        _state.value = _state.value.copy(phase = Phase.IDLE, message = "Stopped")
+        if (session.isEstablished) {
+            scope.launch {
+                runCatching { session.sendFrame(DkOpcodes.CMD_A2V_RPA_REQ, block(RpaReq.CMD_RPA_STOP)) }
+            }
+        }
     }
 
     /** Set park-out direction then start the park-out maneuver. */
